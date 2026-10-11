@@ -195,7 +195,10 @@ export function TaskList({
   // their own horizontal padding, and the grid adds a gap between tracks. Both
   // are subtracted here, so `avail` is exactly the width the columns may occupy
   // and the last one cannot be pushed past the right edge.
-  const ROW_PADDING = 32; // 16px each side, from .listhead and .task
+  // Two layers of horizontal inset: the shared one on .listwrap and each row's
+  // own. Both are 16px a side, and `clientWidth` includes the first, so the
+  // total to subtract is 32px a side.
+  const ROW_PADDING = 64;
   const COL_GAPS = 6 * 6; // one gap per column boundary
   useEffect(() => {
     const el = wrapRef.current;
@@ -249,8 +252,6 @@ export function TaskList({
   // Every track is an explicit pixel value: a flexible track would fight the
   // proportional shrink above and let the row outgrow the container.
   const template = widths.map((w) => `${w.toFixed(2)}px`).join(" ");
-
-
 
 
   const sorted = useMemo(() => {
@@ -347,6 +348,7 @@ export function TaskList({
       style={{ "--task-cols": template } as React.CSSProperties}
     >
       {header()}
+
 
 
 

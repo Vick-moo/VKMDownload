@@ -754,7 +754,12 @@ input:focus {
 
 /* The sortable header stays put; only the list below it scrolls.
    No horizontal scrolling: the columns are laid out to fit the container, so
-   there is never anything to scroll to sideways. */
+   there is never anything to scroll to sideways.
+
+   The horizontal padding lives here, on the shared parent, rather than on the
+   header and the list separately. Put on both, the rows were indented twice —
+   once by the list and once by the row — while the header was indented once, so
+   every header label sat about 18px to the left of the column it described. */
 .listwrap {
   position: relative;
   flex: 1;
@@ -762,6 +767,7 @@ input:focus {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  padding: 0 var(--space-4);
 }
 
 /* ------------------------------------------------------------- settings --- */
@@ -817,7 +823,10 @@ input:focus {
 
 .list {
   flex: 1;
-  padding: var(--space-3) var(--space-4) var(--space-4);
+  /* No horizontal padding here: the rows already carry their own, and the
+     shared inset lives on .listwrap. A third layer indented the rows past the
+     header they are supposed to line up with. */
+  padding: var(--space-3) 0 var(--space-4);
   overflow-y: auto;
   display: flex;
   flex-direction: column;
@@ -893,6 +902,10 @@ input:focus {
   position: relative;
   flex: 0 0 auto;
   cursor: col-resize;
+  /* pointer-events is inherited, so the container's `none` would otherwise be
+     inherited here too: the divider would be drawn but every click would pass
+     straight through it. This line is what makes the handle grabbable. */
+  pointer-events: auto;
   /* The visible handle is a hairline, but the grabbable area is widened with a
      pseudo-element so the drag does not require pixel accuracy. */
   touch-action: none;
