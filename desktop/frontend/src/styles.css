@@ -1,0 +1,662 @@
+/*
+ * VDownload design tokens and base styles.
+ *
+ * Every colour, space and radius used by the app is defined here once. See
+ * design/DESIGN.md for the reasoning; components must reference these
+ * variables rather than hard-coding values, otherwise the same role drifts
+ * into three slightly different greys and the UI reads as amateurish.
+ */
+
+:root {
+  /* Surfaces, darkest to lightest. */
+  --bg-base: #0d0f14;
+  --bg-surface: #14171f;
+  --bg-raised: #1a1e28;
+  --bg-hover: #222733;
+  --border: #262c3a;
+  --border-strong: #333b4d;
+
+  /* Text. Contrast ratios are checked in DESIGN.md. */
+  --text-primary: #e8ecf4;
+  --text-secondary: #9aa4b8;
+  --text-muted: #626c80;
+  --text-inverse: #0d0f14;
+
+  /* Accent and status. */
+  --accent: #4c8dff;
+  --accent-hover: #6ba0ff;
+  --accent-subtle: #1e2a44;
+  --success: #3ecf8e;
+  --warning: #f0b429;
+  --danger: #f2555a;
+
+  /* Spacing scale. Only these values may be used. */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-12: 48px;
+
+  /* Radii. */
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-full: 999px;
+
+  /* Motion. */
+  --ease: cubic-bezier(0.2, 0, 0, 1);
+  --dur-fast: 120ms;
+  --dur-base: 180ms;
+  --dur-slow: 200ms;
+
+  /* Layout constants. */
+  --topbar-h: 56px;
+  --sidebar-w: 200px;
+  --sidebar-w-collapsed: 48px;
+  --task-row-h: 72px;
+
+  --font-sans: -apple-system, "Segoe UI Variable Text", "Segoe UI", system-ui,
+    sans-serif;
+  --font-mono: "Cascadia Mono", Consolas, ui-monospace, monospace;
+
+  --shadow-raised: 0 4px 16px rgba(0, 0, 0, 0.45);
+  --shadow-modal: 0 16px 48px rgba(0, 0, 0, 0.6);
+
+  color-scheme: dark;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg-base);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  line-height: 18px;
+  /* The window itself must never scroll; only the task list does. */
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* Numbers that change while the user watches must not change width. */
+.num {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------------------------------------------------------------- focus --- */
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* Never remove the focus ring; keyboard users lose their place. */
+:focus:not(:focus-visible) {
+  outline: none;
+}
+
+/* --------------------------------------------------------------- scroll --- */
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border: 2px solid var(--bg-base);
+  border-radius: var(--radius-full);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-muted);
+}
+
+/* ------------------------------------------------------------- controls --- */
+
+button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: none;
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+input,
+textarea,
+select {
+  font: inherit;
+  color: var(--text-primary);
+  background: var(--bg-base);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: var(--space-2) var(--space-3);
+  transition: border-color var(--dur-fast) var(--ease);
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: var(--text-muted);
+}
+
+input:hover:not(:disabled) {
+  border-color: var(--text-muted);
+}
+
+input:focus {
+  border-color: var(--accent);
+}
+
+/* --------------------------------------------------------------- button --- */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  height: 32px;
+  padding: 0 var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-raised);
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
+  transition: background var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease);
+}
+
+.btn:hover:not(:disabled) {
+  background: var(--bg-hover);
+  border-color: var(--border-strong);
+}
+
+.btn:active:not(:disabled) {
+  background: var(--bg-surface);
+}
+
+.btn--primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.btn--primary:hover:not(:disabled) {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+}
+
+.btn--ghost {
+  background: transparent;
+  border-color: transparent;
+}
+
+.btn--ghost:hover:not(:disabled) {
+  background: var(--bg-hover);
+  border-color: transparent;
+}
+
+.btn--danger {
+  color: var(--danger);
+}
+
+.btn--danger:hover:not(:disabled) {
+  background: rgba(242, 85, 90, 0.12);
+  border-color: rgba(242, 85, 90, 0.4);
+}
+
+/* Square icon-only button, always paired with an aria-label. */
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  transition: background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+
+.icon-btn:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+/* --------------------------------------------------------------- badge ----- */
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  height: 20px;
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-full);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 14px;
+  white-space: nowrap;
+}
+
+.badge--active {
+  background: var(--accent-subtle);
+  color: var(--accent-hover);
+}
+
+.badge--success {
+  background: rgba(62, 207, 142, 0.14);
+  color: var(--success);
+}
+
+.badge--warning {
+  background: rgba(240, 180, 41, 0.14);
+  color: var(--warning);
+}
+
+.badge--danger {
+  background: rgba(242, 85, 90, 0.14);
+  color: var(--danger);
+}
+
+.badge--muted {
+  background: var(--bg-hover);
+  color: var(--text-secondary);
+}
+
+/* ------------------------------------------------------------ progress ---- */
+
+.progress {
+  position: relative;
+  display: flex;
+  gap: 1px;
+  height: 6px;
+  border-radius: var(--radius-full);
+  background: #1e2330;
+  overflow: hidden;
+}
+
+.progress__segment {
+  height: 100%;
+  background: var(--accent);
+  /* Width is data, not decoration: linear, and never a spring. */
+  transition: width var(--dur-slow) linear;
+}
+
+.progress__segment:first-child {
+  border-top-left-radius: var(--radius-full);
+  border-bottom-left-radius: var(--radius-full);
+}
+
+.progress__segment:last-child {
+  border-top-right-radius: var(--radius-full);
+  border-bottom-right-radius: var(--radius-full);
+}
+
+.progress--complete .progress__segment {
+  background: var(--success);
+}
+
+.progress--paused .progress__segment {
+  background: var(--warning);
+  opacity: 0.6;
+}
+
+.progress--failed .progress__segment {
+  background: var(--danger);
+}
+
+/* A moving highlight while bytes are arriving. It stops when the transfer
+   stalls so it never becomes constant background noise. */
+.progress--live::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(255, 255, 255, 0.28) 50%,
+    transparent 100%
+  );
+  animation: progress-sheen 1.2s linear infinite;
+  pointer-events: none;
+}
+
+@keyframes progress-sheen {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(100%);
+  }
+}
+
+/* --------------------------------------------------------------- layout --- */
+
+.shell {
+  display: grid;
+  grid-template-columns: var(--sidebar-w) 1fr;
+  grid-template-rows: var(--topbar-h) 1fr;
+  grid-template-areas:
+    "topbar topbar"
+    "sidebar main";
+  height: 100%;
+}
+
+.shell--collapsed {
+  grid-template-columns: var(--sidebar-w-collapsed) 1fr;
+}
+
+.topbar {
+  grid-area: topbar;
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  padding: 0 var(--space-4);
+  background: var(--bg-surface);
+  border-bottom: 1px solid var(--border);
+  /* The whole bar is a drag handle except for the controls on it. */
+  --wails-draggable: drag;
+}
+
+.topbar button,
+.topbar input,
+.topbar a {
+  --wails-draggable: no-drag;
+}
+
+.topbar__brand {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+}
+
+.topbar__logo {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border-radius: var(--radius-sm);
+  background: var(--accent);
+  color: #fff;
+}
+
+.topbar__spacer {
+  flex: 1;
+  min-width: var(--space-2);
+}
+
+.sidebar {
+  grid-area: sidebar;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-3) var(--space-2);
+  background: var(--bg-surface);
+  border-right: 1px solid var(--border);
+  overflow: hidden;
+}
+
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  height: 34px;
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 500;
+  transition: background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+
+.nav-item:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.nav-item--active {
+  background: var(--accent-subtle);
+  color: var(--accent-hover);
+}
+
+.nav-item__icon {
+  display: grid;
+  place-items: center;
+  flex: 0 0 20px;
+}
+
+.nav-item__label {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nav-item__count {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.nav-item--active .nav-item__count {
+  color: var(--accent-hover);
+}
+
+.sidebar__spacer {
+  flex: 1;
+}
+
+/* Live totals sit at the foot of the sidebar rather than in the top bar: the
+   webview viewport is ~14px narrower than the window, and a right-aligned
+   control cluster was being pushed past the visible edge. */
+.sidebar__stats {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-2) var(--space-1);
+  border-top: 1px solid var(--border);
+}
+
+.sidebar__stat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.sidebar__stat-label {
+  font-size: 11px;
+  line-height: 14px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.sidebar__stat-value {
+  font-size: 16px;
+  line-height: 20px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.main {
+  grid-area: main;
+  display: flex;
+  flex-direction: column;
+  min-width: 0; /* lets long file names ellipsise instead of stretching */
+  overflow: hidden;
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--border);
+}
+
+.toolbar__spacer {
+  flex: 1;
+}
+
+.list {
+  flex: 1;
+  padding: var(--space-3) var(--space-4) var(--space-4);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+/* ------------------------------------------------------------ empty ----- */
+
+.empty {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-3);
+  padding: var(--space-8);
+  text-align: center;
+  color: var(--text-secondary);
+}
+
+.empty__icon {
+  color: var(--text-muted);
+}
+
+.empty__title {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.empty__hint {
+  max-width: 380px;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--text-muted);
+}
+
+.empty__actions {
+  margin-top: var(--space-2);
+}
+
+/* ----------------------------------------------------------------- task --- */
+
+.task {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  grid-template-rows: auto auto auto;
+  gap: var(--space-2) var(--space-3);
+  min-height: var(--task-row-h);
+  padding: var(--space-3) var(--space-4);
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  transition: border-color var(--dur-fast) var(--ease),
+    background var(--dur-fast) var(--ease);
+}
+
+.task:hover {
+  border-color: var(--border-strong);
+}
+
+.task--selected {
+  border-color: var(--accent);
+  background: var(--accent-subtle);
+}
+
+.task--failed {
+  border-left: 3px solid var(--danger);
+}
+
+.task__head {
+  grid-column: 1;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.task__name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.task__progress {
+  grid-column: 1;
+}
+
+.task__meta {
+  grid-column: 1;
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.task__meta-sep {
+  color: var(--text-muted);
+}
+
+.task__actions {
+  grid-column: 2;
+  grid-row: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.task__error {
+  grid-column: 1;
+  font-size: 12px;
+  color: var(--danger);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+
+  .progress--live::after {
+    display: none;
+  }
+}

@@ -17,6 +17,8 @@
 /desktop/build/bin/
 /desktop/frontend/node_modules/
 /desktop/frontend/dist/
+# Wails caches the package.json hash here to decide whether to reinstall deps.
+/desktop/frontend/package.json.md5
 wailsjs/
 
 # Editors / OS
