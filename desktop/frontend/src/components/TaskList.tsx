@@ -63,6 +63,38 @@ const DEFAULT_WIDTHS = [280, 76, 104, 96, 120, 140];
  */
 const MIN_WIDTHS = [140, 62, 84, 78, 96, 112];
 
+/** Where the column widths are remembered between sessions. */
+const WIDTHS_KEY = "vdownload.column-widths";
+
+/**
+ * Reads the column widths saved by a previous session, falling back to the
+ * defaults.
+ *
+ * The stored shape is validated rather than trusted: an entry written by an
+ * older build with a different number of columns would otherwise spread the
+ * layout into nonsense.
+ */
+function loadWidths(): number[] {
+  try {
+    const raw = localStorage.getItem(WIDTHS_KEY);
+    if (raw) {
+      const parsed: unknown = JSON.parse(raw);
+      if (
+        Array.isArray(parsed) &&
+        parsed.length === DEFAULT_WIDTHS.length &&
+        parsed.every(
+          (n) => typeof n === "number" && Number.isFinite(n) && n > 0,
+        )
+      ) {
+        return parsed as number[];
+      }
+    }
+  } catch {
+    // A malformed entry is not worth failing the list over.
+  }
+  return DEFAULT_WIDTHS;
+}
+
 /** Numeric value of a task for a sortable column. */
 function sortValue(t: TaskView, key: SortKey): number {
   switch (key) {
@@ -120,78 +152,60 @@ export function TaskList({
 }: Props): JSX.Element {
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
   // Preferred widths, in the same order as COLUMNS plus the action track.
-  const [prefs, setPrefs] = useState<number[]>(DEFAULT_WIDTHS);
+  // Restored from the last session so a carefully arranged set of columns
+  // survives a restart.
+  const [prefs, setPrefs] = useState<number[]>(loadWidths);
   const [avail, setAvail] = useState(0);
-  /** Column currently being dragged, or -1. It keeps its width during layout. */
-  const [priority, setPriority] = useState(-1);
   const wrapRef = useRef<HTMLDivElement>(null);
-  // Kept in refs so the drag handler reads current values without being
+  // Kept in a ref so the drag handler reads the current value without being
   // re-created on every render.
   const prefsRef = useRef(prefs);
-  const availRef = useRef(avail);
   prefsRef.current = prefs;
-  availRef.current = avail;
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(WIDTHS_KEY, JSON.stringify(prefs));
+    } catch {
+      // Storage can be unavailable; the widths simply will not persist.
+    }
+  }, [prefs]);
 
   /**
    * Distributes the available width over the columns' preferred widths.
    *
-   * `priority` is the column the user is dragging: it keeps the width asked for,
-   * and the others absorb the difference in proportion to their preferences.
-   * Without that the dragged column gives back exactly what it gained — the
-   * shrink below takes from every column, including the one being resized — and
-   * the drag appears to do nothing at all.
-   *
    * The total never exceeds the container, which is what keeps the list free of
    * a horizontal scrollbar.
    */
-  function layoutWidths(
-    preference: number[],
-    available: number,
-    priority = -1,
-  ): number[] {
+  /**
+   * Returns the widths to render, in column order.
+   *
+   * `prefs` is kept balanced against the available width, so in the steady state
+   * this returns it unchanged. The two branches below are the exceptions: the
+   * window was resized past what the preferences fit, or a drag has pushed the
+   * total over the container.
+   *
+   * Balancing up front is what stops a column jumping when a divider is merely
+   * clicked, or when a drag is released. There is no surplus to reallocate at
+   * those moments because there is no surplus — and reallocating one was what
+   * made the whole row appear to snap back to a default.
+   */
+  function layoutWidths(preference: number[], available: number): number[] {
     const floor = MIN_WIDTHS.reduce((a, b) => a + b, 0);
     const space = Math.max(available, floor);
-    const total = preference.reduce((a, b) => a + b, 0);
     const out = [...preference];
+    const total = out.reduce((a, b) => a + b, 0);
 
-    if (total <= space) {
-      if (priority >= 0) {
-        // Mid-drag: use exactly the width asked for and leave the slack, so the
-        // edge tracks the cursor instead of jumping to absorb the surplus.
-        return out;
-      }
-      // Otherwise give any surplus to the name column; it carries the most text.
+    if (total === space) return out;
+
+    if (total < space) {
+      // Room to spare: the name column takes it, since it carries the most text
+      // and shrinking it is the last thing anyone wants.
       out[0] += space - total;
       return out;
     }
 
-    // Too wide: something has to give.
-    let need = total - space;
-
-    if (priority >= 0) {
-      // Only the neighbouring columns absorb the change, nearest first — the
-      // behaviour of a file manager's column divider, where dragging one edge
-      // leaves every other edge exactly where it was. Spreading it over all the
-      // columns made the opposite divider slide around as well.
-      for (let i = priority + 1; i < out.length && need > 0; i += 1) {
-        const room = out[i] - MIN_WIDTHS[i];
-        const take = Math.min(room, need);
-        out[i] -= take;
-        need -= take;
-      }
-      for (let i = priority - 1; i >= 0 && need > 0; i -= 1) {
-        const room = out[i] - MIN_WIDTHS[i];
-        const take = Math.min(room, need);
-        out[i] -= take;
-        need -= take;
-      }
-      if (need > 0) {
-        // Every other column is at its minimum, so the dragged one gives way.
-        out[priority] = Math.max(MIN_WIDTHS[priority], out[priority] - need);
-      }
-      return out;
-    }
-
+    // Too wide: everything shrinks in proportion, but never below its minimum.
+    const need = total - space;
     const shrinkable = out.reduce((sum, w, i) => sum + (w - MIN_WIDTHS[i]), 0);
     if (shrinkable <= 0) return [...MIN_WIDTHS];
     const share = Math.min(need, shrinkable);
@@ -201,6 +215,22 @@ export function TaskList({
     }
     return out;
   }
+
+  // Keep the preferences balanced against the space available, so rendering is a
+  // no-op in the steady state. The name column absorbs the difference, for the
+  // same reason it takes the surplus above.
+  useEffect(() => {
+    if (avail <= 0) return;
+    setPrefs((prev) => {
+      const total = prev.reduce((a, b) => a + b, 0);
+      const diff = avail - total;
+      if (diff === 0) return prev;
+      const next = [...prev];
+      next[0] += diff;
+      if (next[0] < MIN_WIDTHS[0]) next[0] = MIN_WIDTHS[0];
+      return next;
+    });
+  }, [avail]);
 
   // Measure the real content box; guessing it from window.innerWidth ignores
   // the sidebar, the scrollbar and the window frame.
@@ -249,22 +279,50 @@ export function TaskList({
     e.stopPropagation();
     const startX = e.clientX;
     const startPref = prefsRef.current[index];
-
-    // Mark which column is being resized so the layout keeps its width and
-    // takes the difference from the others.
-    setPriority(index);
+    let moved = false;
 
     const onMove = (ev: MouseEvent) => {
-      // Driven by the pointer position rather than an accumulated delta: the
-      // column edge follows the cursor exactly, which is what makes the drag
-      // feel predictable.
+      const delta = ev.clientX - startX;
+
+      // A click is not a drag. Without this the layout changed on mousedown and
+      // changed back on mouseup, which read as every column snapping to a
+      // default when all the user did was click the divider.
+      if (!moved) {
+        if (Math.abs(delta) < 3) return;
+        moved = true;
+      }
+
+      // Driven by the pointer position rather than an accumulated delta, so the
+      // edge follows the cursor exactly.
       const wanted = Math.max(
         MIN_WIDTHS[index],
-        Math.min(560, startPref + (ev.clientX - startX)),
+        Math.min(560, startPref + delta),
       );
+
       setPrefs(() => {
         const next = [...prefsRef.current];
+        let change = wanted - next[index];
+        if (change === 0) return next;
         next[index] = wanted;
+
+        // The neighbours take up the difference, nearest first, so the total —
+        // and therefore every other divider — stays exactly where it was.
+        // Growing borrows from them; shrinking hands the width back.
+        for (let step = 1; step < next.length && change !== 0; step += 1) {
+          for (const i of [index + step, index - step]) {
+            if (i < 0 || i >= next.length || change === 0) continue;
+            if (change > 0) {
+              const room = next[i] - MIN_WIDTHS[i];
+              const take = Math.min(room, change);
+              next[i] -= take;
+              change -= take;
+            } else {
+              // `change` is negative, so subtracting it adds.
+              next[i] -= change;
+              change = 0;
+            }
+          }
+        }
         return next;
       });
     };
@@ -278,10 +336,7 @@ export function TaskList({
     window.addEventListener("mouseup", onUp);
   }
 
-  const widths = useMemo(
-    () => layoutWidths(prefs, avail, priority),
-    [prefs, avail, priority],
-  );
+  const widths = useMemo(() => layoutWidths(prefs, avail), [prefs, avail]);
 
   // Every track is an explicit pixel value: a flexible track would fight the
   // proportional shrink above and let the row outgrow the container.
@@ -403,10 +458,7 @@ export function TaskList({
             className="colresizer"
             style={{ left: handleLeft(i) }}
             onMouseDown={(e) => startColResize(i, e)}
-            onDoubleClick={() => {
-              setPrefs(DEFAULT_WIDTHS);
-              setPriority(-1);
-            }}
+            onDoubleClick={() => setPrefs(DEFAULT_WIDTHS)}
             title="拖动调整列宽，双击复位"
           />
         ))}

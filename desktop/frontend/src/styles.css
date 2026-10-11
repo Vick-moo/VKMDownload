@@ -396,15 +396,22 @@ input:focus {
   margin-right: auto;
 }
 
+/* The artwork is the mark, so the tile that used to sit behind it is gone: the
+   logo is itself blue, and a blue mark on a blue tile is invisible. */
 .sidebar__logo {
   display: grid;
   place-items: center;
-  flex: 0 0 22px;
+  flex: 0 0 24px;
+  width: 24px;
+  height: 24px;
+  border-radius: var(--radius-sm);
+}
+
+.sidebar__logo img {
+  display: block;
   width: 22px;
   height: 22px;
-  border-radius: var(--radius-sm);
-  background: var(--accent);
-  color: #fff;
+  object-fit: contain;
 }
 
 /* In the rail the logo is the only thing left, so it becomes the control that
@@ -418,8 +425,13 @@ input:focus {
 }
 
 .sidebar__logo--button:hover {
-  background: var(--accent-hover);
-  transform: scale(1.08);
+  background: var(--bg-hover);
+}
+
+/* The hover lift is folded into the centring transform: setting `transform`
+   alone would drop the translateX that centres the button and it would jump. */
+.sidebar--collapsed .sidebar__logo--button:hover {
+  transform: translate(-50%, -50%) scale(1.1);
 }
 
 .sidebar__logo--button:focus-visible {
@@ -480,20 +492,22 @@ input:focus {
   --wails-draggable: no-drag;
 }
 
-/* In the rail the logo is the only thing in the row, and it has to sit dead
-   centre. Three things are pinned down so nothing about the surrounding boxes
-   can shift it: the row fills the rail's content width, it centres its content,
-   and the button carries symmetric auto margins as well. Flex centring alone
-   left it a few pixels off in a 48px rail. */
+/* In the rail the logo is the only thing in the row and has to sit dead centre.
+   Every flex and grid centring attempt left it a few pixels off, because each
+   one centred some box whose computed width was not quite what the arithmetic
+   assumed. Pinning it to the row's midpoint is exact and depends on nothing:
+   the row fills the rail, and the button is placed at 50% and pulled back by
+   half its own width. */
 .sidebar--collapsed .sidebar__head {
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  position: relative;
   width: 100%;
 }
 
 .sidebar--collapsed .sidebar__logo--button {
-  margin: 0 auto;
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
 }
 
 .sidebar__toggle {
@@ -942,7 +956,14 @@ input:focus {
   grid-template-columns: var(--task-cols);
   gap: var(--space-1);
   align-items: center;
-  padding: var(--space-2) var(--space-4);
+  /* The header's background has to reach the panel edges. The list's horizontal
+     inset lives on .listwrap, whose padding area paints nothing, so a header
+     inset by that same amount leaves a strip of empty space down each side.
+     Pulling the row out by the inset and adding it back as padding lets the
+     background span the full width while the columns stay exactly where they
+     were — the grid's content box is unchanged. */
+  margin: 0 calc(var(--space-4) * -1);
+  padding: var(--space-2) calc(var(--space-4) * 2);
   border-bottom: 1px solid var(--border);
   background: var(--bg-surface);
   /* The header stays put while the list scrolls underneath it. */

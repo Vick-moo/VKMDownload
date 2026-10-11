@@ -1,5 +1,6 @@
 import { useRef, useState } from "react";
 import type { JSX } from "react";
+import logoMark from "../assets/logo.png";
 import { formatSpeed } from "../format";
 import { extFilter } from "../types";
 import type { Filter, StatusFilter, TaskView } from "../types";
@@ -137,13 +138,13 @@ export function Sidebar({
             title="展开侧栏"
             onClick={onToggleCollapsed}
           >
-            <IconDownload size={14} />
+            <img src={logoMark} alt="" />
           </button>
         ) : (
           <>
             <span className="sidebar__brand">
               <span className="sidebar__logo">
-                <IconDownload size={14} />
+                <img src={logoMark} alt="" />
               </span>
               <span className="sidebar__brand-name">VDownload</span>
             </span>
