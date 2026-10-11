@@ -13,6 +13,9 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
+// appVersion is what Version() reports and the browser extension displays.
+const appVersion = "0.2.0"
+
 // App is the object exposed to the front-end. Every exported method becomes a
 // callable binding, so internal state is kept unexported.
 type App struct {
@@ -33,6 +36,9 @@ type App struct {
 	lastClip    string
 	lastClipHit string
 	clipRunning bool
+
+	// api is the loopback endpoint the browser extension talks to.
+	api apiState
 
 	// dataDirOverride, when set, replaces the directory settings and the task
 	// index are read from. Tests set it so they cannot touch the real user
@@ -91,6 +97,11 @@ func (a *App) startup(ctx context.Context) {
 
 	a.mgr.loadTasks()
 	go a.mgr.Run(ctx)
+
+	// The browser extension's endpoint. It lives and dies with the app's
+	// context rather than the window's, so closing the window to the tray does
+	// not cut the extension off.
+	go a.startLocalAPI(ctx)
 
 	// Files dropped onto the window become new tasks.
 	runtime.OnFileDrop(ctx, func(_, _ int, paths []string) {

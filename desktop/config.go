@@ -44,6 +44,27 @@ type Config struct {
 	OpenFileWhenDone bool `json:"openFileWhenDone"`
 	OpenDirWhenDone  bool `json:"openDirWhenDone"`
 
+	// Browser extension control.
+	//
+	// The switches live here rather than in the extension so there is one place
+	// to change them: the extension asks the app for the current policy before
+	// every interception, which means a change takes effect at once and needs no
+	// reinstall.
+	//
+	// ExtensionEnabled is the master switch.
+	ExtensionEnabled bool `json:"extensionEnabled"`
+	// ExtensionMinSizeKB is the smallest download the extension will take over,
+	// in KiB. Anything smaller is left to the browser.
+	//
+	// The reason this exists at all: an extension that intercepts everything
+	// also intercepts browser auto-updates, tracking pixels and the images in a
+	// PDF viewer, which is the fastest way to make someone uninstall it. Zero
+	// means take everything.
+	ExtensionMinSizeKB int `json:"extensionMinSizeKb"`
+	// ExtensionSkipHosts lists hosts the extension leaves alone, one per line.
+	// A user who has one site that must download normally can exclude just that.
+	ExtensionSkipHosts string `json:"extensionSkipHosts"`
+
 	// MinimizeToTray hides the window instead of exiting, so downloads continue.
 	MinimizeToTray bool `json:"minimizeToTray"`
 
@@ -81,6 +102,14 @@ func DefaultConfig() Config {
 		ClipboardAutoStart:  false,
 		ClipboardConfirm:    true,
 		ClipboardIntervalMs: 800,
+
+		// On by default, but only for downloads big enough to be worth a
+		// separate program. Taking over everything — including the browser's own
+		// updates and every favicon a page requests — is the fastest way to make
+		// someone uninstall the extension.
+		ExtensionEnabled:   true,
+		ExtensionMinSizeKB: 1024,
+		ExtensionSkipHosts: "",
 	}
 }
 
@@ -126,6 +155,14 @@ func (c *Config) normalize() {
 	// Above this the setting stops being a limit and starts being a typo.
 	if c.SpeedLimitKB > 10*1024*1024 {
 		c.SpeedLimitKB = 10 * 1024 * 1024
+	}
+	if c.ExtensionMinSizeKB < 0 {
+		c.ExtensionMinSizeKB = 0
+	}
+	// A gigabyte is the point past which the filter is really "never take
+	// anything", which is what the master switch is for.
+	if c.ExtensionMinSizeKB > 1024*1024 {
+		c.ExtensionMinSizeKB = 1024 * 1024
 	}
 	if c.ClipboardIntervalMs < 200 {
 		c.ClipboardIntervalMs = d.ClipboardIntervalMs

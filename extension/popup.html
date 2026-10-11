@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <style>
+    :root { color-scheme: dark; }
+    body {
+      width: 264px;
+      margin: 0;
+      padding: 14px;
+      background: #0d0f14;
+      color: #e6e9f0;
+      font: 13px/1.5 system-ui, "Segoe UI", sans-serif;
+    }
+    .head { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+    .head img { width: 22px; height: 22px; }
+    .head strong { font-size: 14px; }
+    .state {
+      display: flex; align-items: center; gap: 7px;
+      padding: 9px 11px; margin-bottom: 12px;
+      border-radius: 8px; background: #14171f;
+      border: 1px solid #262c3a; font-size: 12px;
+    }
+    .dot { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 8px; }
+    .dot--on { background: #3ecf8e; box-shadow: 0 0 6px #3ecf8e; }
+    .dot--off { background: #d9534f; }
+    button {
+      width: 100%; padding: 9px; border-radius: 8px; cursor: pointer;
+      border: 1px solid #4c8dff; background: transparent;
+      color: #7ba9ff; font: inherit; font-weight: 600;
+    }
+    button:hover { background: rgba(76, 141, 255, 0.14); }
+    .hint { margin: 10px 0 0; font-size: 11px; color: #7c8699; }
+  </style>
+</head>
+<body>
+  <div class="head">
+    <img src="icons/icon32.png" alt="" />
+    <strong>VKMDownload</strong>
+  </div>
+
+  <div class="state">
+    <span class="dot" id="dot"></span>
+    <span id="state">正在检查…</span>
+  </div>
+
+  <button id="toggle" type="button">…</button>
+
+  <p class="hint" id="hint"></p>
+
+  <script src="popup.js"></script>
+</body>
+</html>

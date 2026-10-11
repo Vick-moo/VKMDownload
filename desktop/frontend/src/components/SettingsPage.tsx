@@ -332,6 +332,66 @@ export function SettingsPage({ config, onSaved }: Props): JSX.Element {
         />
       </section>
 
+      <section className="settings-section">
+        <h3 className="settings-section__title">浏览器扩展</h3>
+
+        <p className="settings-section__note">
+          装好扩展后，浏览器里的下载会交给 VKMDownload。扩展每次都会先问这里该不该接管，
+          所以下面的改动立刻生效，不用重装扩展。
+        </p>
+
+        <Switch
+          title="接管浏览器下载"
+          hint="总开关。关闭后浏览器恢复自己下载，扩展仍然装着但不再拦截。"
+          checked={draft.extensionEnabled}
+          onChange={(v) => patch({ extensionEnabled: v })}
+        />
+
+        <label className="setting">
+          <span className="setting__text">
+            <span className="setting__title">小于此大小交给浏览器</span>
+            <span className="setting__hint">
+              浏览器自己也会下载很多小东西（自动更新、网页图标、PDF 里的图片）。
+              设一个下限可以把这些挡在外面。填 0 表示全部接管。
+            </span>
+          </span>
+          <span className="field__row" style={{ flex: "0 0 auto" }}>
+            <input
+              type="number"
+              min={0}
+              max={1024}
+              step={1}
+              style={{ width: 88 }}
+              value={Math.round(draft.extensionMinSizeKb / 1024)}
+              onChange={(e) =>
+                patch({ extensionMinSizeKb: Math.max(0, Number(e.target.value) || 0) * 1024 })
+              }
+              disabled={!draft.extensionEnabled}
+            />
+            <span className="field__suffix">MB</span>
+          </span>
+        </label>
+
+        <label className="setting setting--stacked">
+          <span className="setting__text">
+            <span className="setting__title">不接管的网站</span>
+            <span className="setting__hint">
+              一行一个域名，子域名也算。例如填 <code>example.com</code> 会同时排除
+              <code>www.example.com</code> 和 <code>cdn.example.com</code>。
+            </span>
+          </span>
+          <textarea
+            className="field__textarea"
+            rows={3}
+            spellCheck={false}
+            placeholder={"example.com\nanother-site.org"}
+            value={draft.extensionSkipHosts}
+            onChange={(e) => patch({ extensionSkipHosts: e.target.value })}
+            disabled={!draft.extensionEnabled}
+          />
+        </label>
+      </section>
+
       <div className="settings__foot">
         {/* The status comes first so its `margin-right: auto` pushes the button
             to the right edge. With the button first, the auto margin sat after

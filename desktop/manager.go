@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -98,6 +99,10 @@ type task struct {
 	// that caused it has finished writing the status — which turned a pause
 	// into a cancel and cost the user the ability to resume.
 	stopIntent TaskStatus
+
+	// referer is sent with every request for this task. Set once at creation and
+	// never changed, so it needs no lock.
+	referer string
 }
 
 // waitStopped blocks until the transfer goroutine has exited, or the timeout
@@ -122,6 +127,10 @@ type StartRequest struct {
 	Filename string `json:"filename"`
 	Conns    int    `json:"connections"`
 	Start    bool   `json:"start"`
+	// Referer is sent with every request for this task. The browser extension
+	// supplies it, because some hosts refuse a download whose request does not
+	// appear to come from their own page.
+	Referer string `json:"referer"`
 }
 
 // Manager owns every task.
@@ -270,7 +279,7 @@ func (m *Manager) Start(req StartRequest) (TaskView, error) {
 		conns = cfg.Connections
 	}
 
-	t := &task{}
+	t := &task{referer: strings.TrimSpace(req.Referer)}
 	t.view = TaskView{
 		ID:      id,
 		URL:     url,
@@ -604,6 +613,12 @@ func (m *Manager) run(t *task, ctx context.Context, cancel context.CancelFunc) {
 	opt.Limiter = m.limiterFor(cfg.SpeedLimitKB)
 	if cfg.Proxy != "" {
 		opt.Transport.ProxyURL = cfg.Proxy
+	}
+	// Sent when the task came from the browser extension. Some hosts refuse a
+	// download whose request does not appear to come from their own page.
+	if t.referer != "" {
+		opt.Headers = http.Header{}
+		opt.Headers.Set("Referer", t.referer)
 	}
 
 	dl, err := engine.New(opt)
