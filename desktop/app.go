@@ -74,6 +74,10 @@ func NewAppWithDataDir(dir string) *App {
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
 
+	// Before anything reads the settings: the product was renamed, and the old
+	// folder has to move or the user's tasks and preferences are simply gone.
+	migrateLegacyDataDir()
+
 	a.mu.Lock()
 	a.cfg = loadConfig(a.configPath())
 	a.mu.Unlock()
@@ -134,16 +138,75 @@ func (a *App) beforeClose(ctx context.Context) (prevent bool) {
 
 // ------------------------------------------------------------------ paths
 
+const (
+	// appDirName is the folder under the user's config directory that holds the
+	// settings and the task index. It follows the product name.
+	appDirName = "VKMDownload"
+)
+
+// legacyDirNames are the folders this app has used before, newest first.
+//
+// A list rather than a single name because the product has been renamed more
+// than once: someone upgrading may be coming from any of them, and being told
+// "your task list is gone" because the code only looked one step back would be
+// the worst possible outcome of a cosmetic change.
+var legacyDirNames = []string{"VKDownload", "VDownload"}
+
 // dataDir is where settings and the task index live.
 func (a *App) dataDir() string {
 	if a.dataDirOverride != "" {
 		return a.dataDirOverride
 	}
+	return filepath.Join(configBase(), appDirName)
+}
+
+// configBase is the user's config directory, or the working directory when the
+// shell does not report one.
+func configBase() string {
 	base, err := os.UserConfigDir()
 	if err != nil {
-		base = "."
+		return "."
 	}
-	return filepath.Join(base, "VDownload")
+	return base
+}
+
+// migrateLegacyDataDir moves the settings and the task index out of the folders
+// this app used before it was renamed.
+//
+// It works file by file rather than renaming a folder. A destination folder can
+// already exist for an unrelated reason — a log written by an earlier run is
+// enough — and testing for the directory made the migration conclude it had
+// nothing to do, leaving the user's tasks and preferences behind. It also never
+// overwrites: a file already in the new folder is the more recent one.
+func migrateLegacyDataDir() {
+	newDir := filepath.Join(configBase(), appDirName)
+
+	for _, legacy := range legacyDirNames {
+		oldDir := filepath.Join(configBase(), legacy)
+
+		var movable []string
+		for _, name := range []string{"config.json", "tasks.json"} {
+			if _, err := os.Stat(filepath.Join(oldDir, name)); err == nil {
+				movable = append(movable, name)
+			}
+		}
+		if len(movable) == 0 {
+			continue
+		}
+
+		if err := os.MkdirAll(newDir, 0o755); err != nil {
+			return
+		}
+		for _, name := range movable {
+			dst := filepath.Join(newDir, name)
+			if _, err := os.Stat(dst); err == nil {
+				continue // already migrated
+			}
+			// Not fatal if it fails: the app starts with defaults, which is
+			// better than refusing to run over a folder.
+			_ = os.Rename(filepath.Join(oldDir, name), dst)
+		}
+	}
 }
 
 func (a *App) configPath() string { return filepath.Join(a.dataDir(), "config.json") }

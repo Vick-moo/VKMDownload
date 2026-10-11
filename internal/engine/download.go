@@ -18,7 +18,7 @@ import (
 // defaultUserAgent identifies the client. It is deliberately not a browser
 // string: honesty costs nothing here and a real UA would make debugging which
 // agent touched a server harder.
-const defaultUserAgent = "vdownload/0.1"
+const defaultUserAgent = "vkmdownload/0.1"
 
 var (
 	// ErrIfRangeIgnored means a server answered a validated range request with

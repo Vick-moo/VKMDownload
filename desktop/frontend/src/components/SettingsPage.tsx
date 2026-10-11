@@ -333,10 +333,15 @@ export function SettingsPage({ config, onSaved }: Props): JSX.Element {
       </section>
 
       <div className="settings__foot">
+        {/* The status comes first so its `margin-right: auto` pushes the button
+            to the right edge. With the button first, the auto margin sat after
+            the last item and dragged both of them left — which only became
+            visible once a save produced the status, making the button appear to
+            jump across the bar. */}
+        {status ? <span className="settings__status">{status}</span> : null}
         <button type="button" className="btn btn--primary" onClick={save}>
           保存设置
         </button>
-        {status ? <span className="settings__status">{status}</span> : null}
       </div>
     </div>
   );

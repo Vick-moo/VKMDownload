@@ -1,7 +1,7 @@
 {
   "$schema": "https://wails.io/schemas/config.v2.json",
-  "name": "VDownload",
-  "outputfilename": "VDownload",
+  "name": "VKMDownload",
+  "outputfilename": "VKMDownload",
   "frontend:install": "npm install",
   "frontend:build": "npm run build",
   "frontend:dev:watcher": "npm run dev",
@@ -11,8 +11,8 @@
     "email": "vickmoololl@gmail.com"
   },
   "info": {
-    "companyName": "VDownload",
-    "productName": "VDownload",
+    "companyName": "VKMDownload",
+    "productName": "VKMDownload",
     "productVersion": "0.1.0",
     "copyright": "MIT licensed",
     "comments": "Multi-connection download manager"

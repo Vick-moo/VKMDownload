@@ -146,7 +146,7 @@ export function Sidebar({
               <span className="sidebar__logo">
                 <img src={logoMark} alt="" />
               </span>
-              <span className="sidebar__brand-name">VDownload</span>
+              <span className="sidebar__brand-name">VKMDownload</span>
             </span>
 
             <button

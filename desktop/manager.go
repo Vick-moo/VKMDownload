@@ -20,14 +20,17 @@ import (
 // debugLog appends a diagnostic line to the app's log file. It exists so a
 // failure that would otherwise be invisible — a panic swallowed by a
 // goroutine — leaves a trace the user can hand back.
-func debugLog(format string, args ...any) {
-	base, err := os.UserConfigDir()
-	if err != nil {
+//
+// It writes through the app's data directory rather than computing its own, so
+// a test's override applies here too. When it did not, every test run appended
+// to the real log and, worse, created the real directory as a side effect —
+// which then defeated the migration that moves the folder after a rename.
+func (a *App) debugLog(format string, args ...any) {
+	dir := a.dataDir()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return
 	}
-	dir := filepath.Join(base, "VDownload")
-	_ = os.MkdirAll(dir, 0o755)
-	f, err := os.OpenFile(filepath.Join(dir, "vdownload.log"),
+	f, err := os.OpenFile(filepath.Join(dir, "vkmdownload.log"),
 		os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
 		return
@@ -533,7 +536,7 @@ func (m *Manager) finishPlan() {
 
 	cfg := m.app.Config()
 	m.app.emit("plan:done", nil)
-	debugLog("plan finished: sound=%v shutdown=%v", cfg.PlanSound, cfg.PlanShutdown)
+	m.app.debugLog("plan finished: sound=%v shutdown=%v", cfg.PlanSound, cfg.PlanShutdown)
 
 	if cfg.PlanSound {
 		playAlert()
@@ -559,7 +562,7 @@ func playAlert() {
 func shutdownMachine() {
 	go func() {
 		_ = exec.Command("shutdown", "/s", "/t", "60",
-			"/c", "VDownload 计划已完成，60 秒后关机（运行 shutdown /a 取消）").Run()
+			"/c", "VKMDownload 计划已完成，60 秒后关机（运行 shutdown /a 取消）").Run()
 	}()
 }
 
@@ -589,7 +592,7 @@ func (m *Manager) run(t *task, ctx context.Context, cancel context.CancelFunc) {
 		cancel()
 		close(done)
 		if r := recover(); r != nil {
-			debugLog("panic in task %s: %v\n%s", t.view.ID, r, debug.Stack())
+			m.app.debugLog("panic in task %s: %v\n%s", t.view.ID, r, debug.Stack())
 			m.fail(t, gen, fmt.Errorf("内部错误: %v", r))
 		}
 	}()
