@@ -12,8 +12,6 @@
 *.vdownload.json
 *.vdownload.tmp
 /testdata/downloads/
-/bench/out/
-/bench/results/
 
 # Wails desktop app
 /desktop/build/bin/
