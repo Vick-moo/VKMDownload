@@ -252,6 +252,7 @@ export function TaskList({
 
 
 
+
   const sorted = useMemo(() => {
     const dir = sortDir === "asc" ? 1 : -1;
     const copy = [...tasks];
@@ -303,7 +304,9 @@ export function TaskList({
                     : "descending"
                   : "none"
               }
-              className={`listhead__cell${active ? " listhead__cell--active" : ""}`}
+              className={`listhead__cell${active ? " listhead__cell--active" : ""}${
+                c.center ? " listhead__cell--center" : ""
+              }`}
               onClick={() => onSort(c.key)}
             >
               {c.label}
@@ -344,6 +347,7 @@ export function TaskList({
       style={{ "--task-cols": template } as React.CSSProperties}
     >
       {header()}
+
 
 
 

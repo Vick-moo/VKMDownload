@@ -907,20 +907,24 @@ input:focus {
   right: -6px;
 }
 
+/* The boundary line between two columns. It is visible at rest so it is
+   discoverable — an invisible handle is one nobody finds — and thickens and
+   takes the accent colour on hover to confirm it is grabbable. */
 .colresizer::after {
   content: "";
   position: absolute;
   right: -5px;
-  top: 6px;
-  bottom: 6px;
-  width: 2px;
-  border-radius: var(--radius-full);
-  background: transparent;
-  transition: background var(--dur-fast) var(--ease);
+  top: 5px;
+  bottom: 5px;
+  width: 1px;
+  background: var(--border-strong);
+  transition: background var(--dur-fast) var(--ease),
+    width var(--dur-fast) var(--ease);
 }
 
 .colresizer:hover::after,
 .colresizer:active::after {
+  width: 2px;
   background: var(--accent);
 }
 
@@ -952,6 +956,13 @@ body.resizing {
 
 .listhead__cell:hover {
   color: var(--text-primary);
+}
+
+/* A header sits over its own column's contents, so it uses the same alignment
+   they do. A left-aligned label above centred values reads as a misalignment
+   rather than a deliberate choice. */
+.listhead__cell--center {
+  justify-content: center;
 }
 
 /* The active sort column is marked with both an arrow and a colour change, so
