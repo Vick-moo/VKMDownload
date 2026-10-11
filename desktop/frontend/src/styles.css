@@ -1056,6 +1056,13 @@ body.resizing {
   font-weight: 500;
 }
 
+/* Shown in place of the name while the server has not supplied one yet: the URL
+   stands in, in a quieter weight so it does not read as a filename. */
+.task__name-pending {
+  color: var(--text-secondary);
+  font-weight: 400;
+}
+
 .task__cell--status {
   display: flex;
   align-items: center;

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -209,10 +210,17 @@ func (m *Manager) Start(req StartRequest) (TaskView, error) {
 	if dest == "" {
 		dest = cfg.DownloadDir
 	}
+
 	// An explicit filename wins; otherwise the engine derives one from the
 	// server's Content-Disposition or the URL path.
+	//
+	// Until it does, the task has no name. Taking filepath.Base(dest) here — as
+	// this did — reads the *directory* when no filename was given, which
+	// labelled every such download after the folder it was going into.
+	name := ""
 	if fn := strings.TrimSpace(req.Filename); fn != "" {
 		dest = filepath.Join(dest, fn)
+		name = fn
 	}
 
 	conns := req.Conns
@@ -225,7 +233,7 @@ func (m *Manager) Start(req StartRequest) (TaskView, error) {
 		ID:      id,
 		URL:     url,
 		Dest:    dest,
-		Name:    filepath.Base(dest),
+		Name:    name,
 		Status:  StatusQueued,
 		Conns:   conns,
 		Created: time.Now().Format(time.RFC3339Nano),
@@ -523,6 +531,12 @@ func (m *Manager) fail(t *task, gen int64, err error) {
 func humanError(err error) string {
 	msg := err.Error()
 	switch {
+	case errors.Is(err, engine.ErrNotAFile):
+		// The most common cause by far is pasting the page a file is shown on
+		// rather than the file itself, so the message names the fix.
+		return "这是网页地址，不是文件下载地址 · 请改用文件的直链（例如网盘的「直接下载」链接）"
+	case errors.Is(err, engine.ErrSizeMismatch):
+		return "文件长度与服务器声明不符 · 已阻止发布，避免留下损坏的文件"
 	case strings.Contains(msg, "403"):
 		return "服务器拒绝了请求（403）· 可能需要登录，或该链接已失效"
 	case strings.Contains(msg, "404"):

@@ -3,7 +3,11 @@ package engine
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -13,6 +17,56 @@ import (
 
 	"vdownload/testsrv"
 )
+
+// TestProbeRejectsWebPage covers the address a user pastes most often by
+// mistake: the page a file is *shown* on, rather than the file. Google Drive's
+// /file/d/<id>/view share link is the canonical example — it answers 200 with
+// an HTML document, so the engine used to download the page and only fail later
+// on a length mismatch, which says nothing about the real mistake.
+func TestProbeRejectsWebPage(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Accept-Ranges", "none")
+		_, _ = io.WriteString(w, "<!DOCTYPE html><html><body>viewer page</body></html>")
+	}))
+	defer srv.Close()
+
+	d, err := New(Options{}.Normalize())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+
+	_, err = d.Probe(context.Background(), srv.URL+"/file/d/abc/view")
+	if !errors.Is(err, ErrNotAFile) {
+		t.Fatalf("Probe error = %v, want ErrNotAFile", err)
+	}
+}
+
+// TestLooksLikeHTML pins the header parsing, including the charset parameter
+// that every real server appends.
+func TestLooksLikeHTML(t *testing.T) {
+	cases := []struct {
+		in   string
+		want bool
+	}{
+		{"text/html", true},
+		{"text/html; charset=utf-8", true},
+		{"TEXT/HTML;CHARSET=UTF-8", true},
+		{"application/xhtml+xml", true},
+		{" application/xhtml+xml ; charset=utf-8", true},
+		{"", false},
+		{"application/octet-stream", false},
+		{"application/pdf", false},
+		{"text/plain", false},
+		{"text/htmlfoo", false},
+	}
+	for _, c := range cases {
+		if got := looksLikeHTML(c.in); got != c.want {
+			t.Errorf("looksLikeHTML(%q) = %v, want %v", c.in, got, c.want)
+		}
+	}
+}
 
 // The sizes here are deliberately modest: the tests must exercise real
 // segmentation and real connection handling, but they also have to stay fast.

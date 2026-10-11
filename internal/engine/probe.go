@@ -87,17 +87,54 @@ func (d *Downloader) Probe(ctx context.Context, rawURL string) (*ProbeResult, er
 	}
 
 	// --- Step 2: authoritative ranged GET. ---
-	if err := d.probeRange(ctx, rawURL, res); err != nil {
+	rangeErr := d.probeRange(ctx, rawURL, res)
+	if rangeErr != nil && res.Size <= 0 {
+		// Nothing usable came back at all.
+		return nil, rangeErr
+	}
+	if rangeErr != nil {
 		// If the ranged GET is impossible but HEAD gave us a usable size, fall
 		// back to a single stream rather than failing the whole download.
-		if res.Size > 0 {
-			res.RangeSupported = false
-			res.Note = fmt.Sprintf("range probe failed (%v); single stream", err)
-			return res, nil
-		}
-		return nil, err
+		res.RangeSupported = false
+		res.Note = fmt.Sprintf("range probe failed (%v); single stream", rangeErr)
+	}
+
+	// A web page is not a file, whatever its length says. This has to be caught
+	// before the transfer starts: the bytes would otherwise be downloaded and
+	// saved under the page's name, failing much later on a length mismatch that
+	// tells the user nothing about the actual mistake.
+	if err := notAFileError(res); err != nil {
+		return res, err
 	}
 	return res, nil
+}
+
+// ErrNotAFile means the address answered with a web page rather than the bytes
+// of a file — a share link to a hosting page instead of a direct link.
+var ErrNotAFile = errors.New("该地址返回的是网页，不是文件")
+
+// notAFileError reports a probe result that describes a web page.
+func notAFileError(res *ProbeResult) error {
+	if !looksLikeHTML(res.ContentType) {
+		return nil
+	}
+	return fmt.Errorf("%w (Content-Type: %s)", ErrNotAFile, res.ContentType)
+}
+
+// looksLikeHTML reports whether a Content-Type header describes a web page.
+func looksLikeHTML(contentType string) bool {
+	if contentType == "" {
+		return false
+	}
+	// Drop any parameters: "text/html; charset=utf-8" -> "text/html".
+	if i := strings.IndexByte(contentType, ';'); i >= 0 {
+		contentType = contentType[:i]
+	}
+	switch strings.ToLower(strings.TrimSpace(contentType)) {
+	case "text/html", "application/xhtml+xml":
+		return true
+	}
+	return false
 }
 
 // errHeadUnavailable means the server declined the HEAD request. It is expected

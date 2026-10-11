@@ -76,8 +76,16 @@ export function TaskRow({
       onClick={(e) => onSelect(task.id, e.ctrlKey || e.metaKey)}
     >
       <div className="task__cell task__cell--name">
-        <span className="task__name" title={task.name}>
-          {ellipsizeMiddle(task.name, 60)}
+        {/* The name is unknown until the server answers, and stays unknown if
+            the transfer fails early; the URL is a better label than nothing. */}
+        <span className="task__name" title={task.name || task.url}>
+          {task.name ? (
+            ellipsizeMiddle(task.name, 60)
+          ) : (
+            <span className="task__name-pending">
+              {ellipsizeMiddle(task.url, 60)}
+            </span>
+          )}
         </span>
         {task.status === "failed" && task.error ? (
           <span className="task__error">{task.error}</span>

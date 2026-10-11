@@ -388,6 +388,49 @@ func TestResumePauseOnMissingFileConcurrently(t *testing.T) {
 	t.Log("survived concurrent resume/pause/cancel on a missing target")
 }
 
+// TestTaskWithoutFilenameIsNotNamedAfterItsFolder covers the label a user saw
+// on every task created without typing a filename: the destination is still the
+// download directory at that point, so filepath.Base(dest) read "Downloads" and
+// the row was named after the folder it was going into.
+func TestTaskWithoutFilenameIsNotNamedAfterItsFolder(t *testing.T) {
+	app := newTestApp(t)
+	dir := filepath.Join(t.TempDir(), "MyDownloads")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	task, err := app.mgr.Start(StartRequest{
+		URL: "http://127.0.0.1:1/never", Dest: dir, Start: false,
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	if task.Dest != dir {
+		t.Errorf("dest = %q, want the directory %q", task.Dest, dir)
+	}
+	if task.Name == filepath.Base(dir) {
+		t.Errorf("task is named after its destination folder (%q); the name is unknown until the server answers", task.Name)
+	}
+	if task.Name != "" {
+		t.Errorf("name = %q, want empty until the server supplies one", task.Name)
+	}
+
+	// An explicit filename is still honoured.
+	named, err := app.mgr.Start(StartRequest{
+		URL: "http://127.0.0.1:1/never", Dest: dir, Filename: "chosen.bin", Start: false,
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if named.Name != "chosen.bin" {
+		t.Errorf("name = %q, want chosen.bin", named.Name)
+	}
+	if named.Dest != filepath.Join(dir, "chosen.bin") {
+		t.Errorf("dest = %q, want the file inside the directory", named.Dest)
+	}
+}
+
 // TestBeforeCloseAllowsClosing pins the return contract of the close hook.
 //
 // Wails reads the value as `prevent`, so true refuses the close. Written the
