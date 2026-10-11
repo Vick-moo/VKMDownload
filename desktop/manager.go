@@ -775,6 +775,11 @@ func (m *Manager) fail(t *task, gen int64, err error) {
 func humanError(err error) string {
 	msg := err.Error()
 	switch {
+	case errors.Is(err, engine.ErrNeedsSignIn):
+		// Checked before ErrNotAFile: both arrive as an HTML body, but the fix
+		// is different and "find a direct link" would send the user looking for
+		// a link that was already right.
+		return "这个文件需要登录才能下载 · 把分享权限改成「知道链接的任何人」，或者用浏览器下载"
 	case errors.Is(err, engine.ErrNotAFile):
 		// The most common cause by far is pasting the page a file is shown on
 		// rather than the file itself, so the message names the fix.

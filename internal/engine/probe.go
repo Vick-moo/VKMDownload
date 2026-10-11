@@ -113,12 +113,64 @@ func (d *Downloader) Probe(ctx context.Context, rawURL string) (*ProbeResult, er
 // of a file — a share link to a hosting page instead of a direct link.
 var ErrNotAFile = errors.New("该地址返回的是网页，不是文件")
 
+// ErrNeedsSignIn means the server answered with a sign-in page instead of the
+// file, which is what a cloud-storage link to a private file does.
+//
+// It is separate from ErrNotAFile on purpose. Both end in an HTML body, but the
+// advice differs completely: "this is a web page, find a direct link" sends
+// someone hunting for a link that is already correct, when what is actually
+// missing is their credentials.
+var ErrNeedsSignIn = errors.New("这个文件需要登录才能下载")
+
+// signInHosts are where a request lands when the server wants credentials
+// rather than to serve the file.
+var signInHosts = []string{
+	"accounts.google.com",
+	"login.live.com",
+	"login.microsoftonline.com",
+	"id.apple.com",
+	"login.yahoo.com",
+}
+
+// needsSignIn reports whether the request finished at a sign-in page.
+//
+// It looks at where the request ended rather than at what came back: a sign-in
+// page is HTML, but so is an error page, and only the host distinguishes them.
+func needsSignIn(finalURL string) bool {
+	if finalURL == "" {
+		return false
+	}
+	u, err := url.Parse(finalURL)
+	if err != nil {
+		return false
+	}
+	host := strings.ToLower(u.Hostname())
+	for _, signIn := range signInHosts {
+		if host == signIn || strings.HasSuffix(host, "."+signIn) {
+			return true
+		}
+	}
+	return false
+}
+
 // notAFileError reports a probe result that describes a web page.
 func notAFileError(res *ProbeResult) error {
+	if needsSignIn(res.FinalURL) {
+		return fmt.Errorf("%w (跳转到 %s)", ErrNeedsSignIn, hostOf(res.FinalURL))
+	}
 	if !looksLikeHTML(res.ContentType) {
 		return nil
 	}
 	return fmt.Errorf("%w (Content-Type: %s)", ErrNotAFile, res.ContentType)
+}
+
+// hostOf returns just the host of a URL, for a message that names where the
+// request was sent without pasting a very long sign-in URL into the UI.
+func hostOf(raw string) string {
+	if u, err := url.Parse(raw); err == nil && u.Host != "" {
+		return u.Host
+	}
+	return raw
 }
 
 // looksLikeHTML reports whether a Content-Type header describes a web page.

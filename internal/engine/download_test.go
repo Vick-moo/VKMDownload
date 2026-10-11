@@ -145,6 +145,60 @@ func TestProbeRejectsWebPage(t *testing.T) {
 	}
 }
 
+// TestNeedsSignIn covers the host check.
+//
+// A cloud-storage link to a private file is redirected to the provider's login
+// page. The advice for that — change the sharing permission, or use a browser —
+// is nothing like the advice for a viewer page, and confusing the two sends
+// someone looking for a link that was already correct.
+func TestNeedsSignIn(t *testing.T) {
+	cases := []struct {
+		url  string
+		want bool
+	}{
+		{"https://accounts.google.com/v3/signin/identifier?continue=x", true},
+		{"https://accounts.google.com", true},
+		{"https://login.microsoftonline.com/common/oauth2/authorize", true},
+		{"https://login.live.com/oauth20_authorize.srf", true},
+
+		// A download served by Google is not a sign-in page.
+		{"https://drive.usercontent.google.com/download?id=x&export=download", false},
+		{"https://example.com/file.zip", false},
+		{"", false},
+		{"::not a url::", false},
+	}
+	for _, c := range cases {
+		if got := needsSignIn(c.url); got != c.want {
+			t.Errorf("needsSignIn(%q) = %v, want %v", c.url, got, c.want)
+		}
+	}
+}
+
+// TestNotAFileErrorPrefersSignIn covers the case where both conditions hold: a
+// sign-in redirect is an HTML body too, so the order of the two checks decides
+// which message the user gets.
+func TestNotAFileErrorPrefersSignIn(t *testing.T) {
+	res := &ProbeResult{
+		FinalURL:    "https://accounts.google.com/v3/signin/identifier?continue=verylongtoken",
+		ContentType: "text/html; charset=utf-8",
+	}
+
+	err := notAFileError(res)
+	if !errors.Is(err, ErrNeedsSignIn) {
+		t.Fatalf("error = %v, want ErrNeedsSignIn", err)
+	}
+	if errors.Is(err, ErrNotAFile) {
+		t.Error("also reported as a plain web page, which gives the wrong advice")
+	}
+	// The message names the host rather than quoting the whole sign-in URL.
+	if strings.Contains(err.Error(), "continue=verylongtoken") {
+		t.Errorf("error quotes the whole URL: %v", err)
+	}
+	if !strings.Contains(err.Error(), "accounts.google.com") {
+		t.Errorf("error does not name the host: %v", err)
+	}
+}
+
 // TestLooksLikeHTML pins the header parsing, including the charset parameter
 // that every real server appends.
 func TestLooksLikeHTML(t *testing.T) {
