@@ -182,39 +182,33 @@ TestClipboardURL()           string      // 便于"立即测试"按钮
 
 ## 5. 上传 GitHub
 
-已定：仓库名 **VDownload**，**私有**。本地仓库已初始化并提交（`6583ed9` + `9694d97`），
-`README.md` / `LICENSE`(MIT) / `.gitignore` / `.gitattributes` 均已就位，工作区干净。
+**已完成**：<https://github.com/vickmoololl-ui/VDownload>（Public）
 
-机器上**没有 `gh` CLI**，所以剩下两种走法：
+本地仓库与远程 `origin` 已配好，`main` 分支跟踪 `origin/main`，工作区干净。
 
-### 路线 A：自己建仓（不需要装任何东西）
+推送过程中遇到并解决的问题，留个记录以防换机器时再撞上：
 
-1. 打开 https://github.com/new
-2. Repository name 填 `VDownload`
-3. 选 **Private**
-4. **不要**勾 "Add a README file"，也**不要**选 .gitignore / license
-   （本地已有，勾了会造成冲突）
-5. 建好后执行（把 `<你的用户名>` 换掉）：
+- 机器上**没有 `gh` CLI**，走的是手动建仓 + `git remote add` 的路线。
+- 首次 `git push` 报 `403 Permission to vickmoololl-ui/VDownload.git denied to
+  Vickmoomoo`。原因是 Windows 凭据管理器里存的是**另一个 GitHub 账号**
+  （`Vickmoomoo`）的凭据，与仓库属主 `vickmoololl-ui` 不匹配。
+  用 `cmdkey /delete:git:https://Vickmoomoo@github.com` 清掉后推送成功。
+- 遗留一条删不掉的 `GitHub for Visual Studio - https://Vickmoomoo@github.com/`
+  凭据（`cmdkey` 处理不了带空格的目标名），但它不影响 git 命令行推送。
+
+日常推送就用：
 
 ```powershell
 cd C:\Users\vickm\deepseek-harness\default-workspace\VDownload
-git remote add origin https://github.com/<你的用户名>/VDownload.git
-git branch -M main
-git push -u origin main
+git push
 ```
 
-推送时会弹窗要求登录 GitHub（浏览器或 token）。**这一步必须你自己完成**——
-我无法代你输入凭据。
-
-### 路线 B：装 `gh`，之后全自动
+若想获得建 issue / 发 release 等自动化能力，再补装：
 
 ```powershell
 winget install --id GitHub.cli
-gh auth login          # 浏览器点授权，只有你能做
-gh repo create VDownload --private --source . --push
+gh auth login
 ```
-
-`gh` 装好后告诉我，建仓、推送、后续的开 issue / 建 release 我都能代办。
 
 ---
 
