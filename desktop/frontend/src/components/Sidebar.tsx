@@ -95,23 +95,25 @@ export function Sidebar({
       aria-label="任务筛选"
       style={collapsed ? undefined : { width }}
     >
-      <div className="sidebar__scroll">
+      {/* A single icon control. Previously the chevron and a "收起" label sat
+          inside one button, which read as two separate controls. */}
+      <div className="sidebar__head">
         <button
           type="button"
-          className="nav-item nav-item--toggle"
+          className="sidebar__toggle"
           aria-expanded={!collapsed}
           aria-label={collapsed ? "展开侧栏" : "收起侧栏"}
           title={collapsed ? "展开侧栏" : "收起侧栏"}
           onClick={onToggleCollapsed}
         >
-          <span
-            className={`sidebar__collapse${collapsed ? " sidebar__collapse--flipped" : ""}`}
-          >
-            <IconChevron size={14} />
-          </span>
-          <span className="nav-item__label">{collapsed ? "" : "收起"}</span>
+          <IconChevron
+            size={14}
+            className={collapsed ? "chevron--right" : "chevron--left"}
+          />
         </button>
+      </div>
 
+      <div className="sidebar__scroll">
         {STATUS_NAV.map((item) => {
           const active = !settingsOpen && filter === item.key;
           return (

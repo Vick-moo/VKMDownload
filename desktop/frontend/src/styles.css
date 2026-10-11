@@ -383,6 +383,14 @@ input:focus {
 .sidebar--collapsed {
   padding-left: var(--space-1);
   padding-right: var(--space-1);
+  padding-top: 40px;
+}
+
+/* Hidden in the rail: with no room for the label, a count alone reads as a
+   stray number. */
+.sidebar--collapsed .nav-item__label,
+.sidebar--collapsed .nav-item__count {
+  display: none;
 }
 
 .sidebar--collapsed .nav-item {
@@ -390,37 +398,45 @@ input:focus {
   padding: 0;
 }
 
-.sidebar--collapsed .nav-item__label,
-.sidebar--collapsed .nav-item__count {
-  display: none;
-}
-
-.sidebar--collapsed .nav-item__icon {
-  flex: 0 0 auto;
-}
-
 .sidebar--collapsed .navgroup,
 .sidebar--collapsed .sidebar__stats {
   display: none;
 }
 
-.sidebar__collapse {
-  position: absolute;
-  top: var(--space-2);
-  right: var(--space-1);
+/* The one control that folds the sidebar. It gets its own row rather than
+   floating over the list, so it can never overlap the first nav item. */
+.sidebar__head {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  height: 26px;
+  flex: 0 0 26px;
+  margin-bottom: var(--space-1);
+}
+
+.sidebar__toggle {
   display: grid;
   place-items: center;
-  width: 22px;
-  height: 22px;
+  width: 24px;
+  height: 24px;
   border-radius: var(--radius-sm);
   color: var(--text-muted);
   transition: background var(--dur-fast) var(--ease),
     color var(--dur-fast) var(--ease);
 }
 
-.sidebar__collapse:hover {
+.sidebar__toggle:hover {
   background: var(--bg-hover);
   color: var(--text-primary);
+}
+
+/* The chevron points the way the panel will move. */
+.chevron--left {
+  transform: rotate(90deg);
+}
+
+.chevron--right {
+  transform: rotate(-90deg);
 }
 
 .topbar {
