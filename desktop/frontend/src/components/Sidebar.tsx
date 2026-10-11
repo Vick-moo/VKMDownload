@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import type { JSX } from "react";
 import { formatSpeed } from "../format";
 import { TYPE_GROUPS, groupOf } from "../types";
@@ -107,6 +107,18 @@ export function Sidebar({
     failed: tasks.filter((t) => t.status === "failed").length,
   };
 
+  // Only the groups that actually hold files. A group with no files is not
+  // rendered, and when every group is empty the whole section disappears —
+  // including its heading, which otherwise sat there with nothing under it.
+  const typeGroups = useMemo(
+    () =>
+      TYPE_GROUPS.map((group) => ({
+        group,
+        items: tasks.filter((t) => groupOf(t.name) === group.key),
+      })).filter((entry) => entry.items.length > 0),
+    [tasks],
+  );
+
   return (
     <nav
       className={`sidebar${collapsed ? " sidebar--collapsed" : ""}`}
@@ -157,66 +169,67 @@ export function Sidebar({
           );
         })}
 
-        {/* A collapsible section of file-type groups. */}
-        <div className="navgroup">
-          <button
-            type="button"
-            className="navgroup__head"
-            aria-expanded={typesOpen}
-            onClick={() => setTypesOpen((v) => !v)}
-          >
-            <span
-              className={`navgroup__chevron${
-                typesOpen ? "" : " navgroup__chevron--collapsed"
-              }`}
+        {/* A collapsible section of file-type groups, built from whatever the
+            tasks actually are. It is not rendered at all when no task has a
+            classifiable extension. */}
+        {typeGroups.length > 0 ? (
+          <div className="navgroup">
+            <button
+              type="button"
+              className="navgroup__head"
+              aria-expanded={typesOpen}
+              onClick={() => setTypesOpen((v) => !v)}
             >
-              <IconChevron size={14} />
-            </span>
-            <span className="navgroup__title">按类型</span>
-          </button>
+              <span
+                className={`navgroup__chevron${
+                  typesOpen ? "" : " navgroup__chevron--collapsed"
+                }`}
+              >
+                <IconChevron size={14} />
+              </span>
+              <span className="navgroup__title">按类型</span>
+            </button>
 
-          {typesOpen ? (
-            <div className="navgroup__body">
-              {TYPE_GROUPS.map((g) => {
-                const items = tasks.filter((t) => groupOf(t.name) === g.key);
-                if (items.length === 0) return null;
-                const isCollapsed = subCollapsed[g.key] ?? false;
-                const exts = [
-                  ...new Set(
-                    items
-                      .map((t) => {
-                        const dot = t.name.lastIndexOf(".");
-                        return dot > 0
-                          ? t.name.slice(dot + 1).toLowerCase()
-                          : "";
-                      })
-                      .filter(Boolean),
-                  ),
-                ].sort();
+            {typesOpen ? (
+              <div className="navgroup__body">
+                {typeGroups.map(({ group: g, items }) => {
+                  const isCollapsed = subCollapsed[g.key] ?? false;
+                  const exts = [
+                    ...new Set(
+                      items
+                        .map((t) => {
+                          const dot = t.name.lastIndexOf(".");
+                          return dot > 0
+                            ? t.name.slice(dot + 1).toLowerCase()
+                            : "";
+                        })
+                        .filter(Boolean),
+                    ),
+                  ].sort();
 
-                return (
-                  <div className="navsub" key={g.key}>
-                    <button
-                      type="button"
-                      className="navsub__head"
-                      aria-expanded={!isCollapsed}
-                      onClick={() =>
-                        setSubCollapsed((prev) => ({
-                          ...prev,
-                          [g.key]: !isCollapsed,
-                        }))
-                      }
-                    >
-                      <span
-                        className={`navsub__chevron${
-                          isCollapsed ? " navsub__chevron--collapsed" : ""
-                        }`}
+                  return (
+                    <div className="navsub" key={g.key}>
+                      <button
+                        type="button"
+                        className="navsub__head"
+                        aria-expanded={!isCollapsed}
+                        onClick={() =>
+                          setSubCollapsed((prev) => ({
+                            ...prev,
+                            [g.key]: !isCollapsed,
+                          }))
+                        }
                       >
-                        <IconChevron size={12} />
-                      </span>
-                      <span className="navsub__label">{g.label}</span>
-                      <span className="nav-item__count">{items.length}</span>
-                    </button>
+                        <span
+                          className={`navsub__chevron${
+                            isCollapsed ? " navsub__chevron--collapsed" : ""
+                          }`}
+                        >
+                          <IconChevron size={12} />
+                        </span>
+                        <span className="navsub__label">{g.label}</span>
+                        <span className="nav-item__count">{items.length}</span>
+                      </button>
                     {!isCollapsed ? (
                       <div className="navsub__body">
                         {exts.slice(0, 8).map((e) => (
@@ -232,9 +245,10 @@ export function Sidebar({
                   </div>
                 );
               })}
-            </div>
-          ) : null}
-        </div>
+              </div>
+            ) : null}
+          </div>
+        ) : null}
       </div>
 
       <button

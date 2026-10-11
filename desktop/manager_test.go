@@ -13,6 +13,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"vdownload/internal/engine"
 )
 
 // newTestApp builds an App pointed at a throwaway data directory.
@@ -664,6 +666,46 @@ func TestRemoveDeletesOnlyFinishedFiles(t *testing.T) {
 	}
 	if !bytes.Equal(got, original) {
 		t.Errorf("file contents changed: %q", got)
+	}
+}
+
+// TestRemoveClearsScratchButKeepsTheFile covers what the delete button does.
+// Removing a task must not touch the file the user downloaded, but the partial
+// data and the sidecar are this app's own scratch: they exist only so a
+// transfer can be resumed, and once the task is gone they can never be used
+// again, so they go with it rather than littering the download folder.
+func TestRemoveClearsScratchButKeepsTheFile(t *testing.T) {
+	app := newTestApp(t)
+	dest := filepath.Join(t.TempDir(), "kept.bin")
+
+	if err := os.WriteFile(dest, []byte("finished"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dest+engine.PartSuffix, []byte("partial"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dest+engine.StateSuffix, []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	task, err := app.mgr.Start(StartRequest{
+		URL: "http://127.0.0.1:1/never", Dest: dest, Start: false,
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if err := app.mgr.Remove(task.ID, false); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+
+	if _, err := os.Stat(dest); err != nil {
+		t.Errorf("the downloaded file was removed: %v", err)
+	}
+	if _, err := os.Stat(dest + engine.PartSuffix); !os.IsNotExist(err) {
+		t.Error("the partial file was left behind")
+	}
+	if _, err := os.Stat(dest + engine.StateSuffix); !os.IsNotExist(err) {
+		t.Error("the sidecar was left behind")
 	}
 }
 

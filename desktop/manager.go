@@ -365,14 +365,15 @@ func (m *Manager) Remove(id string, deleteFiles bool) error {
 	// avoids a race between removal and a final flush.
 	t.waitStopped(3 * time.Second)
 
-	if deleteFiles {
-		_ = os.Remove(dest + engine.PartSuffix)
-		_ = os.Remove(dest + engine.StateSuffix)
-		// Only delete the published file when the task actually produced one,
-		// so a failed task cannot remove an unrelated file sharing the name.
-		if wasComplete {
-			_ = os.Remove(dest)
-		}
+	// The partial file and its sidecar are this app's own scratch data: they
+	// exist only so a transfer can be resumed, and once the task is gone they
+	// can never be used again. Leaving them behind would litter the download
+	// folder with orphans nobody can identify. The published file is the user's,
+	// and is removed only when they explicitly asked for that.
+	_ = os.Remove(dest + engine.PartSuffix)
+	_ = os.Remove(dest + engine.StateSuffix)
+	if deleteFiles && wasComplete {
+		_ = os.Remove(dest)
 	}
 
 	m.mu.Lock()
