@@ -12,14 +12,15 @@ import (
 //go:embed all:frontend/dist
 var assets embed.FS
 
-// The window opens at a size that fits the task list without scrolling and is
-// still usable on a 1366x768 laptop. The minimum is set so the layout cannot be
-// squeezed into a state where the progress columns collapse.
+// The window opens wide enough for six task columns plus the sidebar without
+// the action buttons being pushed off the right edge. The minimum keeps the
+// columns from colliding; below the default width the list scrolls sideways
+// rather than dropping controls.
 const (
-	windowWidth  = 1120
-	windowHeight = 720
-	minWidth     = 880
-	minHeight    = 560
+	windowWidth  = 1280
+	windowHeight = 800
+	minWidth     = 1000
+	minHeight    = 600
 )
 
 func main() {

@@ -132,7 +132,12 @@ export function TaskRow({
             <span className="num task__meta-primary">{formatSpeed(task.speed)}</span>
             <span className="num">剩余 {formatEta(task.eta)}</span>
           </>
-        ) : task.segments > 0 && task.status !== "completed" ? (
+        ) : task.status === "completed" ? (
+          // Segment counts are only meaningful while transferring; after the
+          // fact the column would just repeat what the size column already
+          // shows, so it is left blank.
+          <span className="num">—</span>
+        ) : task.segments > 1 ? (
           <span className="num">
             分片 {task.segmentsDone}/{task.segments}
           </span>
@@ -166,18 +171,6 @@ export function TaskRow({
             onClick={() => void run(() => api.resumeTask(task.id))}
           >
             <IconPlay size={16} />
-          </button>
-        ) : null}
-
-        {task.status === "completed" ? (
-          <button
-            type="button"
-            className="icon-btn"
-            aria-label="打开文件"
-            title="打开文件"
-            onClick={() => void run(() => api.openFile(task.id))}
-          >
-            <IconDownload size={16} />
           </button>
         ) : null}
 

@@ -62,8 +62,9 @@
   --font-mono: "Cascadia Mono", Consolas, ui-monospace, monospace;
 
   /* Task list columns. The header and every row share this template, which is
-     what keeps the sortable header aligned with the rows it sorts. */
-  --task-cols: minmax(220px, 1fr) 92px 104px 128px 92px 76px;
+     what keeps the sortable header aligned with the rows it sorts. TaskList
+     replaces this at runtime once the user drags a column boundary. */
+  --task-cols: minmax(140px, 1fr) 74px 92px 88px 104px 132px;
 
   --shadow-raised: 0 4px 16px rgba(0, 0, 0, 0.45);
   --shadow-modal: 0 16px 48px rgba(0, 0, 0, 0.6);
@@ -375,6 +376,53 @@ input:focus {
   grid-template-columns: var(--sidebar-w-collapsed) 1fr;
 }
 
+/* ------------------------------------------------------- collapsed rail --- */
+
+/* When collapsed the sidebar becomes a rail of icons. Labels, counts and the
+   type section have nowhere to go, so they are removed rather than squeezed. */
+.sidebar--collapsed {
+  padding-left: var(--space-1);
+  padding-right: var(--space-1);
+}
+
+.sidebar--collapsed .nav-item {
+  justify-content: center;
+  padding: 0;
+}
+
+.sidebar--collapsed .nav-item__label,
+.sidebar--collapsed .nav-item__count {
+  display: none;
+}
+
+.sidebar--collapsed .nav-item__icon {
+  flex: 0 0 auto;
+}
+
+.sidebar--collapsed .navgroup,
+.sidebar--collapsed .sidebar__stats {
+  display: none;
+}
+
+.sidebar__collapse {
+  position: absolute;
+  top: var(--space-2);
+  right: var(--space-1);
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  transition: background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+
+.sidebar__collapse:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
 .topbar {
   grid-area: topbar;
   display: flex;
@@ -673,10 +721,22 @@ input:focus {
 
 /* The sortable header stays put; only the list below it scrolls. */
 .listwrap {
+  position: relative;
   flex: 1;
   min-height: 0;
   display: flex;
   flex-direction: column;
+  /* Sideways scrolling appears only once a column has been dragged wider than
+     the space available. */
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+/* Both the header and every row carry this minimum, so widening a column
+   scrolls them together instead of letting them drift out of alignment. */
+.listhead,
+.task {
+  min-width: var(--task-min-w, auto);
 }
 
 /* ------------------------------------------------------------- settings --- */
@@ -707,21 +767,25 @@ input:focus {
   color: var(--text-muted);
 }
 
+/* The save bar sits at the bottom right, as a bar rather than a stray button
+   floating over the first section. */
 .settings__foot {
-  display: flex;
-  align-items: center;
-  gap: var(--space-3);
   position: sticky;
   bottom: 0;
-  padding: var(--space-3) 0;
-  background: linear-gradient(
-    to top,
-    var(--bg-base) 60%,
-    rgba(13, 15, 20, 0)
-  );
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-3);
+  margin-top: auto;
+  padding: var(--space-3) var(--space-4);
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: 0 -6px 20px rgba(0, 0, 0, 0.35);
 }
 
 .settings__status {
+  margin-right: auto;
   font-size: 12px;
   color: var(--success);
 }
@@ -775,11 +839,54 @@ input:focus {
 .listhead {
   display: grid;
   grid-template-columns: var(--task-cols);
-  gap: var(--space-2);
+  gap: var(--space-1);
   align-items: center;
   padding: var(--space-2) var(--space-4);
   border-bottom: 1px solid var(--border);
   background: var(--bg-surface);
+  /* The header stays put while the list scrolls underneath it. */
+  position: sticky;
+  top: 0;
+  z-index: 2;
+}
+
+/* Draggable column boundaries, laid over the gaps between header cells.
+   Positioned as a sibling of the header row rather than inside a cell, because
+   a button cannot contain another interactive element. */
+.colresizers {
+  position: absolute;
+  top: 0;
+  left: var(--space-4);
+  display: flex;
+  gap: var(--space-1);
+  height: 33px;
+  z-index: 3;
+  pointer-events: none;
+}
+
+.colresizer {
+  position: relative;
+  flex: 0 0 auto;
+  pointer-events: auto;
+  cursor: col-resize;
+}
+
+/* A hairline only appears on hover, so the header does not look like a table
+   grid at rest. */
+.colresizer::after {
+  content: "";
+  position: absolute;
+  right: -5px;
+  top: 6px;
+  bottom: 6px;
+  width: 2px;
+  border-radius: var(--radius-full);
+  background: transparent;
+  transition: background var(--dur-fast) var(--ease);
+}
+
+.colresizer:hover::after {
+  background: var(--accent);
 }
 
 .listhead__cell {
@@ -818,7 +925,7 @@ input:focus {
 .task {
   display: grid;
   grid-template-columns: var(--task-cols);
-  gap: var(--space-2);
+  gap: var(--space-1);
   align-items: start;
   min-height: var(--task-row-h);
   padding: var(--space-3) var(--space-4);
@@ -1092,16 +1199,22 @@ input:focus {
 .setting__text {
   flex: 1;
   min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }
 
 .setting__title {
+  display: block;
   font-size: 13px;
   font-weight: 500;
   color: var(--text-primary);
 }
 
+/* The hint always occupies its own line. Sharing a line with the title made
+   every row read as one run-on sentence. */
 .setting__hint {
-  margin-top: 2px;
+  display: block;
   font-size: 12px;
   line-height: 16px;
   color: var(--text-muted);

@@ -26,6 +26,9 @@ interface Props {
   activeCount: number;
   totalSpeed: number;
   settingsOpen: boolean;
+  /** Whether the sidebar is collapsed to an icon rail. */
+  collapsed: boolean;
+  onToggleCollapsed: () => void;
   onFilter: (f: Filter) => void;
   onOpenSettings: () => void;
 }
@@ -44,14 +47,16 @@ export function Sidebar({
   activeCount,
   totalSpeed,
   settingsOpen,
+  collapsed,
+  onToggleCollapsed,
   onFilter,
   onOpenSettings,
 }: Props): JSX.Element {
   const [typesOpen, setTypesOpen] = useState(true);
-  const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
+  const [subCollapsed, setSubCollapsed] = useState<Record<string, boolean>>({});
 
-  // Resizing is a view preference, so it is kept in a ref plus state rather
-  // than being written to the settings file on every pixel of movement.
+  // Resizing is a view preference, so it is kept in state rather than being
+  // written to the settings file on every pixel of movement.
   const [width, setWidth] = useState(224);
   const dragging = useRef(false);
 
@@ -63,8 +68,8 @@ export function Sidebar({
 
     const onMove = (ev: MouseEvent) => {
       if (!dragging.current) return;
-      const next = Math.max(180, Math.min(360, startW + ev.clientX - startX));
-      setWidth(next);
+      // Clamped so the sidebar can never be dragged over the list.
+      setWidth(Math.max(180, Math.min(360, startW + ev.clientX - startX)));
     };
     const onUp = () => {
       dragging.current = false;
@@ -86,11 +91,27 @@ export function Sidebar({
 
   return (
     <nav
-      className="sidebar"
+      className={`sidebar${collapsed ? " sidebar--collapsed" : ""}`}
       aria-label="任务筛选"
-      style={{ width, flex: `0 0 ${width}px` }}
+      style={collapsed ? undefined : { width }}
     >
       <div className="sidebar__scroll">
+        <button
+          type="button"
+          className="nav-item nav-item--toggle"
+          aria-expanded={!collapsed}
+          aria-label={collapsed ? "展开侧栏" : "收起侧栏"}
+          title={collapsed ? "展开侧栏" : "收起侧栏"}
+          onClick={onToggleCollapsed}
+        >
+          <span
+            className={`sidebar__collapse${collapsed ? " sidebar__collapse--flipped" : ""}`}
+          >
+            <IconChevron size={14} />
+          </span>
+          <span className="nav-item__label">{collapsed ? "" : "收起"}</span>
+        </button>
+
         {STATUS_NAV.map((item) => {
           const active = !settingsOpen && filter === item.key;
           return (
@@ -99,6 +120,7 @@ export function Sidebar({
               type="button"
               className={`nav-item${active ? " nav-item--active" : ""}`}
               aria-current={active ? "page" : undefined}
+              title={item.label}
               onClick={() => onFilter(item.key)}
             >
               <span className="nav-item__icon">{item.icon}</span>
@@ -131,7 +153,7 @@ export function Sidebar({
               {TYPE_GROUPS.map((g) => {
                 const items = tasks.filter((t) => groupOf(t.name) === g.key);
                 if (items.length === 0) return null;
-                const isCollapsed = collapsed[g.key] ?? false;
+                const isCollapsed = subCollapsed[g.key] ?? false;
                 const exts = [
                   ...new Set(
                     items
@@ -152,7 +174,7 @@ export function Sidebar({
                       className="navsub__head"
                       aria-expanded={!isCollapsed}
                       onClick={() =>
-                        setCollapsed((prev) => ({
+                        setSubCollapsed((prev) => ({
                           ...prev,
                           [g.key]: !isCollapsed,
                         }))

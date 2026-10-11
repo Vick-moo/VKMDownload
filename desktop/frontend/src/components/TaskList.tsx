@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { JSX } from "react";
 import { formatBytes, formatWhen } from "../format";
 import {
@@ -32,8 +32,8 @@ interface Column {
 /**
  * Columns offered by the sortable header.
  *
- * The order matches --task-cols in styles.css; changing one without the other
- * misaligns the header from the rows it sorts.
+ * The order matches the --task-cols template in styles.css; changing one
+ * without the other would misalign the header from the rows it sorts.
  */
 const COLUMNS: Column[] = [
   { key: "name", label: "名称" },
@@ -42,6 +42,24 @@ const COLUMNS: Column[] = [
   { key: "progress", label: "进度", right: true },
   { key: "speed", label: "速度 / 分片", right: true },
 ];
+
+/**
+ * Column widths in pixels, in the same order as COLUMNS plus the action track.
+ *
+ * They are kept in state and written to the container as the --task-cols custom
+ * property, so the header and every row share one template and the drag handles
+ * only have to update a single value.
+ *
+ * The defaults must leave room for the name column to grow: at the window's
+ * 1120px opening width with the sidebar expanded the content area is about
+ * 872px, of which padding and the six inter-column gaps take 68px. The fixed
+ * tracks therefore have to total well under 800px or the action buttons are
+ * pushed past the right edge.
+ */
+const DEFAULT_WIDTHS = [240, 74, 92, 88, 104, 132];
+
+/** Smallest a column may be dragged to. */
+const MIN_WIDTHS = [140, 58, 72, 68, 84, 108];
 
 /** Numeric value of a task for a sortable column. */
 function sortValue(t: TaskView, key: SortKey): number {
@@ -99,6 +117,45 @@ export function TaskList({
   onChanged,
 }: Props): JSX.Element {
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
+  const [widths, setWidths] = useState<number[]>(DEFAULT_WIDTHS);
+  const wrapRef = useRef<HTMLDivElement>(null);
+
+  // A drag changes the width of the column to its left. Pointer events are
+  // listened for on the window so the drag keeps working when the cursor
+  // outruns the handle.
+  function startColResize(index: number, e: React.MouseEvent) {
+    e.preventDefault();
+    e.stopPropagation();
+    const startX = e.clientX;
+
+    const onMove = (ev: MouseEvent) => {
+      const delta = ev.clientX - startX;
+      setWidths((prev) => {
+        const next = [...prev];
+        // Clamped per column so a drag cannot collapse one to nothing.
+        next[index] = Math.max(
+          MIN_WIDTHS[index],
+          Math.min(560, prev[index] + delta),
+        );
+        return next;
+      });
+    };
+    const onUp = () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  }
+
+  const template = widths
+    .map((w, i) => (i === 0 ? `minmax(${MIN_WIDTHS[0]}px, 1fr)` : `${w}px`))
+    .join(" ");
+
+  // Padding (32) plus one gap per column boundary (6 × 6) is what the grid
+  // tracks do not account for. Publishing the total as a minimum lets the
+  // header and the rows scroll sideways together instead of drifting apart.
+  const gridMinWidth = widths.reduce((sum, w) => sum + w, 0) + 6 * 6 + 32;
 
   const sorted = useMemo(() => {
     const dir = sortDir === "asc" ? 1 : -1;
@@ -170,6 +227,7 @@ export function TaskList({
             </button>
           );
         })}
+        {/* Placeholder for the action track, which has no header of its own. */}
         <span />
       </div>
     );
@@ -188,8 +246,36 @@ export function TaskList({
   }
 
   return (
-    <div className="listwrap">
+    <div
+      className="listwrap"
+      ref={wrapRef}
+      style={
+        {
+          "--task-cols": template,
+          "--task-min-w": `${gridMinWidth}px`,
+        } as React.CSSProperties
+      }
+    >
       {header()}
+
+      {/* Handles sitting on the boundary after each sortable column. They are
+          siblings of the header cells rather than children: a button cannot
+          contain another interactive element, and the cell already handles the
+          click that sorts. */}
+      <div className="colresizers" aria-hidden="true">
+        {COLUMNS.map((c, i) =>
+          i === COLUMNS.length - 1 ? null : (
+            <span
+              key={c.key}
+              className="colresizer"
+              style={{ width: widths[i] }}
+              onMouseDown={(e) => startColResize(i, e)}
+              onDoubleClick={() => setWidths(DEFAULT_WIDTHS)}
+              title="拖动调整列宽，双击复位"
+            />
+          ),
+        )}
+      </div>
 
       <div className="list">
         {groups

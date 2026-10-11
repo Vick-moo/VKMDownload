@@ -24,6 +24,7 @@ function App(): JSX.Element {
   const [dialogOpen, setDialogOpen] = useState(false);
   const [dialogURL, setDialogURL] = useState("");
   const [pendingURL, setPendingURL] = useState("");
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
 
   const typesOpen = filter.startsWith("type:");
   const activeType = typesOpen ? filter.slice(5) : "";
@@ -167,7 +168,7 @@ function App(): JSX.Element {
   const hasTasks = tasks.length > 0;
 
   return (
-    <div className="shell">
+    <div className={`shell${sidebarCollapsed ? " shell--collapsed" : ""}`}>
       <header className="topbar">
         <div className="topbar__brand">
           <span className="topbar__logo">
@@ -189,6 +190,8 @@ function App(): JSX.Element {
         activeCount={stats.activeCount}
         totalSpeed={stats.totalSpeed}
         settingsOpen={settingsOpen}
+        collapsed={sidebarCollapsed}
+        onToggleCollapsed={() => setSidebarCollapsed((v) => !v)}
         onFilter={(f) => {
           setSettingsOpen(false);
           setFilter(f);
