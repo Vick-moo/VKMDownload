@@ -1,6 +1,6 @@
-# vdownload — 实施计划
+# VKMDownload — 实施计划
 
-Go 编写的多连接下载管理器（IDM 风格），带 Wails 桌面 GUI。
+Go 编写的多连接下载管理器（IDM 风格），带 Wails 桌面 GUI 与浏览器扩展。
 
 ---
 
@@ -14,7 +14,9 @@ Go 编写的多连接下载管理器（IDM 风格），带 Wails 桌面 GUI。
 | 断点续传（`.part` + `.json` sidecar） | 取消后恢复，5 个不同取消点全部 0 空洞 |
 | 故障注入测试服务器 | 假 Range / 断流 / 谎报长度 / 503 / 无 HEAD / chunked / Cookie 保护 |
 | CLI（`get` / `info` / `bench`） | `idm bench` 可跑出提速比与逐字节校验 |
-| 测试套件 | `go test -race` 全绿（34.9s） |
+| 桌面 GUI（Wails v2 + React 19） | 任务列表、暂停/继续、按类型筛选、批量操作、计划下载、速度上限、托盘、列宽记忆 |
+| 浏览器扩展（Chromium 系） | 拦截下载 + 右键菜单；策略由应用设置驱动，改完立刻生效 |
+| 测试套件 | `go test -race` 全绿（desktop 16.5s + engine 31.8s） |
 
 ### 本次接手后修掉的 bug
 
@@ -34,6 +36,29 @@ Go 编写的多连接下载管理器（IDM 风格），带 Wails 桌面 GUI。
    修法：抽出 `doWithRetry`，HEAD 与 Range 探测都走它。
 6. **`matches` 过于宽松** — 验证器"一边有一边没有"被当作相同。改为严格相等：
    误判代价不对称（丢一次重下 vs 发布一个长度正确但有洞的文件）。
+
+### GUI 阶段修掉的 bug
+
+| 症状 | 根因 | 修法 |
+|---|---|---|
+| 新建任务即崩溃（栈溢出） | `NewApp` 里 emitter 调用了自己 | 改成调用 `runtime.EventsEmit` |
+| 窗口关不掉 | `OnBeforeClose` 的 `prevent` 语义写反了 | 两处早退都返回 `true` → 改为按情况返回 |
+| 暂停变成取消（丢失断点） | goroutine 读 `t.view.Status`，而它可能被后写 | 新增 `stopIntent` 字段，在取消前记录意图 |
+| 计划下载永远不结束 | `Stats()` 把 `StatusPaused` 也算进 `queued` | 拆出独立的 `paused` 计数 |
+| 点一次分隔线整行列宽跳变 | 拖动中与拖动结束用了两套富余分配 | 改成始终平衡，没有富余可重新分配 |
+| 表头两侧各露 16px 空条 | `.listwrap` 的 padding 区域不绘制背景 | 表头负 margin 拉出、再用 padding 补回 |
+| 保存按钮点击后跳到左边 | `margin-right: auto` 加在了最后一个元素上 | 把状态文字放在按钮前面 |
+| 改名后任务列表消失 | 迁移检查的是目标目录而非文件，而目录可能因无关原因已存在 | 改为逐文件迁移、不覆盖，并支持多级旧名 |
+| 测试污染真实配置目录 | `debugLog` 自己算路径，绕过了测试的数据目录覆盖 | 改为走 `a.dataDir()` |
+| Google Drive 私有文件被说成"这是网页" | 登录重定向的响应体也是 HTML | 新增 `ErrNeedsSignIn`，优先于 `ErrNotAFile` |
+
+### 尚未做
+
+- 视频嗅探（m3u8 / DASH）
+- Firefox 扩展
+- 代码签名（SmartScreen 提示无法消除）
+- 安装包（需 Inno Setup，未安装）
+
 
 ---
 

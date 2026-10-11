@@ -1,12 +1,125 @@
-# VDownload
+# VKMDownload
 
-一个用 Go 写的多连接下载管理器（IDM 风格），带 Wails 桌面界面。
+一个用 Go 写的多连接下载管理器（IDM 风格）：**下载引擎 + Wails 桌面界面 + 浏览器扩展**。
 
 把一个文件切成多段并行下载，支持断点续传；引擎自带一个"恶意服务器"测试工具，
 用来验证它在真实网络里遇到的各种坑（服务器谎报支持 Range、中途断线、谎报文件大小……）
 时不会悄悄给你一个坏文件。
 
-> **状态**：引擎与 CLI 已完成并通过验证。桌面 GUI 正在开发中。
+> **状态**：引擎、桌面应用、浏览器扩展均已完成并通过验证。
+
+---
+
+## 功能
+
+### 引擎
+
+- **多连接分片下载** —— 每段一个独立 HTTP 请求，各自写入文件的不同偏移
+- **动态分段** —— 某个 worker 空闲时，把最长的剩余段对半切开交给它，不让慢连接拖住整体
+- **断点续传** —— 进度写进 sidecar（`.vdownload.json`），取消 / 崩溃后可继续
+- **一致性校验** —— 用 ETag / Last-Modified 判断服务器端文件是否变过；变了就重下，不拼接
+- **自适应降级** —— 服务器不支持 Range 时自动退回单连接流式下载
+- **重试与退避** —— 网络中断、5xx、429 按指数退避重试；4xx 直接失败不做无用功
+- **全局速度上限** —— token bucket，所有任务共享一个上限，而不是每个任务各自限速
+- **故障注入测试服务器** —— 可模拟断线、假 Range、谎报 Content-Length、403、chunked 等
+
+### 桌面界面
+
+- 任务列表带实时进度、速度、分片数，**列宽可拖动并会记住**
+- 暂停 / 继续 / 取消，**暂停保留断点可续传**
+- **按文件类型筛选**（扩展名按钮由实际出现的类型生成，不是固定表）
+- **批量操作**：全部开始 / 全部停止 / 计划下载（跑完所有任务后响铃或关机）
+- **删除当前列表**（按筛选范围），带确认，且**只删记录、绝不碰磁盘**
+- 剪贴板链接监控（可选自动开始 / 先确认）
+- 关闭窗口最小化到托盘，下载不中断
+- 深色界面，中文
+
+### 浏览器扩展
+
+- 把浏览器的下载**交给 VKMDownload**，不再让浏览器自己下
+- 右键菜单「用 VKMDownload 下载」
+- **Brave / Edge / Chrome / Opera / Vivaldi 共用一套代码**（Chromium 系）
+- 支持**体积阈值**（默认小于 1 MB 交给浏览器）和**站点排除**
+- 所有开关都在**应用设置里**，扩展每次拦截前会问应用，**改完立刻生效、不用重装**
+
+---
+
+## 下载安装
+
+### 用现成的
+
+到 [Releases](../../releases) 下载：
+
+| 文件 | 说明 |
+|---|---|
+| `VKMDownload.exe` | 主程序。**双击即可运行，无需安装** |
+| `VKMDownload-extension.zip` | 浏览器扩展，解压后加载 |
+
+> **Windows 会提示"已保护你的电脑"**：因为 exe 没有代码签名证书。点**「更多信息」→「仍要运行」**。
+> 这是未签名程序的正常提示，不是病毒警告。
+
+### 浏览器扩展怎么装
+
+**这个扩展没有上架应用商店**，需要手动加载（约 1 分钟）：
+
+1. **先启动 VKMDownload**（扩展要问它该不该接管，它得在运行）
+2. 打开浏览器的扩展管理页：
+
+   | 浏览器 | 地址 |
+   |---|---|
+   | Brave | `brave://extensions` |
+   | Edge | `edge://extensions` |
+   | Chrome | `chrome://extensions` |
+   | Opera | `opera://extensions` |
+
+3. 打开右上角的**「开发者模式」**
+4. 点**「加载已解压的扩展程序」**，选择解压出来的 **`extension` 目录本身**
+
+> **⚠️ 如果装过 IDM 或其它下载器的扩展，先把它关掉。** 两个扩展都监听同一个下载事件，
+> 会互相抢，结果是下载失败或下载两遍。
+>
+> **每次浏览器启动会提示「请停用开发者模式扩展」** —— 这是 Chromium 的固定行为，
+> 只有上架商店才能消除。点掉即可，不影响使用。
+
+细节见 [extension/README.md](extension/README.md)。
+
+### 从源码构建
+
+需要 **Go 1.24+**、**Node.js**、**Wails v2**，以及 Windows 上的 **WebView2** 运行时（Win11 自带）。
+
+```bash
+# 桌面应用
+cd desktop
+wails build            # 产出 build/bin/VKMDownload.exe
+
+# 命令行版本
+go build -o bin/vdl.exe ./cmd/idm
+```
+
+---
+
+## 命令行
+
+引擎也能单独用（`cmd/idm`）：
+
+```bash
+go build -o bin/vdl.exe ./cmd/idm
+
+vdl get https://example.com/big.zip -o D:\Downloads -conns 8   # 下载
+vdl info https://example.com/big.zip                           # 先看服务器能力
+vdl bench https://example.com/big.zip -conn-list 1,2,4,8,16    # 对比连接数
+vdl get https://example.com/big.zip -resume                    # 断点续传
+```
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `-conns` | 8 | 并发连接数，1 表示禁用分段 |
+| `-o` | 服务器建议的文件名 | 输出文件或目录 |
+| `-min-segment` | 1 MiB | 最小分片大小，小文件不会被切碎 |
+| `-reserve` | 512 KiB | worker 一次认领多少字节 |
+| `-H` | | 附加请求头，可重复，如 `-H 'Cookie: a=b'` |
+| `-proxy` | | 代理地址，留空则读环境变量 |
+| `-json` | | 以 JSON 输出结果 |
 
 ---
 
@@ -24,86 +137,6 @@
 
 为什么要在本地做限速测试：loopback 上 RTT 几乎为零，不限速的话单连接就能跑满，
 多连接的优势完全看不出来。限速后才复现了真实互联网上"多连接绕过单连接限速"的场景。
-
----
-
-## 功能
-
-- **多连接分片下载** —— 每段一个独立 HTTP 请求，各自写入文件的不同偏移
-- **动态分段** —— 某个 worker 空闲时，把最长的剩余段对半切开交给它，不让慢连接拖住整体
-- **断点续传** —— 进度写进 sidecar（`.vdownload.json`），取消 / 崩溃后可继续
-- **一致性校验** —— 用 ETag / Last-Modified 判断服务器端文件是否变过；变了就重下，不拼接
-- **自适应降级** —— 服务器不支持 Range 时自动退回单连接流式下载
-- **重试与退避** —— 网络中断、5xx、429 按指数退避重试；4xx 直接失败不做无用功
-- **故障注入测试服务器** —— 可模拟断线、假 Range、谎报 Content-Length、403、chunked 等
-
----
-
-## 快速开始
-
-需要 Go 1.24+。
-
-```bash
-go build -o bin/vdl.exe ./cmd/idm
-```
-
-### 下载一个文件
-
-```bash
-vdl get https://example.com/big.zip -o D:\Downloads -conns 8
-```
-
-### 先看看服务器能力再决定
-
-```bash
-vdl info https://example.com/big.zip
-```
-
-输出会告诉你文件多大、**实测**是否真的支持 Range（不信服务器自称的 `Accept-Ranges`）、
-以及建议的文件名。
-
-### 对比不同连接数的速度
-
-```bash
-vdl bench https://example.com/big.zip -conn-list 1,2,4,8,16
-```
-
-### 断点续传
-
-中途 `Ctrl-C` 会保留 `.part` 和 `.json`，下次带 `-resume` 继续：
-
-```bash
-vdl get https://example.com/big.zip -o D:\Downloads -resume
-```
-
-### 常用参数
-
-| 参数 | 默认 | 说明 |
-|---|---|---|
-| `-conns` | 8 | 并发连接数，1 表示禁用分段 |
-| `-o` | 服务器建议的文件名 | 输出文件或目录 |
-| `-min-segment` | 1 MiB | 最小分片大小，小文件不会被切碎 |
-| `-reserve` | 512 KiB | worker 一次认领多少字节 |
-| `-H` | | 附加请求头，可重复，如 `-H 'Cookie: a=b'` |
-| `-proxy` | | 代理地址，留空则读环境变量 |
-| `-json` | | 以 JSON 输出结果 |
-
----
-
-## 测试
-
-```bash
-go test ./...            # 全部测试
-go test -race ./...      # 并发正确性（推荐，历史上抓出过真 bug）
-VDOWNLOAD_DIAGNOSE=1 go test ./internal/engine -run Diagnose -v   # 长时间压力诊断
-```
-
-排障时打开引擎的详细日志：
-
-```bash
-VDOWNLOAD_DEBUG=1 vdl get <url>          # 打到 stderr
-VDOWNLOAD_DEBUG=C:\trace.log vdl get <url>   # 打到文件
-```
 
 ---
 
@@ -146,6 +179,12 @@ big.zip.vdownload.json     分段进度 + ETag + 总大小
 
 这样无论并发如何交错，请求偏移量都只反映真实写进磁盘的字节，物理上不可能跳过空洞。
 
+### 删除记录永远不碰磁盘
+
+列表里的删除按钮、批量删除、清理失败记录，**一律只删记录**。`.part` 和 sidecar
+都会留着——它们正是之后续传所依赖的东西，而"整理一下列表"不等于授权删除几个 GB 的文件。
+确认框里会明确写出这一点。
+
 ### 测试服务器比真服务器更"坏"
 
 `testsrv/` 是一个可编程的恶劣服务器：`-fake-range` 会自称支持 Range 却总是返回 200；
@@ -153,16 +192,47 @@ big.zip.vdownload.json     分段进度 + ETag + 总大小
 `-no-head` 对 HEAD 返回 405；`-require-cookie` 不给 cookie 就 403。
 引擎的探测逻辑之所以**不信** `Accept-Ranges` 头、只信实测的 206 响应，就是被它逼出来的。
 
+### 扩展为什么不用 native messaging
+
+IDM 那种做法要装一个 native messaging host，还要为每家浏览器写各自的注册表项，
+任何一步失败都会**静默不工作**。这里应用自己开一个**只监听 `127.0.0.1`** 的端口，
+扩展扫描 18888–18898 自动找到它——用户只需要装扩展，不用装第二个程序。
+
+**安全**：端点拒绝来源不是浏览器扩展的请求。跨域 POST 即使页面读不到响应也会被送达，
+所以没有这道检查的话，你访问的任何网页都能往下载队列里塞任务。
+浏览器建议的文件名也会被削到最后一个路径段，否则远程服务器就能决定文件落在哪。
+
+---
+
+## 测试
+
+```bash
+go test ./...            # 全部测试
+go test -race ./...      # 并发正确性（推荐，历史上抓出过真 bug）
+VDOWNLOAD_DIAGNOSE=1 go test ./internal/engine -run Diagnose -v   # 长时间压力诊断
+```
+
+排障时打开引擎的详细日志：
+
+```bash
+VDOWNLOAD_DEBUG=1 vdl get <url>               # 打到 stderr
+VDOWNLOAD_DEBUG=C:\trace.log vdl get <url>    # 打到文件
+```
+
+应用侧的日志在 `%APPDATA%\VKMDownload\vkmdownload.log`。
+
 ---
 
 ## 目录结构
 
 ```
-internal/engine/     下载引擎（探测、分段规划、并发下载、续传、重试）
+internal/engine/     下载引擎（探测、分段规划、并发下载、续传、重试、限速）
 testsrv/             故障注入测试服务器（可被测试 import）
 cmd/idm/             命令行入口
 cmd/testsrv/         独立运行的测试服务器
-desktop/             Wails 桌面应用（开发中）
+desktop/             Wails 桌面应用（Go 后端 + React 前端）
+extension/           浏览器扩展（Chromium 系）
+design/DESIGN.md     设计文档
 PLAN.md              实施计划与已知取舍
 ```
 
@@ -170,8 +240,12 @@ PLAN.md              实施计划与已知取舍
 
 ## 已知边界
 
-- **不做浏览器扩展**：目前靠剪贴板监控捕获链接，浏览器集成尚未实现
-- **不做视频嗅探**：IDM 的招牌功能之一，但那是另一个项目规模（m3u8/DASH 解析 + TS 合并）
+- **不支持视频嗅探**：IDM 的招牌功能之一，但那是另一个项目规模（m3u8/DASH 解析 + TS 合并）
+- **Firefox 扩展尚未适配**：扩展 API 与 Chromium 系不同，需要单独一套
+- **扩展未上架商店**：因此每次浏览器启动会有开发者模式提示
+- **没有代码签名**：exe 会触发 Windows SmartScreen 提示
+- **需要登录的网盘链接**（如 Google Drive 私有文件）无法下载 —— 应用没有浏览器的登录态。
+  会明确提示这一点，而不是把登录页当成文件存下来
 - 引擎只处理直链文件下载
 
 ---
