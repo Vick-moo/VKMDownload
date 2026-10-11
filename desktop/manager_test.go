@@ -388,6 +388,71 @@ func TestResumePauseOnMissingFileConcurrently(t *testing.T) {
 	t.Log("survived concurrent resume/pause/cancel on a missing target")
 }
 
+// TestNewAppEmitterDelegatesToRuntime guards the emitter against the regression
+// that took the app down with a stack overflow: NewApp once assigned a closure
+// whose body called the very field it was assigning, so the first event
+// recursed until the stack ran out.
+//
+// The emitter cannot be exercised in a test — runtime.EventsEmit calls
+// os.Exit(1) on a context that did not come from the Wails lifecycle hooks, and
+// every other test replaces the emitter, which is exactly why this slipped
+// through. So the guard reads the source instead: the closure NewApp installs
+// must reach the runtime and must not call the field it is assigning.
+func TestNewAppEmitterDelegatesToRuntime(t *testing.T) {
+	src, err := os.ReadFile("app.go")
+	if err != nil {
+		t.Fatalf("reading app.go: %v", err)
+	}
+
+	body := functionBody(string(src), "func NewApp() *App {")
+	if body == "" {
+		t.Fatal("could not find NewApp in app.go")
+	}
+
+	if !strings.Contains(body, "runtime.EventsEmit(") {
+		t.Error("NewApp's emitter does not call runtime.EventsEmit")
+	}
+	// A self-call is the failure this test exists for.
+	if strings.Contains(body, "a.emit(name") || strings.Contains(body, "a.emit(n,") {
+		t.Error("NewApp's emitter calls itself; that recurses until the stack overflows")
+	}
+}
+
+// functionBody returns the text of the function whose signature line is marker,
+// matched to its closing brace at column zero.
+func functionBody(src, marker string) string {
+	start := strings.Index(src, marker)
+	if start < 0 {
+		return ""
+	}
+	end := strings.Index(src[start:], "\n}\n")
+	if end < 0 {
+		return ""
+	}
+	return src[start : start+end+2]
+}
+
+// TestEmitSurvivesNilContext checks the pre-startup path, where events arrive
+// before the runtime has handed over a context. The original emitter is used,
+// because the nil check lives inside it and a nil context must not reach
+// runtime.EventsEmit, which would abort the process.
+func TestEmitSurvivesNilContext(t *testing.T) {
+	a := NewAppWithDataDir(t.TempDir())
+	a.ctx = nil
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		a.emit("task:added", TaskView{ID: "t2"})
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("emit blocked with a nil context")
+	}
+}
+
 // TestCancelDiscardsPartialData checks that cancelling leaves nothing behind to
 // resume from, since the user asked for it to stop for good.
 func TestCancelDiscardsPartialData(t *testing.T) {

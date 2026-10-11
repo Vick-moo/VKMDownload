@@ -121,6 +121,8 @@ export function TaskList({
   // Preferred widths, in the same order as COLUMNS plus the action track.
   const [prefs, setPrefs] = useState<number[]>(DEFAULT_WIDTHS);
   const [avail, setAvail] = useState(0);
+  /** Column currently being dragged, or -1. It keeps its width during layout. */
+  const [priority, setPriority] = useState(-1);
   const wrapRef = useRef<HTMLDivElement>(null);
   // Kept in refs so the drag handler reads current values without being
   // re-created on every render.
@@ -130,41 +132,58 @@ export function TaskList({
   availRef.current = avail;
 
   /**
-   * Only the inter-column gaps need subtracting: the container measured by
-   * ResizeObserver has no horizontal padding of its own (the padding lives on
-   * the header and the rows). Subtracting it again would squeeze every column
-   * and clip their contents.
-   */
-  const CHROME = 6 * 6;
-
-  /**
    * Distributes the available width over the columns' preferred widths.
    *
-   * When the preferences do not fit, every column shrinks in proportion down to
-   * its minimum; when there is room to spare, the name column takes it. The
-   * total therefore never exceeds the container, which is what keeps the list
-   * free of a horizontal scrollbar.
+   * `priority` is the column the user is dragging: it keeps the width asked for,
+   * and the others absorb the difference in proportion to their preferences.
+   * Without that the dragged column gives back exactly what it gained — the
+   * shrink below takes from every column, including the one being resized — and
+   * the drag appears to do nothing at all.
+   *
+   * The total never exceeds the container, which is what keeps the list free of
+   * a horizontal scrollbar.
    */
-  function layoutWidths(preference: number[], available: number): number[] {
-    const space = Math.max(available, MIN_WIDTHS.reduce((a, b) => a + b, 0));
+  function layoutWidths(
+    preference: number[],
+    available: number,
+    priority = -1,
+  ): number[] {
+    const floor = MIN_WIDTHS.reduce((a, b) => a + b, 0);
+    const space = Math.max(available, floor);
     const total = preference.reduce((a, b) => a + b, 0);
 
     if (total <= space) {
-      // Give the surplus to the name column; it carries the most information.
+      // Give any surplus to the name column; it carries the most text.
       const out = [...preference];
       out[0] += space - total;
       return out;
     }
 
-    // Too wide: shrink proportionally, but never below the minimum.
+    // Too wide: shrink, but never below the minimum.
     const out = [...preference];
-    const over = total - space;
-    const shrinkable = preference.reduce((sum, w, i) => sum + (w - MIN_WIDTHS[i]), 0);
+    const take = total - space;
+
+    if (priority >= 0) {
+      // Spread the reduction over everything except the column being dragged.
+      let others = 0;
+      for (let i = 0; i < out.length; i += 1) {
+        if (i !== priority) others += out[i] - MIN_WIDTHS[i];
+      }
+      if (others <= 0) return [...MIN_WIDTHS];
+      for (let i = 0; i < out.length; i += 1) {
+        if (i === priority) continue;
+        const room = out[i] - MIN_WIDTHS[i];
+        if (room > 0) out[i] -= (take * room) / others;
+      }
+      return out;
+    }
+
+    const shrinkable = out.reduce((sum, w, i) => sum + (w - MIN_WIDTHS[i]), 0);
     if (shrinkable <= 0) return [...MIN_WIDTHS];
-    const take = Math.min(over, shrinkable);
+    const share = Math.min(take, shrinkable);
     for (let i = 0; i < out.length; i += 1) {
-      const room = preference[i] - MIN_WIDTHS[i];
-      if (room > 0) out[i] -= (take * room) / shrinkable;
+      const room = out[i] - MIN_WIDTHS[i];
+      if (room > 0) out[i] -= (share * room) / shrinkable;
     }
     return out;
   }
@@ -194,6 +213,10 @@ export function TaskList({
     const startX = e.clientX;
     const startPref = prefsRef.current[index];
 
+    // Mark which column is being resized so the layout keeps its width and
+    // takes the difference from the others.
+    setPriority(index);
+
     const onMove = (ev: MouseEvent) => {
       // Driven by the pointer position rather than an accumulated delta: the
       // column edge follows the cursor exactly, which is what makes the drag
@@ -219,8 +242,8 @@ export function TaskList({
   }
 
   const widths = useMemo(
-    () => layoutWidths(prefs, avail),
-    [prefs, avail],
+    () => layoutWidths(prefs, avail, priority),
+    [prefs, avail, priority],
   );
 
   // Every track is an explicit pixel value: a flexible track would fight the
@@ -337,7 +360,7 @@ export function TaskList({
               className="colresizer"
               style={{ width: widths[i] }}
               onMouseDown={(e) => startColResize(i, e)}
-              onDoubleClick={() => setPrefs(DEFAULT_WIDTHS)}
+              onDoubleClick={() => { setPrefs(DEFAULT_WIDTHS); setPriority(-1); }}
               title="拖动调整列宽，双击复位"
             />
           ),

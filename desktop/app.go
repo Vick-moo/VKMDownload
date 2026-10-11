@@ -43,12 +43,18 @@ type App struct {
 }
 
 // NewApp creates the application object and its task manager.
+//
+// The emitter is a field rather than a direct call to runtime.EventsEmit so
+// that tests can replace it: emitting without a window aborts the process.
+// Before the runtime is up there is no context, and the event is dropped by the
+// nil check below.
 func NewApp() *App {
 	a := &App{cfg: DefaultConfig()}
 	a.emit = func(name string, data ...any) {
-		if a.ctx != nil {
-			a.emit(name, data...)
+		if a.ctx == nil {
+			return
 		}
+		runtime.EventsEmit(a.ctx, name, data...)
 	}
 	a.mgr = NewManager(a)
 	return a
