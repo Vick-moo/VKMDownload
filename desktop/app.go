@@ -14,7 +14,7 @@ import (
 )
 
 // appVersion is what Version() reports and the browser extension displays.
-const appVersion = "0.2.0"
+const appVersion = "0.2.1"
 
 // App is the object exposed to the front-end. Every exported method becomes a
 // callable binding, so internal state is kept unexported.

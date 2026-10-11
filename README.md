@@ -250,6 +250,22 @@ PLAN.md              实施计划与已知取舍
 
 ---
 
+## 关于代码里还留着的 `vdownload`
+
+项目曾经叫 `VDownload`，改名时留下了几个**故意没改**的标识符。它们看起来像漏改，其实每一个改了都会造成实际损失：
+
+| 位置 | 为什么留着 |
+|---|---|
+| Go module 名 `vdownload` | 改它要动 `go.mod` 与全部 import，收益为零 |
+| `.vdownload.part` / `.vdownload.json` | 已下到一半的文件就是这两个后缀，改了它们**无法续传** |
+| `VDOWNLOAD_DEBUG` 等环境变量 | 可能已经有人写在脚本或 CI 里 |
+| 旧数据目录名 `VDownload` / `VKDownload` | 启动时正是靠这两个名字把旧设置和任务列表迁移过来 |
+| `vdownload.column-widths` | localStorage 的键，改了用户调好的列宽会丢 |
+
+**面向用户的名字**（窗口标题、可执行文件、侧栏、开始菜单、发布包）全部是 **`VKMDownload`**。
+
+---
+
 ## 许可证
 
 MIT，见 [LICENSE](LICENSE)。
