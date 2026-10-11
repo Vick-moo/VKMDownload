@@ -56,6 +56,7 @@ function Switch({
 export function SettingsPage({ config, onSaved }: Props): JSX.Element {
   const [draft, setDraft] = useState<Config | null>(config);
   const [status, setStatus] = useState("");
+  // Holds the outcome of the clipboard test button.
   const [probe, setProbe] = useState("");
 
   useEffect(() => {

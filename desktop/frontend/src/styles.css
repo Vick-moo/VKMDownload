@@ -1183,10 +1183,13 @@ input:focus {
   gap: var(--space-4);
 }
 
-/* A switch row: label and description on the left, the control on the right. */
+/* A switch row: label and description in one column, the control in the other.
+   A grid rather than a flex row, so the control column keeps its position no
+   matter how long the description runs. */
 .setting {
-  display: flex;
-  align-items: flex-start;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
   gap: var(--space-4);
   padding: var(--space-3) 0;
   border-bottom: 1px solid var(--border);
@@ -1225,25 +1228,29 @@ input:focus {
 .switch {
   position: relative;
   flex: 0 0 auto;
-  width: 38px;
+  width: 40px;
   height: 22px;
-  margin-top: 2px;
+  margin-top: 1px;
 }
 
 .switch input {
   position: absolute;
+  inset: 0;
   width: 100%;
   height: 100%;
   margin: 0;
   opacity: 0;
   cursor: pointer;
+  z-index: 1;
 }
 
+/* The track carries a visible border in both states: against the dark panel a
+   background-only control reads as empty space. */
 .switch__track {
   position: absolute;
   inset: 0;
   border-radius: var(--radius-full);
-  background: var(--bg-hover);
+  background: var(--bg-base);
   border: 1px solid var(--border-strong);
   transition: background var(--dur-fast) var(--ease),
     border-color var(--dur-fast) var(--ease);
@@ -1257,7 +1264,8 @@ input:focus {
   width: 14px;
   height: 14px;
   border-radius: var(--radius-full);
-  background: var(--text-muted);
+  background: var(--text-secondary);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
   transition: transform var(--dur-fast) var(--ease),
     background var(--dur-fast) var(--ease);
   pointer-events: none;
@@ -1269,7 +1277,7 @@ input:focus {
 }
 
 .switch input:checked ~ .switch__thumb {
-  transform: translateX(16px);
+  transform: translateX(18px);
   background: #fff;
 }
 
@@ -1278,9 +1286,12 @@ input:focus {
   outline-offset: 2px;
 }
 
-.switch input:disabled ~ .switch__track,
+.switch input:disabled ~ .switch__track {
+  opacity: 0.5;
+}
+
 .switch input:disabled ~ .switch__thumb {
-  opacity: 0.45;
+  opacity: 0.5;
 }
 
 /* Sub-options of a setting read as belonging to it. */
