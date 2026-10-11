@@ -180,15 +180,41 @@ TestClipboardURL()           string      // 便于"立即测试"按钮
 
 ---
 
-## 5. 上传 GitHub（待确认）
+## 5. 上传 GitHub
 
-需要你提供：
-- GitHub 用户名 / 目标仓库名（建议 `vdownload` 或 `go-idm`）
-- 公开还是私有
-- 用 `gh` CLI 还是你自己建好空仓库我推上去
+已定：仓库名 **VDownload**，**私有**。本地仓库已初始化并提交（`6583ed9` + `9694d97`），
+`README.md` / `LICENSE`(MIT) / `.gitignore` / `.gitattributes` 均已就位，工作区干净。
 
-我会做：确认 `gh auth status` → 建仓 → 写 README/LICENSE/.gitignore → 首次提交 → 推送。
-**不会**替你创建账号或输入凭据。
+机器上**没有 `gh` CLI**，所以剩下两种走法：
+
+### 路线 A：自己建仓（不需要装任何东西）
+
+1. 打开 https://github.com/new
+2. Repository name 填 `VDownload`
+3. 选 **Private**
+4. **不要**勾 "Add a README file"，也**不要**选 .gitignore / license
+   （本地已有，勾了会造成冲突）
+5. 建好后执行（把 `<你的用户名>` 换掉）：
+
+```powershell
+cd C:\Users\vickm\deepseek-harness\default-workspace\VDownload
+git remote add origin https://github.com/<你的用户名>/VDownload.git
+git branch -M main
+git push -u origin main
+```
+
+推送时会弹窗要求登录 GitHub（浏览器或 token）。**这一步必须你自己完成**——
+我无法代你输入凭据。
+
+### 路线 B：装 `gh`，之后全自动
+
+```powershell
+winget install --id GitHub.cli
+gh auth login          # 浏览器点授权，只有你能做
+gh repo create VDownload --private --source . --push
+```
+
+`gh` 装好后告诉我，建仓、推送、后续的开 issue / 建 release 我都能代办。
 
 ---
 
@@ -200,7 +226,6 @@ TestClipboardURL()           string      // 便于"立即测试"按钮
   合并 TS 分片）。当前引擎只做直链文件。
 - **HTTP/2 被刻意禁用**：`transport.go` 里 pin 到 HTTP/1.1。这是分片下载能真正加速的
   前提——h2 会把 N 个 Range 请求复用到**一条** TCP 连接上，多连接的加速就变成纯装饰。
-- **`bench/` 目前是空目录**：CLI 的 `idm bench` 已经覆盖了对比需求。若要 Go 原生
-  benchmark 可以后续补，否则应删除该空目录。
-- **排障日志**：`VDOWNLOAD_DEBUG=1` 打开引擎的 `debugf` 输出（默认静默）。GUI 阶段
-  遇到疑难时这个开关是主要抓手。
+- **排障日志**：`VDOWNLOAD_DEBUG=1` 打开引擎的 `debugf` 输出（默认静默，也可指向文件）。
+  `VDOWNLOAD_DIAGNOSE=1` 会把高频压力诊断从 12/16 轮提升到 40/60 轮。
+  `VDOWNLOAD_LEGACY_ACCOUNTING=1` 可复现修复前的记账缺陷，用于回归对照。
