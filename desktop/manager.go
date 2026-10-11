@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"sync"
@@ -13,6 +14,25 @@ import (
 
 	"vdownload/internal/engine"
 )
+
+// debugLog appends a diagnostic line to the app's log file. It exists so a
+// failure that would otherwise be invisible — a panic swallowed by a
+// goroutine — leaves a trace the user can hand back.
+func debugLog(format string, args ...any) {
+	base, err := os.UserConfigDir()
+	if err != nil {
+		return
+	}
+	dir := filepath.Join(base, "VDownload")
+	_ = os.MkdirAll(dir, 0o755)
+	f, err := os.OpenFile(filepath.Join(dir, "vdownload.log"),
+		os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	_, _ = fmt.Fprintf(f, "%s %s\n", time.Now().Format(time.RFC3339), fmt.Sprintf(format, args...))
+}
 
 // TaskStatus is the lifecycle of a task; types.ts mirrors these values.
 type TaskStatus string
@@ -219,7 +239,11 @@ func (m *Manager) Start(req StartRequest) (TaskView, error) {
 	m.app.emit("task:added", snapshot(t))
 
 	if req.Start {
-		go m.run(t)
+		ctx, cancel := context.WithCancel(m.app.ctx)
+		t.mu.Lock()
+		t.cancel = cancel
+		t.mu.Unlock()
+		go m.run(t, ctx, cancel)
 	}
 	_ = m.saveTasks()
 	return snapshot(t), nil
@@ -266,11 +290,18 @@ func (m *Manager) Resume(id string) error {
 		t.mu.Unlock()
 		return fmt.Errorf("当前状态无法继续")
 	}
+
+	// The cancel function is created here rather than inside the goroutine.
+	// Otherwise a pause that arrives while the goroutine is still starting would
+	// find the previous run's cancel — or none at all — and the transfer would
+	// carry on after the user had stopped it.
+	ctx, cancel := context.WithCancel(m.app.ctx)
+	t.cancel = cancel
 	t.view.Status = StatusQueued
 	t.view.Error = ""
 	t.mu.Unlock()
 
-	go m.run(t)
+	go m.run(t, ctx, cancel)
 	return nil
 }
 
@@ -352,12 +383,18 @@ func (m *Manager) Remove(id string, deleteFiles bool) error {
 }
 
 // run performs the transfer for one task.
-func (m *Manager) run(t *task) {
+//
+// ctx and cancel come from the caller: Resume creates them before launching the
+// goroutine so that a pause arriving immediately still cancels this run.
+//
+// A panic in a task goroutine would otherwise take the whole app down without a
+// word, which is exactly the kind of failure a user can only report as "it
+// crashed". The recover turns it into a failed task plus a log line, so the
+// cause survives.
+func (m *Manager) run(t *task, ctx context.Context, cancel context.CancelFunc) {
 	t.mu.Lock()
 	t.generation++
 	gen := t.generation
-	ctx, cancel := context.WithCancel(m.app.ctx)
-	t.cancel = cancel
 	t.view.Status = StatusDownloading
 	t.view.Error = ""
 	t.view.Speed = 0
@@ -370,6 +407,10 @@ func (m *Manager) run(t *task) {
 	defer func() {
 		cancel()
 		close(done)
+		if r := recover(); r != nil {
+			debugLog("panic in task %s: %v\n%s", t.view.ID, r, debug.Stack())
+			m.fail(t, gen, fmt.Errorf("内部错误: %v", r))
+		}
 	}()
 
 	cfg := m.app.Config()

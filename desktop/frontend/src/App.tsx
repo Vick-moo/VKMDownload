@@ -13,7 +13,6 @@ import { IconDownload, IconPlus } from "./components/Icons";
 function App(): JSX.Element {
   const [tasks, setTasks] = useState<TaskView[]>([]);
   const [config, setConfig] = useState<Config | null>(null);
-  const [version, setVersion] = useState("");
 
   const [filter, setFilter] = useState<Filter>("all");
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -43,7 +42,6 @@ function App(): JSX.Element {
   }, []);
 
   useEffect(() => {
-    void api.version().then(setVersion).catch(() => setVersion(""));
     void api
       .getConfig()
       .then((c) => setConfig(c))
@@ -177,21 +175,6 @@ function App(): JSX.Element {
       className={`shell${sidebarCollapsed ? " shell--collapsed" : ""}`}
       style={{ "--sidebar-w": `${sidebarWidth}px` } as React.CSSProperties}
     >
-      <header className="topbar">
-        <div className="topbar__brand">
-          <span className="topbar__logo">
-            <IconDownload size={16} />
-          </span>
-          VDownload
-        </div>
-
-        <div className="topbar__spacer" />
-
-        <span className="badge badge--muted num">
-          {version ? `v${version}` : "dev"}
-        </span>
-      </header>
-
       <Sidebar
         tasks={tasks}
         filter={filter}

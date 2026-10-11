@@ -33,6 +33,13 @@ type App struct {
 	lastClip    string
 	lastClipHit string
 	clipRunning bool
+
+	// dataDirOverride, when set, replaces the directory settings and the task
+	// index are read from. Tests set it so they cannot touch the real user
+	// profile: os.UserConfigDir reads the environment, which t.Setenv does not
+	// reliably redirect on Windows, and a test that silently writes the user's
+	// own task list is worse than no test.
+	dataDirOverride string
 }
 
 // NewApp creates the application object and its task manager.
@@ -44,6 +51,14 @@ func NewApp() *App {
 		}
 	}
 	a.mgr = NewManager(a)
+	return a
+}
+
+// NewAppWithDataDir is NewApp with the settings directory pinned, which is what
+// tests use to stay off the real profile.
+func NewAppWithDataDir(dir string) *App {
+	a := NewApp()
+	a.dataDirOverride = dir
 	return a
 }
 
@@ -110,6 +125,9 @@ func (a *App) beforeClose(ctx context.Context) bool {
 
 // dataDir is where settings and the task index live.
 func (a *App) dataDir() string {
+	if a.dataDirOverride != "" {
+		return a.dataDirOverride
+	}
 	base, err := os.UserConfigDir()
 	if err != nil {
 		base = "."

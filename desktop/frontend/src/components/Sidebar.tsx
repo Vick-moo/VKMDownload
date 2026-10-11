@@ -112,9 +112,17 @@ export function Sidebar({
       className={`sidebar${collapsed ? " sidebar--collapsed" : ""}`}
       aria-label="任务筛选"
     >
-      {/* A single icon control. Previously the chevron and a "收起" label sat
-          inside one button, which read as two separate controls. */}
+      {/* Brand and the collapse control share one row. The brand moved here
+          from a top bar, which was spending a whole strip of vertical space on
+          a label and a version number. */}
       <div className="sidebar__head">
+        <span className="sidebar__brand">
+          <span className="sidebar__logo">
+            <IconDownload size={14} />
+          </span>
+          <span className="sidebar__brand-name">VDownload</span>
+        </span>
+
         <button
           type="button"
           className="sidebar__toggle"

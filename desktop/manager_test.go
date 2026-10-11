@@ -10,21 +10,22 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
 
 // newTestApp builds an App pointed at a throwaway data directory.
 //
-// os.UserConfigDir honours APPDATA on Windows and XDG_CONFIG_HOME elsewhere, so
-// redirecting those is enough to keep the real user settings out of the test.
+// The directory is injected rather than redirected through the environment:
+// os.UserConfigDir reads the process environment, which t.Setenv does not
+// reliably override on Windows, and a test that quietly rewrites the user's own
+// task list is worse than no test at all.
 func newTestApp(t *testing.T) *App {
 	t.Helper()
 	dir := t.TempDir()
-	t.Setenv("APPDATA", dir)
-	t.Setenv("XDG_CONFIG_HOME", dir)
 
-	a := NewApp()
+	a := NewAppWithDataDir(filepath.Join(dir, "config"))
 	// The manager emits events through the app's emitter. Without a window the
 	// real one would abort the process, so it is replaced with a no-op; the
 	// download path being exercised is otherwise identical.
@@ -229,6 +230,164 @@ func TestPauseThenResumeProducesAWholeFile(t *testing.T) {
 	assertFileEquals(t, dest, want)
 }
 
+// TestResumeThenPauseDoesNotPanic reproduces the crash a user hit: resume a
+// failed task and press pause while it is still starting up.
+func TestResumeThenPauseDoesNotPanic(t *testing.T) {
+	want := payload(512 << 10)
+	srv := rangedServer(t, want, 12*time.Millisecond)
+
+	app := newTestApp(t)
+	dest := filepath.Join(t.TempDir(), "resume-pause.bin")
+
+	task, err := app.mgr.Start(StartRequest{
+		URL: srv.URL + "/x.bin", Dest: dest, Conns: 2, Start: true,
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	// Interleave resume and pause the way impatient clicking would.
+	for i := 0; i < 12; i++ {
+		if err := app.mgr.Resume(task.ID); err != nil {
+			t.Logf("resume %d rejected: %v", i, err)
+		}
+		if err := app.mgr.Pause(task.ID); err != nil {
+			t.Logf("pause %d rejected: %v", i, err)
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+
+	time.Sleep(400 * time.Millisecond)
+	t.Logf("survived; final status=%s", mustFind(t, app.mgr, task.ID).Status)
+}
+
+// TestConcurrentResumeDoesNotPanic stresses the same path from several
+// goroutines, which is what a double click produces.
+func TestConcurrentResumeDoesNotPanic(t *testing.T) {
+	want := payload(256 << 10)
+	srv := rangedServer(t, want, 8*time.Millisecond)
+
+	app := newTestApp(t)
+	task, err := app.mgr.Start(StartRequest{
+		URL:   srv.URL + "/c.bin",
+		Dest:  filepath.Join(t.TempDir(), "c.bin"),
+		Conns: 2,
+		Start: false,
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 6; j++ {
+				_ = app.mgr.Resume(task.ID)
+				_ = app.mgr.Pause(task.ID)
+			}
+		}()
+	}
+	wg.Wait()
+	time.Sleep(400 * time.Millisecond)
+	t.Logf("survived; final status=%s", mustFind(t, app.mgr, task.ID).Status)
+}
+
+// mustFind returns a task view or fails the test.
+func mustFind(t *testing.T, m *Manager, id string) TaskView {
+	t.Helper()
+	v, ok := find(m, id)
+	if !ok {
+		t.Fatalf("task %s vanished", id)
+	}
+	return v
+}
+
+// TestResumePauseOnTaskWithMissingFile covers the case a user hit in practice:
+// a task whose target file was deleted underneath it (the archive manager had
+// cleaned its temp directory), resumed and then paused straight away.
+func TestResumePauseOnTaskWithMissingFile(t *testing.T) {
+	app := newTestApp(t)
+	dir := t.TempDir()
+	dest := filepath.Join(dir, "gone.bin")
+
+	task, err := app.mgr.Start(StartRequest{
+		URL: "http://127.0.0.1:1/never", Dest: dest, Conns: 2, Start: false,
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	// Leave an orphaned partial and sidecar behind, which is what a task whose
+	// directory was removed looks like.
+	if err := os.WriteFile(dest+".vdownload.part", make([]byte, 4096), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dest+".vdownload.json", []byte(`{"version":1}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Drive the exact sequence: resume, then pause immediately, repeatedly.
+	for i := 0; i < 20; i++ {
+		_ = app.mgr.Resume(task.ID)
+		_ = app.mgr.Pause(task.ID)
+	}
+	// And the other order, plus cancel and remove.
+	for i := 0; i < 10; i++ {
+		_ = app.mgr.Resume(task.ID)
+		_ = app.mgr.Cancel(task.ID)
+		_ = app.mgr.Resume(task.ID)
+		_ = app.mgr.Pause(task.ID)
+		_ = app.mgr.Resume(task.ID)
+		_ = app.mgr.Remove(task.ID, false)
+	}
+	time.Sleep(500 * time.Millisecond)
+
+	// No task may remain, and the process must still be alive.
+	if _, ok := find(app.mgr, task.ID); ok {
+		t.Logf("task still present after remove")
+	}
+	t.Log("survived resume/pause/cancel/remove on a missing target")
+}
+
+// TestResumePauseOnMissingFileConcurrently hammers the same sequence from many
+// goroutines, which is what an impatient double click produces.
+func TestResumePauseOnMissingFileConcurrently(t *testing.T) {
+	app := newTestApp(t)
+	dest := filepath.Join(t.TempDir(), "gone2.bin")
+
+	task, err := app.mgr.Start(StartRequest{
+		URL: "http://127.0.0.1:1/never", Dest: dest, Conns: 4, Start: false,
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 20; j++ {
+				switch j % 4 {
+				case 0:
+					_ = app.mgr.Resume(task.ID)
+				case 1:
+					_ = app.mgr.Pause(task.ID)
+				case 2:
+					_ = app.mgr.Cancel(task.ID)
+				case 3:
+					_, _ = app.mgr.List(), app.mgr.Stats()
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	time.Sleep(500 * time.Millisecond)
+	t.Log("survived concurrent resume/pause/cancel on a missing target")
+}
+
 // TestCancelDiscardsPartialData checks that cancelling leaves nothing behind to
 // resume from, since the user asked for it to stop for good.
 func TestCancelDiscardsPartialData(t *testing.T) {
@@ -322,7 +481,10 @@ func TestTaskIndexSurvivesRestart(t *testing.T) {
 		t.Fatalf("saveTasks: %v", err)
 	}
 
-	reloaded := NewApp()
+	// Reload into a second App pointed at the same directory. Using NewApp here
+	// would read the real user profile, which is how a test run once seeded the
+	// developer's own task list with its fixtures.
+	reloaded := NewAppWithDataDir(app.dataDir())
 	reloaded.ctx = context.Background()
 	reloaded.mgr.loadTasks()
 

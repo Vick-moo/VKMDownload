@@ -26,7 +26,8 @@ interface Props {
 interface Column {
   key: SortKey;
   label: string;
-  right?: boolean;
+  /** Centre the cell contents. Header labels stay left-aligned regardless. */
+  center?: boolean;
 }
 
 /**
@@ -37,10 +38,10 @@ interface Column {
  */
 const COLUMNS: Column[] = [
   { key: "name", label: "名称" },
-  { key: "status", label: "状态" },
-  { key: "size", label: "大小 / 添加时间", right: true },
-  { key: "progress", label: "进度", right: true },
-  { key: "speed", label: "速度 / 分片", right: true },
+  { key: "status", label: "状态", center: true },
+  { key: "size", label: "大小 / 添加时间", center: true },
+  { key: "progress", label: "进度", center: true },
+  { key: "speed", label: "速度 / 分片", center: true },
 ];
 
 /**
@@ -227,6 +228,7 @@ export function TaskList({
   const template = widths.map((w) => `${w.toFixed(2)}px`).join(" ");
 
 
+
   const sorted = useMemo(() => {
     const dir = sortDir === "asc" ? 1 : -1;
     const copy = [...tasks];
@@ -278,9 +280,7 @@ export function TaskList({
                     : "descending"
                   : "none"
               }
-              className={`listhead__cell${active ? " listhead__cell--active" : ""}${
-                c.right ? " listhead__cell--right" : ""
-              }`}
+              className={`listhead__cell${active ? " listhead__cell--active" : ""}`}
               onClick={() => onSort(c.key)}
             >
               {c.label}
@@ -321,6 +321,7 @@ export function TaskList({
       style={{ "--task-cols": template } as React.CSSProperties}
     >
       {header()}
+
 
 
 

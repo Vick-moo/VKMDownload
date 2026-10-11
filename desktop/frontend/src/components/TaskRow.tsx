@@ -88,7 +88,7 @@ export function TaskRow({
         )}
       </div>
 
-      <div className="task__cell task__cell--status">
+      <div className="task__cell task__cell--center task__cell--status">
         <span
           className={`badge badge--${STATUS_TONE[task.status as TaskStatus] ?? "muted"}`}
         >
@@ -99,12 +99,12 @@ export function TaskRow({
         </span>
       </div>
 
-      <div className="task__cell task__cell--right task__meta">
+      <div className="task__cell task__cell--center task__meta">
         <span className="num task__meta-primary">{formatBytes(task.size)}</span>
         <span className="num">{formatWhen(task.createdAt)}</span>
       </div>
 
-      <div className="task__cell task__cell--right task__meta">
+      <div className="task__cell task__cell--center task__meta">
         {PROGRESSED.includes(task.status as TaskStatus) ? (
           <>
             <div
@@ -126,7 +126,7 @@ export function TaskRow({
         )}
       </div>
 
-      <div className="task__cell task__cell--right task__meta">
+      <div className="task__cell task__cell--center task__meta">
         {task.status === "downloading" ? (
           <>
             <span className="num task__meta-primary">{formatSpeed(task.speed)}</span>
