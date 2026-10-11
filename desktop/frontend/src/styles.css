@@ -408,10 +408,16 @@ input:focus {
 .sidebar__head {
   display: flex;
   align-items: center;
+  /* Right-aligned when open, so it sits opposite the nav labels. */
   justify-content: flex-end;
   height: 26px;
   flex: 0 0 26px;
   margin-bottom: var(--space-1);
+}
+
+/* In the rail there is nothing to align against, so it centres. */
+.sidebar--collapsed .sidebar__head {
+  justify-content: center;
 }
 
 .sidebar__toggle {
@@ -735,24 +741,16 @@ input:focus {
   white-space: nowrap;
 }
 
-/* The sortable header stays put; only the list below it scrolls. */
+/* The sortable header stays put; only the list below it scrolls.
+   No horizontal scrolling: the columns are laid out to fit the container, so
+   there is never anything to scroll to sideways. */
 .listwrap {
   position: relative;
   flex: 1;
   min-height: 0;
   display: flex;
   flex-direction: column;
-  /* Sideways scrolling appears only once a column has been dragged wider than
-     the space available. */
-  overflow-x: auto;
-  overflow-y: hidden;
-}
-
-/* Both the header and every row carry this minimum, so widening a column
-   scrolls them together instead of letting them drift out of alignment. */
-.listhead,
-.task {
-  min-width: var(--task-min-w, auto);
+  overflow: hidden;
 }
 
 /* ------------------------------------------------------------- settings --- */
@@ -883,12 +881,21 @@ input:focus {
 .colresizer {
   position: relative;
   flex: 0 0 auto;
-  pointer-events: auto;
   cursor: col-resize;
+  /* The visible handle is a hairline, but the grabbable area is widened with a
+     pseudo-element so the drag does not require pixel accuracy. */
+  touch-action: none;
 }
 
-/* A hairline only appears on hover, so the header does not look like a table
-   grid at rest. */
+.colresizer::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -6px;
+  right: -6px;
+}
+
 .colresizer::after {
   content: "";
   position: absolute;
@@ -901,8 +908,22 @@ input:focus {
   transition: background var(--dur-fast) var(--ease);
 }
 
-.colresizer:hover::after {
+.colresizer:hover::after,
+.colresizer:active::after {
   background: var(--accent);
+}
+
+/* While a column or the sidebar is being dragged the cursor must not flicker as
+   it passes over other elements, and text selection would fight the drag. */
+body.resizing-cols,
+body.resizing-cols * {
+  cursor: col-resize !important;
+  user-select: none !important;
+}
+
+body.resizing {
+  cursor: col-resize !important;
+  user-select: none !important;
 }
 
 .listhead__cell {

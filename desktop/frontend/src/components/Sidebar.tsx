@@ -28,6 +28,9 @@ interface Props {
   settingsOpen: boolean;
   /** Whether the sidebar is collapsed to an icon rail. */
   collapsed: boolean;
+  /** Width in pixels, owned by the parent because the grid column uses it. */
+  width: number;
+  onWidthChange: (w: number) => void;
   onToggleCollapsed: () => void;
   onFilter: (f: Filter) => void;
   onOpenSettings: () => void;
@@ -48,6 +51,8 @@ export function Sidebar({
   totalSpeed,
   settingsOpen,
   collapsed,
+  width,
+  onWidthChange,
   onToggleCollapsed,
   onFilter,
   onOpenSettings,
@@ -55,27 +60,40 @@ export function Sidebar({
   const [typesOpen, setTypesOpen] = useState(true);
   const [subCollapsed, setSubCollapsed] = useState<Record<string, boolean>>({});
 
-  // Resizing is a view preference, so it is kept in state rather than being
-  // written to the settings file on every pixel of movement.
-  const [width, setWidth] = useState(224);
-  const dragging = useRef(false);
+  /** Width the owner had when a drag started, and where the pointer was. */
+  const dragRef = useRef({ startX: 0, startW: 0, frame: 0 });
 
+  /**
+   * Resizes the sidebar by dragging its right edge.
+   *
+   * Updates are coalesced into an animation frame: a mousemove can fire far more
+   * often than the screen refreshes, and re-rendering the whole task list on
+   * every one of them is what made the drag feel like it was fighting back.
+   */
   function startResize(e: React.MouseEvent) {
     e.preventDefault();
-    dragging.current = true;
-    const startX = e.clientX;
-    const startW = width;
+    e.stopPropagation();
+    dragRef.current.startX = e.clientX;
+    dragRef.current.startW = width;
 
     const onMove = (ev: MouseEvent) => {
-      if (!dragging.current) return;
-      // Clamped so the sidebar can never be dragged over the list.
-      setWidth(Math.max(180, Math.min(360, startW + ev.clientX - startX)));
+      const { startX, startW } = dragRef.current;
+      const next = Math.max(180, Math.min(420, startW + ev.clientX - startX));
+      if (dragRef.current.frame) cancelAnimationFrame(dragRef.current.frame);
+      dragRef.current.frame = requestAnimationFrame(() =>
+        onWidthChange(next),
+      );
     };
     const onUp = () => {
-      dragging.current = false;
+      if (dragRef.current.frame) cancelAnimationFrame(dragRef.current.frame);
+      dragRef.current.frame = 0;
+      document.body.classList.remove("resizing");
       window.removeEventListener("mousemove", onMove);
       window.removeEventListener("mouseup", onUp);
     };
+    // A class on the body keeps the cursor consistent even when the pointer
+    // outruns the 6px handle.
+    document.body.classList.add("resizing");
     window.addEventListener("mousemove", onMove);
     window.addEventListener("mouseup", onUp);
   }
@@ -93,7 +111,6 @@ export function Sidebar({
     <nav
       className={`sidebar${collapsed ? " sidebar--collapsed" : ""}`}
       aria-label="任务筛选"
-      style={collapsed ? undefined : { width }}
     >
       {/* A single icon control. Previously the chevron and a "收起" label sat
           inside one button, which read as two separate controls. */}
@@ -243,7 +260,7 @@ export function Sidebar({
         aria-orientation="vertical"
         aria-label="调整侧栏宽度"
         onMouseDown={startResize}
-        onDoubleClick={() => setWidth(224)}
+        onDoubleClick={() => onWidthChange(224)}
         title="拖动调整宽度，双击复位"
       />
     </nav>

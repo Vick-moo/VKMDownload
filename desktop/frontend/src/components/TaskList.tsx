@@ -44,22 +44,22 @@ const COLUMNS: Column[] = [
 ];
 
 /**
- * Column widths in pixels, in the same order as COLUMNS plus the action track.
+ * Preferred column widths in pixels, in the same order as COLUMNS plus the
+ * action track.
  *
- * They are kept in state and written to the container as the --task-cols custom
- * property, so the header and every row share one template and the drag handles
- * only have to update a single value.
- *
- * The defaults must leave room for the name column to grow: at the window's
- * 1120px opening width with the sidebar expanded the content area is about
- * 872px, of which padding and the six inter-column gaps take 68px. The fixed
- * tracks therefore have to total well under 800px or the action buttons are
- * pushed past the right edge.
+ * These are *preferences*, not fixed sizes: when they do not fit the available
+ * width every column shrinks in proportion down to MIN_WIDTHS, and when there is
+ * room to spare the name column takes it. That is what keeps the list free of a
+ * horizontal scrollbar at any window size.
  */
-const DEFAULT_WIDTHS = [240, 74, 92, 88, 104, 132];
+const DEFAULT_WIDTHS = [280, 76, 104, 96, 120, 140];
 
-/** Smallest a column may be dragged to. */
-const MIN_WIDTHS = [140, 58, 72, 68, 84, 108];
+/**
+ * Smallest a column may be. Their total plus the padding and gaps is the
+ * narrowest the list can render; below that the columns would overlap, so the
+ * window's own minimum width is what actually guarantees this fits.
+ */
+const MIN_WIDTHS = [140, 62, 84, 78, 96, 112];
 
 /** Numeric value of a task for a sortable column. */
 function sortValue(t: TaskView, key: SortKey): number {
@@ -117,50 +117,119 @@ export function TaskList({
   onChanged,
 }: Props): JSX.Element {
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
-  const [widths, setWidths] = useState<number[]>(DEFAULT_WIDTHS);
+  // Preferred widths, in the same order as COLUMNS plus the action track.
+  const [prefs, setPrefs] = useState<number[]>(DEFAULT_WIDTHS);
+  const [avail, setAvail] = useState(0);
   const wrapRef = useRef<HTMLDivElement>(null);
+  // Kept in refs so the drag handler reads current values without being
+  // re-created on every render.
+  const prefsRef = useRef(prefs);
+  const availRef = useRef(avail);
+  prefsRef.current = prefs;
+  availRef.current = avail;
 
-  // A drag changes the width of the column to its left. Pointer events are
-  // listened for on the window so the drag keeps working when the cursor
-  // outruns the handle.
+  /**
+   * Only the inter-column gaps need subtracting: the container measured by
+   * ResizeObserver has no horizontal padding of its own (the padding lives on
+   * the header and the rows). Subtracting it again would squeeze every column
+   * and clip their contents.
+   */
+  const CHROME = 6 * 6;
+
+  /**
+   * Distributes the available width over the columns' preferred widths.
+   *
+   * When the preferences do not fit, every column shrinks in proportion down to
+   * its minimum; when there is room to spare, the name column takes it. The
+   * total therefore never exceeds the container, which is what keeps the list
+   * free of a horizontal scrollbar.
+   */
+  function layoutWidths(preference: number[], available: number): number[] {
+    const space = Math.max(available, MIN_WIDTHS.reduce((a, b) => a + b, 0));
+    const total = preference.reduce((a, b) => a + b, 0);
+
+    if (total <= space) {
+      // Give the surplus to the name column; it carries the most information.
+      const out = [...preference];
+      out[0] += space - total;
+      return out;
+    }
+
+    // Too wide: shrink proportionally, but never below the minimum.
+    const out = [...preference];
+    const over = total - space;
+    const shrinkable = preference.reduce((sum, w, i) => sum + (w - MIN_WIDTHS[i]), 0);
+    if (shrinkable <= 0) return [...MIN_WIDTHS];
+    const take = Math.min(over, shrinkable);
+    for (let i = 0; i < out.length; i += 1) {
+      const room = preference[i] - MIN_WIDTHS[i];
+      if (room > 0) out[i] -= (take * room) / shrinkable;
+    }
+    return out;
+  }
+
+  // Measure the real content box; guessing it from window.innerWidth ignores
+  // the sidebar, the scrollbar and the window frame.
+  //
+  // The columns do not own the whole container: the header and each row carry
+  // their own horizontal padding, and the grid adds a gap between tracks. Both
+  // are subtracted here, so `avail` is exactly the width the columns may occupy
+  // and the last one cannot be pushed past the right edge.
+  const ROW_PADDING = 32; // 16px each side, from .listhead and .task
+  const COL_GAPS = 6 * 6; // one gap per column boundary
+  useEffect(() => {
+    const el = wrapRef.current;
+    if (!el) return;
+    const measure = () => setAvail(el.clientWidth - ROW_PADDING - COL_GAPS);
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    measure();
+    return () => ro.disconnect();
+  }, []);
+
   function startColResize(index: number, e: React.MouseEvent) {
     e.preventDefault();
     e.stopPropagation();
     const startX = e.clientX;
+    const startPref = prefsRef.current[index];
 
     const onMove = (ev: MouseEvent) => {
-      const delta = ev.clientX - startX;
-      setWidths((prev) => {
-        const next = [...prev];
-        // Clamped per column so a drag cannot collapse one to nothing.
-        next[index] = Math.max(
-          MIN_WIDTHS[index],
-          Math.min(560, prev[index] + delta),
-        );
+      // Driven by the pointer position rather than an accumulated delta: the
+      // column edge follows the cursor exactly, which is what makes the drag
+      // feel predictable.
+      const wanted = Math.max(
+        MIN_WIDTHS[index],
+        Math.min(560, startPref + (ev.clientX - startX)),
+      );
+      setPrefs(() => {
+        const next = [...prefsRef.current];
+        next[index] = wanted;
         return next;
       });
     };
     const onUp = () => {
+      document.body.classList.remove("resizing-cols");
       window.removeEventListener("mousemove", onMove);
       window.removeEventListener("mouseup", onUp);
     };
+    document.body.classList.add("resizing-cols");
     window.addEventListener("mousemove", onMove);
     window.addEventListener("mouseup", onUp);
   }
 
-  const template = widths
-    .map((w, i) => (i === 0 ? `minmax(${MIN_WIDTHS[0]}px, 1fr)` : `${w}px`))
-    .join(" ");
+  const widths = useMemo(
+    () => layoutWidths(prefs, avail),
+    [prefs, avail],
+  );
 
-  // Padding (32) plus one gap per column boundary (6 × 6) is what the grid
-  // tracks do not account for. Publishing the total as a minimum lets the
-  // header and the rows scroll sideways together instead of drifting apart.
-  const gridMinWidth = widths.reduce((sum, w) => sum + w, 0) + 6 * 6 + 32;
+  // Every track is an explicit pixel value: a flexible track would fight the
+  // proportional shrink above and let the row outgrow the container.
+  const template = widths.map((w) => `${w.toFixed(2)}px`).join(" ");
+
 
   const sorted = useMemo(() => {
     const dir = sortDir === "asc" ? 1 : -1;
     const copy = [...tasks];
-
     // Name is textual; everything else is numeric or a timestamp.
     if (sortKey === "name") {
       copy.sort(
@@ -249,14 +318,11 @@ export function TaskList({
     <div
       className="listwrap"
       ref={wrapRef}
-      style={
-        {
-          "--task-cols": template,
-          "--task-min-w": `${gridMinWidth}px`,
-        } as React.CSSProperties
-      }
+      style={{ "--task-cols": template } as React.CSSProperties}
     >
       {header()}
+
+
 
       {/* Handles sitting on the boundary after each sortable column. They are
           siblings of the header cells rather than children: a button cannot
@@ -270,7 +336,7 @@ export function TaskList({
               className="colresizer"
               style={{ width: widths[i] }}
               onMouseDown={(e) => startColResize(i, e)}
-              onDoubleClick={() => setWidths(DEFAULT_WIDTHS)}
+              onDoubleClick={() => setPrefs(DEFAULT_WIDTHS)}
               title="拖动调整列宽，双击复位"
             />
           ),

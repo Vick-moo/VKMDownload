@@ -25,6 +25,11 @@ function App(): JSX.Element {
   const [dialogURL, setDialogURL] = useState("");
   const [pendingURL, setPendingURL] = useState("");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  // The sidebar width lives here, not inside Sidebar, because the grid column
+  // that sizes it is defined on .shell. Setting a width on the sidebar element
+  // instead would leave the grid track at its old size and the two columns
+  // would overlap.
+  const [sidebarWidth, setSidebarWidth] = useState(224);
 
   const typesOpen = filter.startsWith("type:");
   const activeType = typesOpen ? filter.slice(5) : "";
@@ -168,7 +173,10 @@ function App(): JSX.Element {
   const hasTasks = tasks.length > 0;
 
   return (
-    <div className={`shell${sidebarCollapsed ? " shell--collapsed" : ""}`}>
+    <div
+      className={`shell${sidebarCollapsed ? " shell--collapsed" : ""}`}
+      style={{ "--sidebar-w": `${sidebarWidth}px` } as React.CSSProperties}
+    >
       <header className="topbar">
         <div className="topbar__brand">
           <span className="topbar__logo">
@@ -191,6 +199,8 @@ function App(): JSX.Element {
         totalSpeed={stats.totalSpeed}
         settingsOpen={settingsOpen}
         collapsed={sidebarCollapsed}
+        width={sidebarWidth}
+        onWidthChange={setSidebarWidth}
         onToggleCollapsed={() => setSidebarCollapsed((v) => !v)}
         onFilter={(f) => {
           setSettingsOpen(false);
