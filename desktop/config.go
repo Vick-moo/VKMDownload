@@ -26,6 +26,21 @@ type Config struct {
 	// MaxConcurrent bounds how many tasks transfer at once; the rest queue.
 	MaxConcurrent int `json:"maxConcurrent"`
 
+	// SpeedLimitKB caps the combined download speed, in KiB/s. Zero means no
+	// limit. It is deliberately a total rather than a per-task figure: a limit
+	// that each of several tasks obeyed separately would not be a limit on the
+	// connection the user is trying to protect.
+	SpeedLimitKB int `json:"speedLimitKb"`
+
+	// Plan settings describe what happens once every task in a plan has
+	// finished. Each is independent, so asking for a sound does not also
+	// require shutting the machine down.
+	//
+	// PlanSound plays a short tone.
+	PlanSound bool `json:"planSound"`
+	// PlanShutdown powers the machine off.
+	PlanShutdown bool `json:"planShutdown"`
+
 	OpenFileWhenDone bool `json:"openFileWhenDone"`
 	OpenDirWhenDone  bool `json:"openDirWhenDone"`
 
@@ -56,6 +71,9 @@ func DefaultConfig() Config {
 		MinSegmentSize:      1 << 20,
 		Proxy:               "",
 		MaxConcurrent:       2,
+		SpeedLimitKB:        0,
+		PlanSound:           false,
+		PlanShutdown:        false,
 		OpenFileWhenDone:    false,
 		OpenDirWhenDone:     false,
 		MinimizeToTray:      true,
@@ -99,6 +117,15 @@ func (c *Config) normalize() {
 	}
 	if c.MaxConcurrent > 16 {
 		c.MaxConcurrent = 16
+	}
+	// A negative limit is meaningless; treat it as "no limit" rather than
+	// handing a negative rate to the engine.
+	if c.SpeedLimitKB < 0 {
+		c.SpeedLimitKB = 0
+	}
+	// Above this the setting stops being a limit and starts being a typo.
+	if c.SpeedLimitKB > 10*1024*1024 {
+		c.SpeedLimitKB = 10 * 1024 * 1024
 	}
 	if c.ClipboardIntervalMs < 200 {
 		c.ClipboardIntervalMs = d.ClipboardIntervalMs

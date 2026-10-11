@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime/debug"
 	"sort"
@@ -86,6 +87,14 @@ type task struct {
 	// generation increments on every start, so a progress callback from a
 	// superseded run cannot overwrite the state of the current one.
 	generation int64
+
+	// stopIntent is what the user asked for when a transfer was stopped.
+	//
+	// The goroutine that notices the cancellation reads this rather than the
+	// view's status, because it can observe the cancellation before the action
+	// that caused it has finished writing the status — which turned a pause
+	// into a cancel and cost the user the ability to resume.
+	stopIntent TaskStatus
 }
 
 // waitStopped blocks until the transfer goroutine has exited, or the timeout
@@ -125,6 +134,15 @@ type Manager struct {
 	pump chan TaskView
 
 	seq int64
+
+	// limiter is shared by every transfer, so the configured speed limit is a
+	// ceiling on the total rather than per task.
+	limMu   sync.Mutex
+	limiter *engine.Limiter
+	limRate int64
+
+	// planRunning is set while a plan is working through its tasks.
+	planRunning bool
 }
 
 func NewManager(app *App) *Manager {
@@ -133,6 +151,27 @@ func NewManager(app *App) *Manager {
 		tasks: make(map[string]*task),
 		pump:  make(chan TaskView, 512),
 	}
+}
+
+// limiterFor returns the limiter shared by every transfer for the given rate.
+//
+// One limiter for all tasks is the point: a "2 MB/s" setting that each of five
+// concurrent downloads obeyed separately would allow 10. The instance is only
+// replaced when the setting actually changes, because a new limiter starts with
+// a full bucket and would briefly let the speed spike.
+func (m *Manager) limiterFor(kilobytesPerSecond int) *engine.Limiter {
+	rate := int64(kilobytesPerSecond) * 1024
+
+	m.limMu.Lock()
+	defer m.limMu.Unlock()
+
+	// Rebuild when the rate changed, or when switching from "unlimited" (a nil
+	// limiter) to a real one.
+	if m.limRate != rate || (rate > 0 && m.limiter == nil) {
+		m.limiter = engine.NewLimiter(rate)
+		m.limRate = rate
+	}
+	return m.limiter
 }
 
 // Run drains the event pump until ctx is cancelled.
@@ -271,6 +310,9 @@ func (m *Manager) Pause(id string) error {
 		return fmt.Errorf("当前状态无法暂停（%s）", st)
 	}
 	cancel := t.cancel
+	// Recorded before cancelling, so the goroutine waking up on the cancelled
+	// context already sees it.
+	t.stopIntent = StatusPaused
 	t.view.Status = StatusPaused
 	t.view.Speed = 0
 	t.view.ETA = 0
@@ -305,7 +347,12 @@ func (m *Manager) Resume(id string) error {
 	// carry on after the user had stopped it.
 	ctx, cancel := context.WithCancel(m.app.ctx)
 	t.cancel = cancel
-	t.view.Status = StatusQueued
+	// A fresh run has no stop to report yet.
+	t.stopIntent = ""
+	// Marked as running straight away rather than queued. The goroutine may not
+	// be scheduled for a moment, and during that window a queued status made a
+	// second StartAll pick the same task up again and start it twice.
+	t.view.Status = StatusDownloading
 	t.view.Error = ""
 	t.mu.Unlock()
 
@@ -322,6 +369,7 @@ func (m *Manager) Cancel(id string) error {
 	t.mu.Lock()
 	cancel := t.cancel
 	dest := t.view.Dest
+	t.stopIntent = StatusCanceled
 	t.view.Status = StatusCanceled
 	t.view.Speed = 0
 	t.view.ETA = 0
@@ -394,6 +442,127 @@ func (m *Manager) Remove(id string, deleteFiles bool) error {
 	return nil
 }
 
+// ------------------------------------------------------------- bulk verbs
+
+// StartAll resumes every task that is waiting to run.
+//
+// Tasks already transferring are left alone, as are completed ones: "start all"
+// means "get everything going", not "start everything over".
+func (m *Manager) StartAll() int {
+	n := 0
+	for _, v := range m.List() {
+		switch v.Status {
+		case StatusPaused, StatusFailed, StatusCanceled, StatusQueued:
+			if err := m.Resume(v.ID); err == nil {
+				n++
+			}
+		}
+	}
+	return n
+}
+
+// StopAll pauses every task that is transferring, keeping its partial data so
+// it can be continued later. Tasks that already settled are untouched.
+func (m *Manager) StopAll() int {
+	n := 0
+	for _, v := range m.List() {
+		if v.Status == StatusDownloading || v.Status == StatusQueued {
+			if err := m.Pause(v.ID); err == nil {
+				n++
+			}
+		}
+	}
+	return n
+}
+
+// StartPlan starts every waiting task and, once they have all settled, runs the
+// action configured for the end of a plan.
+func (m *Manager) StartPlan() (int, error) {
+	m.mu.Lock()
+	if m.planRunning {
+		m.mu.Unlock()
+		return 0, fmt.Errorf("计划已经在运行")
+	}
+	// Claim the slot before starting anything, so two quick clicks cannot both
+	// spawn a watcher.
+	m.planRunning = true
+	m.mu.Unlock()
+
+	started := m.StartAll()
+	if started == 0 {
+		m.mu.Lock()
+		m.planRunning = false
+		m.mu.Unlock()
+		return 0, fmt.Errorf("没有等待下载的任务")
+	}
+
+	go m.watchPlan()
+	return started, nil
+}
+
+// PlanRunning reports whether a plan is working.
+func (m *Manager) PlanRunning() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.planRunning
+}
+
+// watchPlan waits until nothing is transferring, then finishes the plan.
+//
+// It polls rather than being notified: every path that can end a transfer —
+// completion, failure, cancellation, removal — would otherwise have to remember
+// to poke the plan, and the one that forgot would leave it hanging forever.
+func (m *Manager) watchPlan() {
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		stats := m.Stats()
+		if stats["active"] == 0 && stats["queued"] == 0 {
+			m.finishPlan()
+			return
+		}
+	}
+}
+
+// finishPlan performs whatever the user asked for at the end of a plan.
+func (m *Manager) finishPlan() {
+	m.mu.Lock()
+	m.planRunning = false
+	m.mu.Unlock()
+
+	cfg := m.app.Config()
+	m.app.emit("plan:done", nil)
+	debugLog("plan finished: sound=%v shutdown=%v", cfg.PlanSound, cfg.PlanShutdown)
+
+	if cfg.PlanSound {
+		playAlert()
+	}
+	if cfg.PlanShutdown {
+		shutdownMachine()
+	}
+}
+
+// playAlert makes an audible signal, so a plan that finishes while the user is
+// away from the screen is still noticed.
+func playAlert() {
+	go func() {
+		// Two rising tones through the console. No asset to ship, and it does
+		// not depend on the user's sound scheme being configured.
+		const script = "[console]::beep(880,250); [console]::beep(1175,400)"
+		_ = exec.Command("powershell", "-NoProfile", "-Command", script).Run()
+	}()
+}
+
+// shutdownMachine powers the machine off, with enough delay to change one's
+// mind: "shutdown /a" cancels it.
+func shutdownMachine() {
+	go func() {
+		_ = exec.Command("shutdown", "/s", "/t", "60",
+			"/c", "VDownload 计划已完成，60 秒后关机（运行 shutdown /a 取消）").Run()
+	}()
+}
+
 // run performs the transfer for one task.
 //
 // ctx and cancel come from the caller: Resume creates them before launching the
@@ -429,6 +598,7 @@ func (m *Manager) run(t *task, ctx context.Context, cancel context.CancelFunc) {
 	opt := engine.Options{}.Normalize()
 	opt.Connections = conns
 	opt.MinSegmentSize = cfg.MinSegmentSize
+	opt.Limiter = m.limiterFor(cfg.SpeedLimitKB)
 	if cfg.Proxy != "" {
 		opt.Transport.ProxyURL = cfg.Proxy
 	}
@@ -470,10 +640,19 @@ func (m *Manager) run(t *task, ctx context.Context, cancel context.CancelFunc) {
 	})
 	if err != nil {
 		if ctx.Err() != nil {
-			// The user paused or cancelled; that flow owns the status.
+			// The transfer was stopped. Whichever action did that also recorded
+			// what it wanted the status to become, and that record is the one to
+			// trust: reading the view here can race the setter, and mistaking a
+			// pause for a cancel throws away the partial data's ability to
+			// resume. Only an unclaimed cancellation — the app shutting down —
+			// falls back to "canceled".
 			t.mu.Lock()
 			if t.view.Status == StatusDownloading {
-				t.view.Status = StatusCanceled
+				if t.stopIntent != "" {
+					t.view.Status = t.stopIntent
+				} else {
+					t.view.Status = StatusCanceled
+				}
 			}
 			v := t.view
 			t.mu.Unlock()
@@ -568,11 +747,16 @@ func humanError(err error) string {
 }
 
 // Stats reports the aggregate figures the sidebar shows.
+//
+// "queued" counts only tasks actually waiting for a slot. A paused task is
+// deliberately not folded into it: the plan watcher treats "nothing active and
+// nothing queued" as "the plan has finished", and a paused task counted as
+// queued would keep a plan running forever.
 func (m *Manager) Stats() map[string]int64 {
 	list := m.List()
 	out := map[string]int64{
 		"active": 0, "completed": 0, "failed": 0,
-		"queued": 0, "total": int64(len(list)), "speed": 0,
+		"queued": 0, "paused": 0, "total": int64(len(list)), "speed": 0,
 	}
 	for _, v := range list {
 		switch v.Status {
@@ -583,8 +767,10 @@ func (m *Manager) Stats() map[string]int64 {
 			out["completed"]++
 		case StatusFailed:
 			out["failed"]++
-		case StatusQueued, StatusPaused:
+		case StatusQueued:
 			out["queued"]++
+		case StatusPaused:
+			out["paused"]++
 		}
 	}
 	return out

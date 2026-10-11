@@ -176,6 +176,26 @@ export function SettingsPage({ config, onSaved }: Props): JSX.Element {
 
         <label className="setting">
           <span className="setting__text">
+            <span className="setting__title">全局速度上限</span>
+            <span className="setting__hint">
+              所有任务加起来的下载速度上限，单位 KB/s。填 0 表示不限速。
+            </span>
+          </span>
+          <input
+            type="number"
+            min={0}
+            max={10485760}
+            step={64}
+            style={{ width: 110 }}
+            value={draft.speedLimitKb}
+            onChange={(e) =>
+              patch({ speedLimitKb: Math.max(0, Number(e.target.value) || 0) })
+            }
+          />
+        </label>
+
+        <label className="setting">
+          <span className="setting__text">
             <span className="setting__title">代理</span>
             <span className="setting__hint">
               留空则跟随系统环境变量（HTTP_PROXY / HTTPS_PROXY）。
@@ -190,6 +210,29 @@ export function SettingsPage({ config, onSaved }: Props): JSX.Element {
             onChange={(e) => patch({ proxy: e.target.value })}
           />
         </label>
+      </section>
+
+      <section className="settings-section">
+        <h3 className="settings-section__title">计划下载</h3>
+
+        <p className="settings-section__note">
+          工具栏上的「计划下载」会开始全部任务，等它们都结束后执行下面的动作。
+          同时下载的数量由上面的「同时下载的任务数」决定。
+        </p>
+
+        <Switch
+          title="完成后播放提示音"
+          hint="两声升调提示音，不需要额外音频文件。"
+          checked={draft.planSound}
+          onChange={(v) => patch({ planSound: v })}
+        />
+
+        <Switch
+          title="完成后自动关机"
+          hint="有 60 秒缓冲，期间运行 shutdown /a 可以取消。"
+          checked={draft.planShutdown}
+          onChange={(v) => patch({ planShutdown: v })}
+        />
       </section>
 
       <section className="settings-section">

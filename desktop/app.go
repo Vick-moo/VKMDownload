@@ -202,10 +202,24 @@ func (a *App) ResumeTask(id string) error { return a.mgr.Resume(id) }
 // CancelTask stops a task and discards its partial data.
 func (a *App) CancelTask(id string) error { return a.mgr.Cancel(id) }
 
-// RemoveTask drops a task, optionally deleting the files it produced.
+// RemoveTask drops a task from the list. Nothing on disk is touched unless
+// deleteFiles is set.
 func (a *App) RemoveTask(id string, deleteFiles bool) error {
 	return a.mgr.Remove(id, deleteFiles)
 }
+
+// StartAllTasks resumes every waiting task, returning how many were started.
+func (a *App) StartAllTasks() int { return a.mgr.StartAll() }
+
+// StopAllTasks pauses every transferring task, returning how many were paused.
+func (a *App) StopAllTasks() int { return a.mgr.StopAll() }
+
+// StartPlan starts every waiting task and runs the end-of-plan action once they
+// have all settled.
+func (a *App) StartPlan() (int, error) { return a.mgr.StartPlan() }
+
+// PlanRunning reports whether a plan is in progress.
+func (a *App) PlanRunning() bool { return a.mgr.PlanRunning() }
 
 // ------------------------------------------------------------- file actions
 

@@ -18,7 +18,6 @@ import {
   IconPause,
   IconPlay,
   IconTrash,
-  IconX,
 } from "./Icons";
 
 interface Props {
@@ -192,18 +191,9 @@ export function TaskRow({
           <IconFolder size={16} />
         </button>
 
-        {task.status !== "completed" ? (
-          <button
-            type="button"
-            className="icon-btn"
-            aria-label="从列表移除"
-            title="从列表移除（不删除文件）"
-            onClick={() => void run(() => api.removeTask(task.id, false))}
-          >
-            <IconX size={16} />
-          </button>
-        ) : null}
-
+        {/* No separate ✕: it did exactly what the trash button does — remove
+            the row and leave every file alone — so two buttons for one action
+            only invited the question of how they differed. */}
         <button
           type="button"
           className="icon-btn"

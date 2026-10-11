@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -89,6 +90,10 @@ type Options struct {
 	// VerifySize re-checks the finished length against the announced size
 	// before publishing the file.
 	VerifySize bool
+
+	// Limiter caps throughput. Sharing one across downloaders limits their
+	// combined speed; nil means unlimited.
+	Limiter *Limiter
 }
 
 // Normalize returns o with unset fields replaced by defaults and out-of-range
@@ -247,8 +252,17 @@ func (d *Downloader) Download(ctx context.Context, req Request) (*Result, error)
 		return nil, err
 	}
 
-	if probe.Size < 0 && !probe.RangeSupported {
-		return nil, fmt.Errorf("cannot determine the size of %s and the server does not offer ranges", req.URL)
+	// A server that reports neither a length nor range support can still be
+	// downloaded: one stream read to EOF is exactly what curl does with such a
+	// resource. Refusing it — which this used to do — made every GitHub
+	// archive/refs/tags/*.tar.gz link undownloadable, because codeload builds
+	// those on the fly and answers chunked, with no Content-Length.
+	//
+	// The cost is that progress is reported in bytes rather than a percentage,
+	// since there is no total to divide by, and the finished size cannot be
+	// verified against an announced one.
+	if probe.Size < 0 {
+		probe.Note = strings.TrimSpace(probe.Note + " (length unknown; single stream to EOF)")
 	}
 
 	target, err := resolveTarget(req.Dest, probe.SuggestedName)
@@ -778,6 +792,13 @@ func (s *session) fetchOnce(ctx context.Context, seg *Segment) error {
 				s.mgr.commit(seg, n, off+written)
 				committed += int64(wn)
 				s.track.add(int64(wn))
+				// Throttle after the write, so the ceiling applies to bytes
+				// actually stored rather than to bytes merely read into the
+				// buffer. The limiter is shared, so several workers pause
+				// together instead of each getting the full allowance.
+				if err := s.d.opt.Limiter.Wait(ctx, wn); err != nil {
+					return err
+				}
 			}
 			if werr != nil {
 				return fmt.Errorf("write %d bytes at offset %d: %w", got, off+written, werr)
@@ -876,8 +897,15 @@ func (s *session) runSingle(ctx context.Context) (*Result, error) {
 	}
 	s.resumed = s.resumed || offset > 0
 
-	// Single stream is one segment by definition.
-	s.mgr = newSegmentManager([]*Segment{{Start: 0, End: s.probe.Size - 1, NoRange: !s.probe.RangeSupported}})
+	// Single stream is one segment by definition. When the server never reported
+	// a length the stream simply runs to EOF, so the segment carries no upper
+	// bound — Size-1 would be a negative length, which the accounting would then
+	// treat as an already-satisfied segment.
+	segEnd := s.probe.Size - 1
+	if s.probe.Size < 0 {
+		segEnd = math.MaxInt64
+	}
+	s.mgr = newSegmentManager([]*Segment{{Start: 0, End: segEnd, NoRange: !s.probe.RangeSupported}})
 	s.initialSegs = 1
 	s.newTracker(offset, s.probe.Size)
 
@@ -994,6 +1022,9 @@ func (s *session) singleAttempt(ctx context.Context, offset int64, canResume boo
 				// download that reported zero progress would look unrestartable.
 				if s.mgr != nil {
 					s.mgr.commit(s.mgr.segs[0], 0, offset)
+				}
+				if err := s.d.opt.Limiter.Wait(ctx, wn); err != nil {
+					return offset, err
 				}
 			}
 			if werr != nil {

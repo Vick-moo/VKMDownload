@@ -705,6 +705,130 @@ func TestRemoveLeavesEveryFileAlone(t *testing.T) {
 	}
 }
 
+// TestStartAllAndStopAll covers the two bulk buttons: start everything that is
+// waiting, then stop everything that is running.
+func TestStartAllAndStopAll(t *testing.T) {
+	want := payload(512 << 10)
+	// Slow enough that the stop lands while transfers are still in flight.
+	srv := rangedServer(t, want, 15*time.Millisecond)
+
+	app := newTestApp(t)
+	dir := t.TempDir()
+
+	const count = 3
+	for i := 0; i < count; i++ {
+		if _, err := app.mgr.Start(StartRequest{
+			URL:   srv.URL + "/bulk.bin",
+			Dest:  filepath.Join(dir, fmt.Sprintf("bulk-%d.bin", i)),
+			Conns: 2,
+			Start: false,
+		}); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+	}
+
+	if n := app.mgr.StartAll(); n != count {
+		t.Errorf("StartAll started %d, want %d", n, count)
+	}
+	// A second call has nothing left to start.
+	if n := app.mgr.StartAll(); n != 0 {
+		t.Errorf("a second StartAll started %d, want 0", n)
+	}
+
+	if n := app.mgr.StopAll(); n == 0 {
+		t.Error("StopAll paused nothing while transfers were running")
+	}
+
+	waitFor(t, "every task to leave the running state", 30*time.Second, func() bool {
+		s := app.mgr.Stats()
+		return s["active"] == 0 && s["queued"] == 0
+	})
+
+	// Nothing may be left running. A task that happened to finish before the
+	// stop landed is fine; one still transferring is not.
+	for _, v := range app.mgr.List() {
+		if v.Status == StatusDownloading || v.Status == StatusQueued {
+			t.Errorf("task %s is still %s after StopAll", v.ID, v.Status)
+		}
+	}
+}
+
+// TestStartPlanRunsToCompletion covers the plan button: it starts everything,
+// reports that it is running, and announces completion exactly once.
+func TestStartPlanRunsToCompletion(t *testing.T) {
+	want := payload(256 << 10)
+	srv := rangedServer(t, want, 5*time.Millisecond)
+
+	app := newTestApp(t)
+
+	var mu sync.Mutex
+	planned := 0
+	app.emit = func(name string, _ ...any) {
+		if name == "plan:done" {
+			mu.Lock()
+			planned++
+			mu.Unlock()
+		}
+	}
+
+	for i := 0; i < 2; i++ {
+		if _, err := app.mgr.Start(StartRequest{
+			URL:   srv.URL + "/plan.bin",
+			Dest:  filepath.Join(t.TempDir(), fmt.Sprintf("plan-%d.bin", i)),
+			Conns: 2,
+			Start: false,
+		}); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+	}
+
+	n, err := app.mgr.StartPlan()
+	if err != nil {
+		t.Fatalf("StartPlan: %v", err)
+	}
+	if n != 2 {
+		t.Errorf("StartPlan started %d, want 2", n)
+	}
+	if !app.mgr.PlanRunning() {
+		t.Error("PlanRunning is false immediately after StartPlan")
+	}
+	// A second plan must be refused rather than running two watchers.
+	if _, err := app.mgr.StartPlan(); err == nil {
+		t.Error("a second StartPlan was accepted while one was running")
+	}
+
+	waitFor(t, "the plan to report completion", 60*time.Second, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return planned > 0
+	})
+
+	waitFor(t, "the plan to stop running", 5*time.Second, func() bool {
+		return !app.mgr.PlanRunning()
+	})
+
+	// Give a stray second watcher time to show itself.
+	time.Sleep(1200 * time.Millisecond)
+	mu.Lock()
+	got := planned
+	mu.Unlock()
+	if got != 1 {
+		t.Errorf("plan:done fired %d times, want exactly 1", got)
+	}
+}
+
+// TestStartPlanWithNothingToDoIsRefused checks the plan button's empty case.
+func TestStartPlanWithNothingToDoIsRefused(t *testing.T) {
+	app := newTestApp(t)
+
+	if _, err := app.mgr.StartPlan(); err == nil {
+		t.Error("StartPlan with no tasks was accepted")
+	}
+	if app.mgr.PlanRunning() {
+		t.Error("PlanRunning is true after a refused plan; the slot was not released")
+	}
+}
+
 // TestStatsAggregatesActiveTasks covers the sidebar totals.
 func TestStatsAggregatesActiveTasks(t *testing.T) {
 	want := payload(256 << 10)

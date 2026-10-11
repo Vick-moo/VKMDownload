@@ -20,8 +20,30 @@ export type TaskStatus =
   | "failed"
   | "canceled";
 
-/** Sidebar filter, either one of the status views or a file-type group. */
-export type Filter = "all" | "active" | "completed" | "failed";
+/**
+ * The status views: every filter that is not an extension. Kept separate so a
+ * lookup table keyed by status cannot be indexed with an extension filter.
+ */
+export type StatusFilter = "all" | "active" | "completed" | "failed";
+
+/**
+ * Sidebar filter.
+ *
+ * Either one of the status views, or a file-extension view. The extension form
+ * carries the extension itself — "ext:pdf" — so clicking .pdf shows exactly the
+ * PDFs, rather than everything a broader group such as 文档 would sweep in.
+ */
+export type Filter = StatusFilter | `ext:${string}`;
+
+/** Returns the extension a filter selects, or "" for a status filter. */
+export function filterExt(filter: Filter): string {
+  return filter.startsWith("ext:") ? filter.slice(4) : "";
+}
+
+/** Builds the filter that selects one extension. */
+export function extFilter(ext: string): Filter {
+  return `ext:${ext}`;
+}
 
 /** Column the task list is ordered by. */
 export type SortKey = "name" | "status" | "size" | "progress" | "added" | "speed";
@@ -123,14 +145,31 @@ export const TYPE_GROUPS: TypeGroup[] = [
   { key: "other", label: "其他", exts: [] },
 ];
 
-/** Returns the extension of a filename, lower-case and without the dot. */
+/**
+ * Returns the extension of a filename, lower-case and without the dot.
+ *
+ * It also accepts a URL, because that is all the list has before the server has
+ * supplied a name. Without the two guards below a URL would give the wrong
+ * answer twice over: a query string would be read as part of the extension
+ * (".zip?token=..." → "zip?token=..."), and a dot in the host would win over
+ * the one in the file.
+ */
 export function fileExt(name: string): string {
-  const dot = name.lastIndexOf(".");
-  if (dot <= 0 || dot === name.length - 1) return "";
-  return name.slice(dot + 1).toLowerCase();
+  let s = name;
+  // Drop the query and the fragment.
+  const cut = s.search(/[?#]/);
+  if (cut >= 0) s = s.slice(0, cut);
+  // Work on the last path segment only.
+  const slash = s.lastIndexOf("/");
+  if (slash >= 0) s = s.slice(slash + 1);
+
+  const dot = s.lastIndexOf(".");
+  // A leading dot means a hidden file with no extension (".gitignore").
+  if (dot <= 0 || dot === s.length - 1) return "";
+  return s.slice(dot + 1).toLowerCase();
 }
 
-/** Returns the group key a filename belongs to. */
+/** Returns the group key a filename (or a URL, when no name is known) belongs to. */
 export function groupOf(name: string): string {
   const ext = fileExt(name);
   if (!ext) return "other";
@@ -138,6 +177,17 @@ export function groupOf(name: string): string {
     if (g.key !== "other" && g.exts.includes(ext)) return g.key;
   }
   return "other";
+}
+
+/**
+ * Returns the text to classify and display a task by.
+ *
+ * A task has no name until the server answers, and a failed one may never get
+ * one. Falling back to the URL keeps it in the right type group and gives the
+ * row something recognisable to show.
+ */
+export function taskLabel(task: { name: string; url: string }): string {
+  return task.name || task.url;
 }
 
 /** Human-readable status labels, used by the status badge and the sort. */

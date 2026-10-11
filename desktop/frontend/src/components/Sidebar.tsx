@@ -1,8 +1,8 @@
-import { useMemo, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import type { JSX } from "react";
 import { formatSpeed } from "../format";
-import { TYPE_GROUPS, groupOf } from "../types";
-import type { Filter, TaskView } from "../types";
+import { extFilter } from "../types";
+import type { Filter, StatusFilter, TaskView } from "../types";
 import {
   IconAlert,
   IconCheck,
@@ -13,7 +13,11 @@ import {
 } from "./Icons";
 
 /** Status entries shown in the sidebar. */
-const STATUS_NAV: Array<{ key: Filter; label: string; icon: JSX.Element }> = [
+const STATUS_NAV: Array<{
+  key: StatusFilter;
+  label: string;
+  icon: JSX.Element;
+}> = [
   { key: "all", label: "全部", icon: <IconInbox size={18} /> },
   { key: "active", label: "下载中", icon: <IconDownload size={18} /> },
   { key: "completed", label: "已完成", icon: <IconCheck size={18} /> },
@@ -23,6 +27,8 @@ const STATUS_NAV: Array<{ key: Filter; label: string; icon: JSX.Element }> = [
 interface Props {
   tasks: TaskView[];
   filter: Filter;
+  /** Every extension present in the list, with how many tasks carry it. */
+  extCounts: Array<{ ext: string; count: number }>;
   activeCount: number;
   totalSpeed: number;
   settingsOpen: boolean;
@@ -39,14 +45,15 @@ interface Props {
 /**
  * Sidebar holds the two ways of narrowing the list, plus the live totals.
  *
- * The type section is collapsible as a whole and each type group collapses on
- * its own, because with a hundred finished downloads the expanded list is
- * longer than the window and the user needs to fold away what they are not
- * looking at.
+ * The type section lists one entry per extension actually present — .zip, .pdf,
+ * .png — and each one filters the list to exactly those files. Grouping them
+ * into broader categories such as 文档 looked tidier but was less useful: the
+ * user who wants their PDFs does not want the spreadsheets too.
  */
 export function Sidebar({
   tasks,
   filter,
+  extCounts,
   activeCount,
   totalSpeed,
   settingsOpen,
@@ -58,7 +65,6 @@ export function Sidebar({
   onOpenSettings,
 }: Props): JSX.Element {
   const [typesOpen, setTypesOpen] = useState(true);
-  const [subCollapsed, setSubCollapsed] = useState<Record<string, boolean>>({});
 
   /** Width the owner had when a drag started, and where the pointer was. */
   const dragRef = useRef({ startX: 0, startW: 0, frame: 0 });
@@ -107,17 +113,9 @@ export function Sidebar({
     failed: tasks.filter((t) => t.status === "failed").length,
   };
 
-  // Only the groups that actually hold files. A group with no files is not
-  // rendered, and when every group is empty the whole section disappears —
-  // including its heading, which otherwise sat there with nothing under it.
-  const typeGroups = useMemo(
-    () =>
-      TYPE_GROUPS.map((group) => ({
-        group,
-        items: tasks.filter((t) => groupOf(t.name) === group.key),
-      })).filter((entry) => entry.items.length > 0),
-    [tasks],
-  );
+  // The extension list is built by the parent and passed in: it is derived from
+  // the same tasks the list is rendered from, so computing it twice would be
+  // two chances to disagree.
 
   return (
     <nav
@@ -172,7 +170,10 @@ export function Sidebar({
         {/* A collapsible section of file-type groups, built from whatever the
             tasks actually are. It is not rendered at all when no task has a
             classifiable extension. */}
-        {typeGroups.length > 0 ? (
+        {/* One entry per extension actually present, each of which narrows the
+            list to exactly those files. The whole section is hidden when no
+            task has an extension to offer. */}
+        {extCounts.length > 0 ? (
           <div className="navgroup">
             <button
               type="button"
@@ -192,59 +193,25 @@ export function Sidebar({
 
             {typesOpen ? (
               <div className="navgroup__body">
-                {typeGroups.map(({ group: g, items }) => {
-                  const isCollapsed = subCollapsed[g.key] ?? false;
-                  const exts = [
-                    ...new Set(
-                      items
-                        .map((t) => {
-                          const dot = t.name.lastIndexOf(".");
-                          return dot > 0
-                            ? t.name.slice(dot + 1).toLowerCase()
-                            : "";
-                        })
-                        .filter(Boolean),
-                    ),
-                  ].sort();
-
+                {extCounts.map(({ ext, count }) => {
+                  const key = extFilter(ext);
+                  const active = filter === key;
                   return (
-                    <div className="navsub" key={g.key}>
-                      <button
-                        type="button"
-                        className="navsub__head"
-                        aria-expanded={!isCollapsed}
-                        onClick={() =>
-                          setSubCollapsed((prev) => ({
-                            ...prev,
-                            [g.key]: !isCollapsed,
-                          }))
-                        }
-                      >
-                        <span
-                          className={`navsub__chevron${
-                            isCollapsed ? " navsub__chevron--collapsed" : ""
-                          }`}
-                        >
-                          <IconChevron size={12} />
-                        </span>
-                        <span className="navsub__label">{g.label}</span>
-                        <span className="nav-item__count">{items.length}</span>
-                      </button>
-                    {!isCollapsed ? (
-                      <div className="navsub__body">
-                        {exts.slice(0, 8).map((e) => (
-                          <span className="extchip" key={e}>
-                            .{e}
-                          </span>
-                        ))}
-                        {exts.length > 8 ? (
-                          <span className="extchip">+{exts.length - 8}</span>
-                        ) : null}
-                      </div>
-                    ) : null}
-                  </div>
-                );
-              })}
+                    <button
+                      key={ext}
+                      type="button"
+                      className={`nav-item nav-item--compact${
+                        active ? " nav-item--active" : ""
+                      }`}
+                      aria-current={active ? "page" : undefined}
+                      title={`只看 .${ext} 文件`}
+                      onClick={() => onFilter(key)}
+                    >
+                      <span className="nav-item__label">.{ext}</span>
+                      <span className="nav-item__count">{count}</span>
+                    </button>
+                  );
+                })}
               </div>
             ) : null}
           </div>

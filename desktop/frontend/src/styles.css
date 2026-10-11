@@ -211,6 +211,18 @@ input:focus {
   color: #fff;
 }
 
+/* The plan button keeps going after the transfers finish, which the other bulk
+   actions do not, so it is marked out from them. */
+.btn--plan {
+  border-color: var(--accent);
+  color: var(--accent-hover);
+}
+
+.btn--plan:hover:not(:disabled) {
+  background: var(--accent-subtle);
+  border-color: var(--accent-hover);
+}
+
 .btn--primary:hover:not(:disabled) {
   background: var(--accent-hover);
   border-color: var(--accent-hover);
@@ -633,6 +645,17 @@ input:focus {
   padding: var(--space-1) var(--space-2) var(--space-2) var(--space-8);
 }
 
+/* Extension entries. Shorter than the status entries, because a busy download
+   folder produces a dozen of them and they carry no icon. */
+.nav-item--compact {
+  height: 26px;
+}
+
+.nav-item--compact .nav-item__label {
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
 .extchip {
   padding: 1px var(--space-1);
   border-radius: var(--radius-sm);
@@ -752,6 +775,23 @@ input:focus {
   white-space: nowrap;
 }
 
+/* Separates the create action from the bulk ones. */
+.toolbar__divider {
+  width: 1px;
+  height: 20px;
+  background: var(--border-strong);
+  margin: 0 var(--space-1);
+}
+
+/* Replaces the summary while a bulk action has something to report. */
+.toolbar__notice {
+  font-size: 12px;
+  color: var(--accent-hover);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 /* The sortable header stays put; only the list below it scrolls.
    No horizontal scrolling: the columns are laid out to fit the container, so
    there is never anything to scroll to sideways.
@@ -795,6 +835,15 @@ input:focus {
   margin: var(--space-2) 0;
   font-size: 12px;
   font-weight: 600;
+  color: var(--text-muted);
+}
+
+/* An explanatory paragraph inside a section, for settings that need more than
+   a one-line hint. */
+.settings-section__note {
+  margin: 0 0 var(--space-2);
+  font-size: 12px;
+  line-height: 17px;
   color: var(--text-muted);
 }
 

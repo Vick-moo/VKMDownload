@@ -7,8 +7,8 @@ import { Sidebar } from "./components/Sidebar";
 import { TaskList } from "./components/TaskList";
 import { formatSpeed } from "./format";
 import type { Config, Filter, SortDir, SortKey, TaskView } from "./types";
-import { groupOf } from "./types";
-import { IconDownload, IconPlus } from "./components/Icons";
+import { extFilter, fileExt, filterExt, taskLabel } from "./types";
+import { IconDownload, IconPause, IconPlan, IconPlay, IconPlus } from "./components/Icons";
 
 function App(): JSX.Element {
   const [tasks, setTasks] = useState<TaskView[]>([]);
@@ -30,8 +30,8 @@ function App(): JSX.Element {
   // would overlap.
   const [sidebarWidth, setSidebarWidth] = useState(224);
 
-  const typesOpen = filter.startsWith("type:");
-  const activeType = typesOpen ? filter.slice(5) : "";
+  /** The extension the sidebar is filtering by, or "" for a status view. */
+  const extActive = filterExt(filter);
 
   const reload = useCallback(async () => {
     try {
@@ -90,11 +90,25 @@ function App(): JSX.Element {
       list = tasks.filter((t) => t.status === "completed");
     } else if (filter === "failed") {
       list = tasks.filter((t) => t.status === "failed");
-    } else if (typesOpen) {
-      list = tasks.filter((t) => groupOf(t.name) === activeType);
+    } else if (extActive) {
+      list = tasks.filter((t) => fileExt(taskLabel(t)) === extActive);
     }
     return list;
-  }, [tasks, filter, typesOpen, activeType]);
+  }, [tasks, filter, extActive]);
+
+  // Every extension present in the list, with how many tasks carry it. Built
+  // from the tasks rather than from a fixed table, so a format nobody thought
+  // to enumerate still gets a button.
+  const extCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const t of tasks) {
+      const e = fileExt(taskLabel(t));
+      if (e) counts.set(e, (counts.get(e) ?? 0) + 1);
+    }
+    return [...counts.entries()]
+      .map(([ext, count]) => ({ ext, count }))
+      .sort((a, b) => b.count - a.count || a.ext.localeCompare(b.ext));
+  }, [tasks]);
 
   const stats = useMemo(() => {
     const active = tasks.filter((t) => t.status === "downloading");
@@ -131,6 +145,50 @@ function App(): JSX.Element {
     setDialogURL(pendingURL);
     setDialogOpen(true);
   }, [pendingURL]);
+
+  // A short-lived line under the toolbar. The bulk actions have nothing else to
+  // report through: "start all" on an empty list looks identical to a click
+  // that did nothing.
+  const [notice, setNotice] = useState("");
+  const noticeTimer = useRef<number | null>(null);
+  const flash = useCallback((message: string) => {
+    setNotice(message);
+    if (noticeTimer.current !== null) window.clearTimeout(noticeTimer.current);
+    noticeTimer.current = window.setTimeout(() => setNotice(""), 5000);
+  }, []);
+  useEffect(
+    () => () => {
+      if (noticeTimer.current !== null) window.clearTimeout(noticeTimer.current);
+    },
+    [],
+  );
+
+  const onStartAll = useCallback(async () => {
+    try {
+      const n = await api.startAllTasks();
+      flash(n > 0 ? `已开始 ${n} 个任务` : "没有等待中的任务");
+    } catch (e) {
+      flash(`开始失败：${e instanceof Error ? e.message : String(e)}`);
+    }
+  }, [flash]);
+
+  const onStopAll = useCallback(async () => {
+    try {
+      const n = await api.stopAllTasks();
+      flash(n > 0 ? `已暂停 ${n} 个任务` : "没有正在下载的任务");
+    } catch (e) {
+      flash(`暂停失败：${e instanceof Error ? e.message : String(e)}`);
+    }
+  }, [flash]);
+
+  const onStartPlan = useCallback(async () => {
+    try {
+      const n = await api.startPlan();
+      flash(`计划已启动 · ${n} 个任务，全部结束后执行设置里的动作`);
+    } catch (e) {
+      flash(`计划未能启动：${e instanceof Error ? e.message : String(e)}`);
+    }
+  }, [flash]);
 
   // Keyboard shortcuts from the design spec.
   useEffect(() => {
@@ -178,6 +236,7 @@ function App(): JSX.Element {
       <Sidebar
         tasks={tasks}
         filter={filter}
+        extCounts={extCounts}
         activeCount={stats.activeCount}
         totalSpeed={stats.totalSpeed}
         settingsOpen={settingsOpen}
@@ -214,12 +273,50 @@ function App(): JSX.Element {
                 <IconPlus size={16} />
                 新建下载
               </button>
+
+              <span className="toolbar__divider" />
+
+              {/* Bulk actions. Each reports what it did through the notice line,
+                  because a click that finds nothing to do is otherwise
+                  indistinguishable from one that failed. */}
+              <button
+                type="button"
+                className="btn"
+                onClick={() => void onStartAll()}
+                title="开始所有等待中的任务"
+              >
+                <IconPlay size={16} />
+                全部开始
+              </button>
+              <button
+                type="button"
+                className="btn"
+                onClick={() => void onStopAll()}
+                title="暂停所有正在下载的任务，保留断点"
+              >
+                <IconPause size={16} />
+                全部停止
+              </button>
+              <button
+                type="button"
+                className="btn btn--plan"
+                onClick={() => void onStartPlan()}
+                title="下载全部任务，全部结束后执行设置里的动作"
+              >
+                <IconPlan size={16} />
+                计划下载
+              </button>
+
               <span className="toolbar__spacer" />
-              <span className="toolbar__summary num">
-                {stats.total > 0
-                  ? `${stats.total} 个任务 · ${formatSpeed(stats.totalSpeed)}`
-                  : "暂无任务"}
-              </span>
+              {notice ? (
+                <span className="toolbar__notice">{notice}</span>
+              ) : (
+                <span className="toolbar__summary num">
+                  {stats.total > 0
+                    ? `${stats.total} 个任务 · ${formatSpeed(stats.totalSpeed)}`
+                    : "暂无任务"}
+                </span>
+              )}
             </div>
 
             {!hasTasks ? (

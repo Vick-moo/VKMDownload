@@ -6,6 +6,7 @@ import {
   TYPE_GROUPS,
   fileExt,
   groupOf,
+  taskLabel,
 } from "../types";
 import type { SortDir, SortKey, TaskStatus, TaskView } from "../types";
 import { IconArrowDown, IconArrowUp, IconChevron } from "./Icons";
@@ -93,8 +94,8 @@ function sortValue(t: TaskView, key: SortKey): number {
 function groupExts(tasks: TaskView[], key: string): string[] {
   const seen = new Set<string>();
   for (const t of tasks) {
-    if (groupOf(t.name) !== key) continue;
-    const e = fileExt(t.name);
+    if (groupOf(taskLabel(t)) !== key) continue;
+    const e = fileExt(taskLabel(t));
     if (e) seen.add(e);
   }
   return [...seen].sort();
@@ -319,7 +320,7 @@ export function TaskList({
     if (!groupByType) return null;
     return TYPE_GROUPS.map((g) => ({
       group: g,
-      items: sorted.filter((t) => groupOf(t.name) === g.key),
+      items: sorted.filter((t) => groupOf(taskLabel(t)) === g.key),
     })).filter((b) => b.items.length > 0);
   }, [sorted, groupByType]);
 

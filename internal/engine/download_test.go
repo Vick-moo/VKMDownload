@@ -18,6 +18,108 @@ import (
 	"vdownload/testsrv"
 )
 
+// TestDownloadWithoutLengthOrRanges covers a server that announces neither a
+// Content-Length nor range support.
+//
+// This is how codeload.github.com serves GitHub's archive/refs/tags/*.tar.gz
+// links: they are built on the fly, so the response arrives chunked. The engine
+// used to refuse such a resource outright, which made every one of those links
+// undownloadable even though a single stream read to EOF fetches them fine.
+func TestDownloadWithoutLengthOrRanges(t *testing.T) {
+	_, url := startServer(t, func(c *testsrv.Config) {
+		c.NoContentLength = true
+		c.HonorRange = false
+		c.AdvertiseRange = false
+	})
+
+	dest := filepath.Join(t.TempDir(), "unknown-length.bin")
+
+	opt := testOptions(4) // more than one connection, to prove it still uses one
+	opt.VerifySize = true
+
+	d, err := New(opt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+
+	res, err := d.Download(context.Background(), Request{URL: url, Dest: dest})
+	if err != nil {
+		t.Fatalf("Download: %v", err)
+	}
+
+	// There is nothing to split when the length is unknown.
+	if res.Connections != 1 {
+		t.Errorf("used %d connections, want 1", res.Connections)
+	}
+
+	// The stream must run to EOF and produce exactly the expected bytes.
+	got, err := os.ReadFile(dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := testsrv.Expected(testSeed, testSize)
+	if !bytes.Equal(got, want) {
+		t.Errorf("downloaded %d bytes, want %d; contents differ", len(got), len(want))
+	}
+	if res.Size != int64(len(want)) {
+		t.Errorf("Result.Size = %d, want %d", res.Size, len(want))
+	}
+}
+
+// TestDownloadHonoursLimiter checks the limiter is wired into the transfer
+// path rather than merely available: a 4 MiB file at 2 MiB/s cannot finish
+// faster than the half-second burst plus the time to earn the rest.
+func TestDownloadHonoursLimiter(t *testing.T) {
+	srv, url := startServer(t, func(c *testsrv.Config) {
+		// The limiter must be the only brake under test.
+		c.PerConnRate = 0
+	})
+	_ = srv
+
+	const rate = 2 << 20 // 2 MiB/s
+
+	opt := testOptions(1)
+	opt.Limiter = NewLimiter(rate)
+	opt.VerifySize = true
+
+	d, err := New(opt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+
+	dest := filepath.Join(t.TempDir(), "limited.bin")
+
+	start := time.Now()
+	res, err := d.Download(context.Background(), Request{URL: url, Dest: dest})
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("Download: %v", err)
+	}
+
+	if res.Size != testSize {
+		t.Errorf("downloaded %d bytes, want %d", res.Size, testSize)
+	}
+	// 4 MiB at 2 MiB/s with a bucket worth about 1 MiB: at least a second.
+	if elapsed < 900*time.Millisecond {
+		t.Errorf("4 MiB at %d B/s finished in %v; the limiter was not applied", rate, elapsed)
+	}
+	if elapsed > 30*time.Second {
+		t.Errorf("transfer took %v, far longer than the configured rate", elapsed)
+	}
+
+	// The data must still be correct: throttling cannot skip or duplicate bytes.
+	want := testsrv.Expected(testSeed, testSize)
+	got, err := os.ReadFile(dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Error("the throttled download did not match the expected content")
+	}
+}
+
 // TestProbeRejectsWebPage covers the address a user pastes most often by
 // mistake: the page a file is *shown* on, rather than the file. Google Drive's
 // /file/d/<id>/view share link is the canonical example — it answers 200 with

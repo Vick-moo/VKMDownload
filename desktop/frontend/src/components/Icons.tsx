@@ -158,3 +158,30 @@ export function IconArrowDown({ size = 12, className }: IconProps): JSX.Element 
     </svg>
   );
 }
+
+/**
+ * A plan: a list with a check beside it. It marks the button that downloads
+ * everything and then runs the finishing action, rather than starting one more
+ * transfer.
+ */
+export function IconPlan({ size = 18, className }: IconProps): JSX.Element {
+  return (
+    <svg {...base(size, className)}>
+      <path d="M4 6h10" />
+      <path d="M4 12h7" />
+      <path d="M4 18h5" />
+      <path d="m15 16 2.5 2.5L22 14" />
+    </svg>
+  );
+}
+
+/** Two arrows moving together: apply an action to the whole list. */
+export function IconAll({ size = 18, className }: IconProps): JSX.Element {
+  return (
+    <svg {...base(size, className)}>
+      <path d="M5 4h14" />
+      <path d="M12 9v10" />
+      <path d="m8 15 4 4 4-4" />
+    </svg>
+  );
+}
