@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { JSX } from "react";
 import { EVENTS, api, on } from "./api";
+import { ConfirmDialog } from "./components/ConfirmDialog";
 import { NewTaskDialog } from "./components/NewTaskDialog";
 import { SettingsPage } from "./components/SettingsPage";
 import { Sidebar } from "./components/Sidebar";
@@ -8,7 +9,32 @@ import { TaskList } from "./components/TaskList";
 import { formatSpeed } from "./format";
 import type { Config, Filter, SortDir, SortKey, TaskView } from "./types";
 import { extFilter, fileExt, filterExt, taskLabel } from "./types";
-import { IconDownload, IconPause, IconPlan, IconPlay, IconPlus } from "./components/Icons";
+import {
+  IconDownload,
+  IconPause,
+  IconPlan,
+  IconPlay,
+  IconPlus,
+  IconTrash,
+} from "./components/Icons";
+
+/** Names a filter for the bulk-delete button and its confirmation. */
+function filterLabel(filter: Filter): string {
+  switch (filter) {
+    case "all":
+      return "全部";
+    case "active":
+      return "下载中";
+    case "completed":
+      return "已完成";
+    case "failed":
+      return "失败";
+    default: {
+      const ext = filterExt(filter);
+      return ext ? `${ext} 文件` : "当前列表";
+    }
+  }
+}
 
 function App(): JSX.Element {
   const [tasks, setTasks] = useState<TaskView[]>([]);
@@ -22,6 +48,9 @@ function App(): JSX.Element {
 
   const [dialogOpen, setDialogOpen] = useState(false);
   const [dialogURL, setDialogURL] = useState("");
+  /** The bulk-delete confirmation; the count in it comes from the live list. */
+  const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const [pendingURL, setPendingURL] = useState("");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   // The sidebar width lives here, not inside Sidebar, because the grid column
@@ -116,6 +145,7 @@ function App(): JSX.Element {
       activeCount: active.length,
       totalSpeed: active.reduce((s, t) => s + (t.speed || 0), 0),
       total: tasks.length,
+      failed: tasks.filter((t) => t.status === "failed").length,
     };
   }, [tasks]);
 
@@ -189,6 +219,23 @@ function App(): JSX.Element {
       flash(`计划未能启动：${e instanceof Error ? e.message : String(e)}`);
     }
   }, [flash]);
+
+  const onDeleteVisible = useCallback(async () => {
+    setDeleting(true);
+    try {
+      const n = await api.removeTasks(visible.map((t) => t.id));
+      setConfirmDeleteOpen(false);
+      flash(
+        n > 0
+          ? `已删除 ${n} 条记录 · 磁盘上的文件没有动`
+          : "没有可删除的记录",
+      );
+    } catch (e) {
+      flash(`删除失败：${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setDeleting(false);
+    }
+  }, [visible, flash]);
 
   // Keyboard shortcuts from the design spec.
   useEffect(() => {
@@ -307,6 +354,23 @@ function App(): JSX.Element {
                 计划下载
               </button>
 
+              {/* Deletes what the list is currently showing, whatever that is.
+                  The label names the filter and the count, because "delete
+                  all" over an unnoticed filter is how someone loses rows they
+                  meant to keep. */}
+              {visible.length > 0 ? (
+                <button
+                  type="button"
+                  className="btn btn--danger"
+                  onClick={() => setConfirmDeleteOpen(true)}
+                  title="只删除列表里的记录，磁盘上的文件不会动"
+                >
+                  <IconTrash size={16} />
+                  删除{filter === "all" ? "全部" : filterLabel(filter)}
+                  <span className="btn__count">{visible.length}</span>
+                </button>
+              ) : null}
+
               <span className="toolbar__spacer" />
               {notice ? (
                 <span className="toolbar__notice">{notice}</span>
@@ -375,6 +439,18 @@ function App(): JSX.Element {
         }}
         onCreated={() => void reload()}
       />
+
+      {confirmDeleteOpen ? (
+        <ConfirmDialog
+          title="删除这些记录？"
+          message={`将从列表里删除${filter === "all" ? "全部" : filterLabel(filter)} ${visible.length} 条记录。`}
+          detail="只删除列表记录。磁盘上已经下好的文件、以及未完成的 .part 文件都会保留，可以之后再续传或自己删除。"
+          confirmLabel={`删除 ${visible.length} 条`}
+          busy={deleting}
+          onConfirm={() => void onDeleteVisible()}
+          onCancel={() => setConfirmDeleteOpen(false)}
+        />
+      ) : null}
     </div>
   );
 }

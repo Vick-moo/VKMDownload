@@ -30,3 +30,10 @@ desktop.ini
 # Local debug traces
 *.trace.log
 *.corrupt
+
+# Packed browser extensions. The .pem is the signing key: publishing it lets
+# anyone else sign an update for this extension, so it must never be committed.
+# Neither file is needed to build or to load the extension unpacked.
+/extension.crx
+/extension.pem
+*.pem

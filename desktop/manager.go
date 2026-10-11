@@ -454,6 +454,49 @@ func (m *Manager) Remove(id string, deleteFiles bool) error {
 	return nil
 }
 
+// RemoveTasks drops the given records in one go.
+//
+// The caller decides which, so "delete everything I can see" works for any
+// filter — by status, by file type, by search — without this needing to know
+// what the filter was.
+//
+// Records only, exactly like Remove: the partial files are what a later attempt
+// at the same URL resumes from, and a tidy-up of the list is not consent to
+// delete gigabytes from disk.
+func (m *Manager) RemoveTasks(ids []string) int {
+	removed := 0
+	for _, id := range ids {
+		if err := m.Remove(id, false); err == nil {
+			removed++
+		}
+	}
+	return removed
+}
+
+// RemoveFailed drops every failed record.
+//
+// RemoveTasks with a filtered list would do the same job, but this keeps the
+// rule in one place for callers that do not have the list to hand.
+func (m *Manager) RemoveFailed() int {
+	m.mu.Lock()
+	var ids []string
+	for _, id := range m.order {
+		t := m.tasks[id]
+		if t == nil {
+			continue
+		}
+		t.mu.Lock()
+		failed := t.view.Status == StatusFailed
+		t.mu.Unlock()
+		if failed {
+			ids = append(ids, id)
+		}
+	}
+	m.mu.Unlock()
+
+	return m.RemoveTasks(ids)
+}
+
 // ------------------------------------------------------------- bulk verbs
 
 // StartAll resumes every task that is waiting to run.

@@ -669,6 +669,155 @@ func TestRemoveDeletesOnlyFinishedFiles(t *testing.T) {
 	}
 }
 
+// TestRemoveTasksBySelection covers the "delete what I can see" path.
+//
+// The caller passes the ids it is showing rather than a filter description, so
+// one call serves every view — a status, a file type, a search — and the rule
+// for what counts as visible stays in the one place that draws the list.
+func TestRemoveTasksBySelection(t *testing.T) {
+	app := newTestApp(t)
+	dir := t.TempDir()
+
+	// Two of one kind, one of another, as a file-type filter would show them.
+	mk := func(name string) TaskView {
+		t.Helper()
+		v, err := app.mgr.Start(StartRequest{
+			URL: "http://127.0.0.1:1/" + name, Dest: filepath.Join(dir, name),
+		})
+		if err != nil {
+			t.Fatalf("Start(%s): %v", name, err)
+		}
+		return v
+	}
+	jarA, jarB, zip := mk("a.jar"), mk("b.jar"), mk("c.zip")
+
+	// A partial file for one of the doomed tasks, to prove it survives.
+	partial := jarA.Dest + engine.PartSuffix
+	if err := os.WriteFile(partial, []byte("keep me"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if n := app.mgr.RemoveTasks([]string{jarA.ID, jarB.ID}); n != 2 {
+		t.Errorf("RemoveTasks() = %d, want 2", n)
+	}
+
+	for _, gone := range []TaskView{jarA, jarB} {
+		if _, ok := find(app.mgr, gone.ID); ok {
+			t.Errorf("%s is still listed", gone.Name)
+		}
+	}
+	if _, ok := find(app.mgr, zip.ID); !ok {
+		t.Error("a task outside the selection was removed")
+	}
+
+	if _, err := os.Stat(partial); err != nil {
+		t.Errorf("a partial file was touched: %v", err)
+	}
+}
+
+// TestRemoveTasksWithAnUnknownIdIsHarmless: the list can change between drawing
+// it and confirming, so a stale id must not abort the rest of the sweep.
+func TestRemoveTasksWithAnUnknownIdIsHarmless(t *testing.T) {
+	app := newTestApp(t)
+
+	kept, err := app.mgr.Start(StartRequest{URL: "http://127.0.0.1:1/kept.bin"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if n := app.mgr.RemoveTasks([]string{"no-such-id", kept.ID}); n != 1 {
+		t.Errorf("RemoveTasks() = %d, want 1", n)
+	}
+	if len(app.mgr.List()) != 0 {
+		t.Error("the valid id was not removed")
+	}
+}
+
+// TestRemoveFailedClearsRecordsOnly covers the bulk cleanup, which exists
+// because a burst of bad URLs can leave hundreds of failed rows: three hundred
+// and twenty-six arrived in one four-second burst once.
+//
+// The contract is the same as a single removal — records only. A partial file is
+// what a later attempt at the same URL resumes from, and deleting them as a side
+// effect of tidying a list would be a destructive surprise.
+func TestRemoveFailedClearsRecordsOnly(t *testing.T) {
+	app := newTestApp(t)
+
+	// One that fails: nothing is listening on port 1.
+	failed, err := app.mgr.Start(StartRequest{
+		URL:   "http://127.0.0.1:1/will-fail.bin",
+		Dest:  filepath.Join(t.TempDir(), "will-fail.bin"),
+		Start: true,
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	waitFor(t, "the task to fail", 20*time.Second, func() bool {
+		v, ok := find(app.mgr, failed.ID)
+		return ok && v.Status == StatusFailed
+	})
+
+	// A partial file, as a real failed transfer would leave behind.
+	partial := failed.Dest + engine.PartSuffix
+	if err := os.WriteFile(partial, []byte("half a download"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Two that must survive the sweep.
+	kept, err := app.mgr.Start(StartRequest{
+		URL: "http://127.0.0.1:1/kept.bin", Dest: filepath.Join(t.TempDir(), "kept.bin"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	completed, err := app.mgr.Start(StartRequest{
+		URL: "http://127.0.0.1:1/done.bin", Dest: filepath.Join(t.TempDir(), "done.bin"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Put it in the completed state directly: the point here is the sweep, not
+	// how a task gets completed.
+	ct := app.mgr.get(completed.ID)
+	ct.mu.Lock()
+	ct.view.Status = StatusCompleted
+	ct.mu.Unlock()
+
+	if n := app.mgr.RemoveFailed(); n != 1 {
+		t.Errorf("RemoveFailed() = %d, want 1", n)
+	}
+
+	if _, ok := find(app.mgr, failed.ID); ok {
+		t.Error("the failed task is still listed")
+	}
+	if _, ok := find(app.mgr, kept.ID); !ok {
+		t.Error("an unrelated task was removed")
+	}
+	if _, ok := find(app.mgr, completed.ID); !ok {
+		t.Error("a completed task was removed")
+	}
+
+	if _, err := os.Stat(partial); err != nil {
+		t.Errorf("the partial file was touched: %v", err)
+	}
+}
+
+// TestRemoveFailedWithNothingToDo is the empty case, which must not report a
+// phantom success.
+func TestRemoveFailedWithNothingToDo(t *testing.T) {
+	app := newTestApp(t)
+
+	if _, err := app.mgr.Start(StartRequest{URL: "http://127.0.0.1:1/a.bin"}); err != nil {
+		t.Fatal(err)
+	}
+	if n := app.mgr.RemoveFailed(); n != 0 {
+		t.Errorf("RemoveFailed() = %d, want 0", n)
+	}
+	if len(app.mgr.List()) != 1 {
+		t.Error("a queued task was removed")
+	}
+}
+
 // TestRemoveLeavesEveryFileAlone covers what the delete button does. The user
 // was explicit: removing a row from the list must not disturb anything on disk.
 // That includes the partial file and sidecar, which are what a later attempt at

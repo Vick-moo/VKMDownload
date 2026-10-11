@@ -235,7 +235,12 @@ func (a *App) apiAdd(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	a.debugLog("extension added %s", req.URL)
+	// The caller is recorded, not just the URL. A burst of tasks arrived once
+	// with no extension installed in any browser, and nothing in the log could
+	// say where they came from — which made it impossible to tell a bug from
+	// something else on the machine calling the endpoint.
+	a.debugLog("extension added %s (origin=%q ua=%q)",
+		req.URL, r.Header.Get("Origin"), r.Header.Get("User-Agent"))
 	writeJSON(w, http.StatusOK, map[string]any{"id": task.ID, "name": task.Name})
 }
 

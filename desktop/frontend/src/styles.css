@@ -213,6 +213,29 @@ input:focus {
 
 /* The plan button keeps going after the transfers finish, which the other bulk
    actions do not, so it is marked out from them. */
+/* Destructive, so it is coloured like one. Only ever used for clearing records,
+   which is why it is not red enough to look alarming at a glance. */
+/* A count inside a button, so "delete all" says how many without a separate
+   label. */
+.btn__count {
+  margin-left: 2px;
+  padding: 1px 6px;
+  border-radius: 99px;
+  background: color-mix(in srgb, var(--danger) 26%, transparent);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.btn--danger {
+  border-color: color-mix(in srgb, var(--danger) 45%, transparent);
+  color: color-mix(in srgb, var(--danger) 78%, var(--text));
+}
+
+.btn--danger:hover {
+  background: color-mix(in srgb, var(--danger) 14%, transparent);
+  border-color: var(--danger);
+}
+
 .btn--plan {
   border-color: var(--accent);
   color: var(--accent-hover);
@@ -236,6 +259,17 @@ input:focus {
 .btn--ghost:hover:not(:disabled) {
   background: var(--bg-hover);
   border-color: transparent;
+}
+
+/* A count inside a button, so "delete all" says how many without a separate
+   label. */
+.btn__count {
+  margin-left: 2px;
+  padding: 1px 6px;
+  border-radius: 99px;
+  background: color-mix(in srgb, var(--danger) 26%, transparent);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
 }
 
 .btn--danger {
@@ -1533,3 +1567,27 @@ body.resizing {
     display: none;
   }
 }
+
+/* The delete confirmation is deliberately narrow: it holds two sentences and
+   nothing else, and a wide box makes a warning read like a form. */
+.modal--confirm {
+  max-width: 430px;
+}
+
+.confirm__message {
+  margin: 0 0 var(--space-2);
+  font-size: 14px;
+  color: var(--text);
+}
+
+.confirm__detail {
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  background: var(--bg-base);
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--text-dim);
+}
+
+</style>

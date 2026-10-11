@@ -288,6 +288,28 @@ func (a *App) StartAllTasks() int { return a.mgr.StartAll() }
 // StopAllTasks pauses every transferring task, returning how many were paused.
 func (a *App) StopAllTasks() int { return a.mgr.StopAll() }
 
+// ClearFailedTasks removes every failed record, returning how many went.
+//
+// Records only: the partial files stay, since they are what a later attempt at
+// the same URL resumes from.
+func (a *App) ClearFailedTasks() int {
+	n := a.mgr.RemoveFailed()
+	a.debugLog("cleared %d failed tasks", n)
+	return n
+}
+
+// RemoveTasks removes the given records, returning how many went.
+//
+// It takes ids rather than a filter so the front-end can offer "delete
+// everything I can see" over whatever it is currently showing — a file type, a
+// status, a search — without the rule for what is visible living in two places.
+// Records only, as with every other removal.
+func (a *App) RemoveTasks(ids []string) int {
+	n := a.mgr.RemoveTasks(ids)
+	a.debugLog("removed %d tasks by selection", n)
+	return n
+}
+
 // StartPlan starts every waiting task and runs the end-of-plan action once they
 // have all settled.
 func (a *App) StartPlan() (int, error) { return a.mgr.StartPlan() }
