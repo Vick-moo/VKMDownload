@@ -407,6 +407,26 @@ input:focus {
   color: #fff;
 }
 
+/* In the rail the logo is the only thing left, so it becomes the control that
+   reopens the sidebar. It gets a pointer and a hover state to say so. */
+.sidebar__logo--button {
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease),
+    transform var(--dur-fast) var(--ease);
+}
+
+.sidebar__logo--button:hover {
+  background: var(--accent-hover);
+  transform: scale(1.08);
+}
+
+.sidebar__logo--button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
 .sidebar__brand-name {
   font-size: 13px;
   font-weight: 600;
@@ -414,15 +434,6 @@ input:focus {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-}
-
-/* In the rail only the logo fits; the name would be clipped to nothing. */
-.sidebar--collapsed .sidebar__brand-name {
-  display: none;
-}
-
-.sidebar--collapsed .sidebar__brand {
-  margin-right: 0;
 }
 
 /* ------------------------------------------------------- collapsed rail --- */
@@ -492,13 +503,11 @@ input:focus {
   color: var(--text-primary);
 }
 
-/* The chevron points the way the panel will move. */
+/* The chevron points the way the panel will move. Only the collapsing
+   direction exists now: reopening is the logo's job, and it carries no
+   chevron. */
 .chevron--left {
   transform: rotate(90deg);
-}
-
-.chevron--right {
-  transform: rotate(-90deg);
 }
 
 .sidebar {

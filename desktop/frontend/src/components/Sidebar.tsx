@@ -126,26 +126,40 @@ export function Sidebar({
           from a top bar, which was spending a whole strip of vertical space on
           a label and a version number. */}
       <div className="sidebar__head">
-        <span className="sidebar__brand">
-          <span className="sidebar__logo">
+        {collapsed ? (
+          // In the rail there is no room for a separate chevron, and the logo is
+          // the obvious thing to click, so it becomes the control itself.
+          <button
+            type="button"
+            className="sidebar__logo sidebar__logo--button"
+            aria-expanded={false}
+            aria-label="展开侧栏"
+            title="展开侧栏"
+            onClick={onToggleCollapsed}
+          >
             <IconDownload size={14} />
-          </span>
-          <span className="sidebar__brand-name">VDownload</span>
-        </span>
+          </button>
+        ) : (
+          <>
+            <span className="sidebar__brand">
+              <span className="sidebar__logo">
+                <IconDownload size={14} />
+              </span>
+              <span className="sidebar__brand-name">VDownload</span>
+            </span>
 
-        <button
-          type="button"
-          className="sidebar__toggle"
-          aria-expanded={!collapsed}
-          aria-label={collapsed ? "展开侧栏" : "收起侧栏"}
-          title={collapsed ? "展开侧栏" : "收起侧栏"}
-          onClick={onToggleCollapsed}
-        >
-          <IconChevron
-            size={14}
-            className={collapsed ? "chevron--right" : "chevron--left"}
-          />
-        </button>
+            <button
+              type="button"
+              className="sidebar__toggle"
+              aria-expanded
+              aria-label="收起侧栏"
+              title="收起侧栏"
+              onClick={onToggleCollapsed}
+            >
+              <IconChevron size={14} className="chevron--left" />
+            </button>
+          </>
+        )}
       </div>
 
       <div className="sidebar__scroll">
