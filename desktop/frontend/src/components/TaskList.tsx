@@ -212,7 +212,27 @@ export function TaskList({
   // own. Both are 16px a side, and `clientWidth` includes the first, so the
   // total to subtract is 32px a side.
   const ROW_PADDING = 64;
-  const COL_GAPS = 6 * 6; // one gap per column boundary
+  /** The gap between columns, matching --space-1. */
+  const COL_GAP = 4;
+  // Six columns have five boundaries between them, so five gaps — not six.
+  const COL_GAPS = 5 * COL_GAP;
+  /** Width of the draggable strip straddling a boundary. */
+  const HANDLE_WIDTH = 12;
+
+  /**
+   * Left offset of the drag handle for the boundary after column `i`.
+   *
+   * The boundary sits in the middle of the gap that follows that column, and
+   * the handle is centred on it. Handles are positioned rather than sized,
+   * because a handle as wide as its column covers the header cell and takes the
+   * clicks that sort it.
+   */
+  function handleLeft(i: number): number {
+    let acc = 0;
+    for (let k = 0; k <= i; k += 1) acc += widths[k];
+    return acc + i * COL_GAP + COL_GAP / 2 - HANDLE_WIDTH / 2;
+  }
+
   useEffect(() => {
     const el = wrapRef.current;
     if (!el) return;
@@ -265,6 +285,7 @@ export function TaskList({
   // Every track is an explicit pixel value: a flexible track would fight the
   // proportional shrink above and let the row outgrow the container.
   const template = widths.map((w) => `${w.toFixed(2)}px`).join(" ");
+
 
 
 
@@ -369,23 +390,25 @@ export function TaskList({
 
 
 
-      {/* Handles sitting on the boundary after each sortable column. They are
-          siblings of the header cells rather than children: a button cannot
-          contain another interactive element, and the cell already handles the
-          click that sorts. */}
+
+      {/* Handles sitting on the boundary after each sortable column.
+          Absolutely positioned and only a dozen pixels wide. A handle as wide
+          as its own column covers the whole header cell, which swallowed the
+          clicks that sort — the list could be resized but no longer sorted. */}
       <div className="colresizers" aria-hidden="true">
-        {COLUMNS.map((c, i) =>
-          i === COLUMNS.length - 1 ? null : (
-            <span
-              key={c.key}
-              className="colresizer"
-              style={{ width: widths[i] }}
-              onMouseDown={(e) => startColResize(i, e)}
-              onDoubleClick={() => { setPrefs(DEFAULT_WIDTHS); setPriority(-1); }}
-              title="拖动调整列宽，双击复位"
-            />
-          ),
-        )}
+        {COLUMNS.slice(0, -1).map((c, i) => (
+          <span
+            key={c.key}
+            className="colresizer"
+            style={{ left: handleLeft(i) }}
+            onMouseDown={(e) => startColResize(i, e)}
+            onDoubleClick={() => {
+              setPrefs(DEFAULT_WIDTHS);
+              setPriority(-1);
+            }}
+            title="拖动调整列宽，双击复位"
+          />
+        ))}
       </div>
 
       <div className="list">

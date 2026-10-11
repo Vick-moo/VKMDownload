@@ -884,56 +884,41 @@ input:focus {
   z-index: 2;
 }
 
-/* Draggable column boundaries, laid over the gaps between header cells.
-   Positioned as a sibling of the header row rather than inside a cell, because
-   a button cannot contain another interactive element.
-
-   `left` has to match where the header's first column starts, which is after
-   two layers of inset: this container's own padding on .listwrap, and the
-   header's. Accounting for only one put every handle 16px to the left of the
-   divider it draws, so the line under the cursor highlighted its neighbour. */
+/* A layer holding the drag handles. It covers the header but lets clicks
+   through everywhere except on a handle itself, so the sort buttons still
+   receive them. */
 .colresizers {
   position: absolute;
   top: 0;
   left: calc(var(--space-4) * 2);
-  display: flex;
-  gap: var(--space-1);
   height: 33px;
   z-index: 3;
   pointer-events: none;
 }
 
+/* A narrow strip straddling one column boundary. It is positioned by the
+   component rather than sized to its column: a strip as wide as the whole
+   header cell covers it and swallows the click that sorts the column. */
 .colresizer {
-  position: relative;
-  flex: 0 0 auto;
-  cursor: col-resize;
-  /* pointer-events is inherited, so the container's `none` would otherwise be
-     inherited here too: the divider would be drawn but every click would pass
-     straight through it. This line is what makes the handle grabbable. */
-  pointer-events: auto;
-  /* The visible handle is a hairline, but the grabbable area is widened with a
-     pseudo-element so the drag does not require pixel accuracy. */
-  touch-action: none;
-}
-
-.colresizer::before {
-  content: "";
   position: absolute;
   top: 0;
   bottom: 0;
-  left: -6px;
-  right: -6px;
+  width: 12px;
+  cursor: col-resize;
+  /* pointer-events is inherited, so the container's `none` would otherwise be
+     inherited here too: the divider would be drawn but every click would pass
+     straight through it. */
+  pointer-events: auto;
+  touch-action: none;
 }
 
-/* The boundary line between two columns, drawn in the middle of the 4px gap
-   that separates them so it reads as sitting on the edge rather than inside a
-   column. It is visible at rest so it is discoverable — an invisible handle is
-   one nobody finds — and thickens and takes the accent colour on hover to
-   confirm it is grabbable. */
+/* The boundary line, centred in the strip. It is visible at rest so it is
+   discoverable — an invisible handle is one nobody finds — and thickens and
+   takes the accent colour on hover to confirm it is grabbable. */
 .colresizer::after {
   content: "";
   position: absolute;
-  right: -2px;
+  left: 5px;
   top: 5px;
   bottom: 5px;
   width: 1px;
