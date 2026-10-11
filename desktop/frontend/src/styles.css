@@ -480,11 +480,20 @@ input:focus {
   --wails-draggable: no-drag;
 }
 
-/* In the rail the brand is a single icon and the chevron points right, so the
-   two sit side by side with the name hidden. */
+/* In the rail the logo is the only thing in the row, and it has to sit dead
+   centre. Three things are pinned down so nothing about the surrounding boxes
+   can shift it: the row fills the rail's content width, it centres its content,
+   and the button carries symmetric auto margins as well. Flex centring alone
+   left it a few pixels off in a 48px rail. */
 .sidebar--collapsed .sidebar__head {
+  display: flex;
+  align-items: center;
   justify-content: center;
-  gap: var(--space-1);
+  width: 100%;
+}
+
+.sidebar--collapsed .sidebar__logo--button {
+  margin: 0 auto;
 }
 
 .sidebar__toggle {
