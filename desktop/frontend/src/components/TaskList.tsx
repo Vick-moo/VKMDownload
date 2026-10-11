@@ -151,36 +151,49 @@ export function TaskList({
     const floor = MIN_WIDTHS.reduce((a, b) => a + b, 0);
     const space = Math.max(available, floor);
     const total = preference.reduce((a, b) => a + b, 0);
+    const out = [...preference];
 
     if (total <= space) {
-      // Give any surplus to the name column; it carries the most text.
-      const out = [...preference];
+      if (priority >= 0) {
+        // Mid-drag: use exactly the width asked for and leave the slack, so the
+        // edge tracks the cursor instead of jumping to absorb the surplus.
+        return out;
+      }
+      // Otherwise give any surplus to the name column; it carries the most text.
       out[0] += space - total;
       return out;
     }
 
-    // Too wide: shrink, but never below the minimum.
-    const out = [...preference];
-    const take = total - space;
+    // Too wide: something has to give.
+    let need = total - space;
 
     if (priority >= 0) {
-      // Spread the reduction over everything except the column being dragged.
-      let others = 0;
-      for (let i = 0; i < out.length; i += 1) {
-        if (i !== priority) others += out[i] - MIN_WIDTHS[i];
-      }
-      if (others <= 0) return [...MIN_WIDTHS];
-      for (let i = 0; i < out.length; i += 1) {
-        if (i === priority) continue;
+      // Only the neighbouring columns absorb the change, nearest first — the
+      // behaviour of a file manager's column divider, where dragging one edge
+      // leaves every other edge exactly where it was. Spreading it over all the
+      // columns made the opposite divider slide around as well.
+      for (let i = priority + 1; i < out.length && need > 0; i += 1) {
         const room = out[i] - MIN_WIDTHS[i];
-        if (room > 0) out[i] -= (take * room) / others;
+        const take = Math.min(room, need);
+        out[i] -= take;
+        need -= take;
+      }
+      for (let i = priority - 1; i >= 0 && need > 0; i -= 1) {
+        const room = out[i] - MIN_WIDTHS[i];
+        const take = Math.min(room, need);
+        out[i] -= take;
+        need -= take;
+      }
+      if (need > 0) {
+        // Every other column is at its minimum, so the dragged one gives way.
+        out[priority] = Math.max(MIN_WIDTHS[priority], out[priority] - need);
       }
       return out;
     }
 
     const shrinkable = out.reduce((sum, w, i) => sum + (w - MIN_WIDTHS[i]), 0);
     if (shrinkable <= 0) return [...MIN_WIDTHS];
-    const share = Math.min(take, shrinkable);
+    const share = Math.min(need, shrinkable);
     for (let i = 0; i < out.length; i += 1) {
       const room = out[i] - MIN_WIDTHS[i];
       if (room > 0) out[i] -= (share * room) / shrinkable;
@@ -252,6 +265,7 @@ export function TaskList({
   // Every track is an explicit pixel value: a flexible track would fight the
   // proportional shrink above and let the row outgrow the container.
   const template = widths.map((w) => `${w.toFixed(2)}px`).join(" ");
+
 
 
   const sorted = useMemo(() => {
@@ -348,6 +362,7 @@ export function TaskList({
       style={{ "--task-cols": template } as React.CSSProperties}
     >
       {header()}
+
 
 
 

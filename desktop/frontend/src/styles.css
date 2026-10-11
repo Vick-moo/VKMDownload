@@ -886,11 +886,16 @@ input:focus {
 
 /* Draggable column boundaries, laid over the gaps between header cells.
    Positioned as a sibling of the header row rather than inside a cell, because
-   a button cannot contain another interactive element. */
+   a button cannot contain another interactive element.
+
+   `left` has to match where the header's first column starts, which is after
+   two layers of inset: this container's own padding on .listwrap, and the
+   header's. Accounting for only one put every handle 16px to the left of the
+   divider it draws, so the line under the cursor highlighted its neighbour. */
 .colresizers {
   position: absolute;
   top: 0;
-  left: var(--space-4);
+  left: calc(var(--space-4) * 2);
   display: flex;
   gap: var(--space-1);
   height: 33px;
@@ -920,13 +925,15 @@ input:focus {
   right: -6px;
 }
 
-/* The boundary line between two columns. It is visible at rest so it is
-   discoverable — an invisible handle is one nobody finds — and thickens and
-   takes the accent colour on hover to confirm it is grabbable. */
+/* The boundary line between two columns, drawn in the middle of the 4px gap
+   that separates them so it reads as sitting on the edge rather than inside a
+   column. It is visible at rest so it is discoverable — an invisible handle is
+   one nobody finds — and thickens and takes the accent colour on hover to
+   confirm it is grabbable. */
 .colresizer::after {
   content: "";
   position: absolute;
-  right: -5px;
+  right: -2px;
   top: 5px;
   bottom: 5px;
   width: 1px;

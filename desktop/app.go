@@ -111,20 +111,25 @@ func (a *App) shutdown(ctx context.Context) {
 
 // beforeClose is consulted when the user closes the window.
 //
-// Returning false refuses the close. When "minimise to tray" is on and
-// something is still transferring, refusing is the right answer: silently
-// killing a download because the window was closed is exactly the behaviour a
-// download manager must not have.
-func (a *App) beforeClose(ctx context.Context) bool {
+// The return value is `prevent`: true refuses the close. (Getting this backwards
+// made the window impossible to close at all, since both of the early exits
+// returned true.)
+//
+// When "minimise to tray" is on and something is still transferring, refusing is
+// the right answer: silently killing a download because the window was closed is
+// exactly the behaviour a download manager must not have. With nothing running
+// the close goes through, because there is no tray icon to bring the window
+// back from.
+func (a *App) beforeClose(ctx context.Context) (prevent bool) {
 	cfg := a.Config()
 	if !cfg.MinimizeToTray {
-		return true
+		return false
 	}
 	if a.mgr.Stats()["active"] == 0 {
-		return true
+		return false
 	}
 	runtime.WindowHide(ctx)
-	return false
+	return true
 }
 
 // ------------------------------------------------------------------ paths

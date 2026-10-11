@@ -388,6 +388,37 @@ func TestResumePauseOnMissingFileConcurrently(t *testing.T) {
 	t.Log("survived concurrent resume/pause/cancel on a missing target")
 }
 
+// TestBeforeCloseAllowsClosing pins the return contract of the close hook.
+//
+// Wails reads the value as `prevent`, so true refuses the close. Written the
+// other way round — which it was — every close was refused and the window could
+// not be shut at all.
+func TestBeforeCloseAllowsClosing(t *testing.T) {
+	app := newTestApp(t)
+	app.ctx = context.Background()
+
+	setTray := func(on bool) {
+		app.mu.Lock()
+		cfg := app.cfg
+		cfg.MinimizeToTray = on
+		app.cfg = cfg
+		app.mu.Unlock()
+	}
+
+	// Minimise-to-tray on, nothing transferring: the close must go through,
+	// because there is no tray icon to bring the window back from.
+	setTray(true)
+	if app.beforeClose(context.Background()) {
+		t.Error("close refused with no active transfers; the window would be impossible to shut")
+	}
+
+	// Minimise-to-tray off: never refuse.
+	setTray(false)
+	if app.beforeClose(context.Background()) {
+		t.Error("close refused with minimise-to-tray disabled")
+	}
+}
+
 // TestNewAppEmitterDelegatesToRuntime guards the emitter against the regression
 // that took the app down with a stack overflow: NewApp once assigned a closure
 // whose body called the very field it was assigning, so the first event
