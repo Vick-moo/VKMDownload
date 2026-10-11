@@ -438,6 +438,37 @@ func (s *session) saveState() error {
 	if s.state == "" || s.mgr == nil {
 		return nil
 	}
+
+	segs := s.mgr.segmentStates()
+
+	// Clamp every segment's progress to what the file actually holds.
+	//
+	// A cancelled transfer can leave the in-memory counters ahead of the bytes
+	// on disk: the claim for the block being written is settled on the way out,
+	// and the last write may not have reached the file. Persisting the larger
+	// number would make a later resume start past bytes that were never
+	// written, leaving a hole in a file whose length is still exactly right —
+	// the one failure mode no length check can detect.
+	if s.file != nil {
+		if fi, err := s.file.Stat(); err == nil {
+			available := fi.Size()
+			if s.probe.Size >= 0 && available > s.probe.Size {
+				available = s.probe.Size
+			}
+			for i := range segs {
+				if room := available - segs[i].Start; segs[i].Written > room {
+					if room < 0 {
+						room = 0
+					}
+					segs[i].Written = room
+					if segs[i].Written < segs[i].End-segs[i].Start+1 {
+						segs[i].Done = false
+					}
+				}
+			}
+		}
+	}
+
 	return saveState(s.state, &State{
 		Version:      StateVersion,
 		URL:          s.req.URL,
@@ -446,7 +477,7 @@ func (s *session) saveState() error {
 		ETag:         s.probe.ETag,
 		LastModified: s.probe.LastModified,
 		NoRange:      !s.probe.RangeSupported,
-		Segments:     s.mgr.segmentStates(),
+		Segments:     segs,
 		TempPath:     s.part,
 		TargetPath:   s.target,
 		CreatedAt:    s.created,
@@ -679,19 +710,6 @@ func (s *session) fetchOnce(ctx context.Context, seg *Segment) error {
 	}
 	debugf("reserve     seg=%s off=%d n=%d", s.mgr.describe(seg), off, n)
 
-	// Diagnostic only (VDOWNLOAD_LEGACY_ACCOUNTING). Under that model a claim
-	// advances the segment's progress, so the claim's start offset is the point
-	// the segment believes it has already reached. Requesting from there is only
-	// legitimate if the bytes before it are really on disk, which is tracked
-	// separately as the highest offset this segment has had written so far.
-	if legacyAccounting() {
-		written := s.mgr.writtenHighWater(seg)
-		if off > written {
-			debugf("HOLE-AHEAD  claim off=%d but this segment has only written up to %d (gap %d bytes)",
-				off, written, off-written)
-		}
-	}
-
 	written := int64(0)
 	// committed tracks how much of the claim has already been turned into real
 	// progress, so the deferred cleanup hands back exactly the unfulfilled part.
@@ -753,10 +771,11 @@ func (s *session) fetchOnce(ctx context.Context, seg *Segment) error {
 			if wn > 0 {
 				debugf("wrote       [%d,%d)", off+written, off+written+int64(wn))
 				written += int64(wn)
-				// Only now does the segment's progress advance. Committing
-				// after the bytes are on disk is what keeps Next() — and so the
-				// next request offset — from ever stepping over unwritten bytes.
-				s.mgr.commit(seg, n, written)
+				// Only now does the segment's progress advance, and it is told
+				// the absolute end rather than a byte count: reporting a
+				// cumulative total as an increment is what previously made the
+				// offset jump past a block that was never written.
+				s.mgr.commit(seg, n, off+written)
 				committed += int64(wn)
 				s.track.add(int64(wn))
 			}

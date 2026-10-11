@@ -196,26 +196,40 @@ func (m *segmentManager) reserve(s *Segment, max int64) (off, n int64, ok bool) 
 	return off, n, true
 }
 
-// commit has two independent effects, and keeping them separate is essential:
+// commit records that this segment has been written up to the absolute offset
+// end (exclusive), settling n bytes of the caller's claim.
 //
-//   - it returns n bytes of the caller's claim (Reserved), because the claim is
-//     settled either way and must not leak;
+// The end offset is passed in rather than a byte count, and the advance is
+// computed here as the distance from the segment's current position. That makes
+// the update idempotent with respect to how often it is called: a caller that
+// reports a cumulative total instead of an increment cannot double-count,
+// because the same absolute end always produces the same Written.
+//
+// It has two independent effects, and keeping them apart is essential:
+//
+//   - it settles n bytes of the caller's claim (Reserved), because the claim is
+//     done either way and must not leak;
 //   - it advances Written, which drives the next request offset.
 //
 // Deriving one from the other would be wrong. Written only ever moves forward
 // and is capped at the segment length, while a claim can be settled for fewer
 // bytes than it advanced; coupling them lets Reserved drift upward until the
 // segment can never be marked complete.
-func (m *segmentManager) commit(s *Segment, claimed, n int64) {
+func (m *segmentManager) commit(s *Segment, claimed, end int64) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if off := s.Next(); off+n > s.writtenHigh {
-		s.writtenHigh = off + n
-	}
 	if legacyAccounting() {
-		// Progress was already counted by reserve.
+		// Under that model the claim itself already advanced progress, and
+		// there is no separate reservation to settle.
+		if end > s.writtenHigh {
+			s.writtenHigh = end
+		}
 		return
+	}
+
+	if end > s.writtenHigh {
+		s.writtenHigh = end
 	}
 	if claimed > 0 {
 		s.Reserved -= claimed
@@ -223,20 +237,15 @@ func (m *segmentManager) commit(s *Segment, claimed, n int64) {
 			s.Reserved = 0
 		}
 	}
-	if n <= 0 {
+
+	delta := end - s.Next()
+	if delta <= 0 {
 		return
 	}
-	s.Written += n
+	s.Written += delta
 	if s.Written > s.Length() {
 		s.Written = s.Length()
 	}
-}
-
-// writtenHighWater returns the highest offset this segment has written to.
-func (m *segmentManager) writtenHighWater(s *Segment) int64 {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return s.writtenHigh
 }
 
 // unreserve returns claimed-but-unwritten bytes after a failed fetch.

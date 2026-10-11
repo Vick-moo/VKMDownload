@@ -178,7 +178,9 @@ func TestSegmentManagerReserveCommitAndUnreserve(t *testing.T) {
 		}
 
 		// The first claim settles later; both effects must still land exactly.
-		m.commit(s, 300, 300)
+		// The end offset is absolute, so settling the second claim brings the
+		// segment's progress to the end of both runs.
+		m.commit(s, 300, 600)
 		if s.Reserved != 0 {
 			t.Fatalf("Reserved = %d, want 0 once every claim is settled", s.Reserved)
 		}
@@ -201,10 +203,15 @@ func TestSegmentManagerReserveCommitAndUnreserve(t *testing.T) {
 		if _, _, ok := m.reserve(s, 100); ok {
 			t.Error("reserve handed out bytes that were already claimed")
 		}
-		// Committing it makes the segment complete.
-		m.commit(s, n, n)
+
+		// Settle the tail claim through to the end of the segment. The end
+		// offset is absolute, so this also covers the bytes committed earlier.
+		m.commit(s, n, 1000)
 		if s.Remaining() != 0 {
 			t.Errorf("Remaining = %d, want 0", s.Remaining())
+		}
+		if s.Reserved != 0 {
+			t.Errorf("Reserved = %d, want 0 once every claim is settled", s.Reserved)
 		}
 		if _, _, ok := m.reserve(s, 100); ok {
 			t.Error("reserve succeeded past the end of the segment")

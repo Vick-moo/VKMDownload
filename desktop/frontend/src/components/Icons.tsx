@@ -130,3 +130,31 @@ export function IconTrash({ size = 18, className }: IconProps): JSX.Element {
     </svg>
   );
 }
+
+/** Chevron used by collapsible groups; rotation is done in CSS. */
+export function IconChevron({ size = 14, className }: IconProps): JSX.Element {
+  return (
+    <svg {...base(size, className)}>
+      <path d="m6 9 6 6 6-6" />
+    </svg>
+  );
+}
+
+/** Sort direction indicator. */
+export function IconArrowUp({ size = 12, className }: IconProps): JSX.Element {
+  return (
+    <svg {...base(size, className)}>
+      <path d="M12 19V5" />
+      <path d="m6 11 6-6 6 6" />
+    </svg>
+  );
+}
+
+export function IconArrowDown({ size = 12, className }: IconProps): JSX.Element {
+  return (
+    <svg {...base(size, className)}>
+      <path d="M12 5v14" />
+      <path d="m18 13-6 6-6-6" />
+    </svg>
+  );
+}

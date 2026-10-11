@@ -61,6 +61,10 @@
     sans-serif;
   --font-mono: "Cascadia Mono", Consolas, ui-monospace, monospace;
 
+  /* Task list columns. The header and every row share this template, which is
+     what keeps the sortable header aligned with the rows it sorts. */
+  --task-cols: minmax(220px, 1fr) 92px 104px 128px 92px 76px;
+
   --shadow-raised: 0 4px 16px rgba(0, 0, 0, 0.45);
   --shadow-modal: 0 16px 48px rgba(0, 0, 0, 0.6);
 
@@ -414,6 +418,7 @@ input:focus {
 }
 
 .sidebar {
+  position: relative;
   grid-area: sidebar;
   display: flex;
   flex-direction: column;
@@ -422,6 +427,139 @@ input:focus {
   background: var(--bg-surface);
   border-right: 1px solid var(--border);
   overflow: hidden;
+}
+
+/* Only the filter list scrolls; the settings entry and the totals stay put. */
+.sidebar__scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.sidebar__resizer {
+  position: absolute;
+  top: 0;
+  right: -3px;
+  width: 6px;
+  height: 100%;
+  cursor: col-resize;
+  background: transparent;
+  transition: background var(--dur-fast) var(--ease);
+}
+
+.sidebar__resizer:hover {
+  background: var(--accent-subtle);
+}
+
+/* Collapsible section inside the sidebar, e.g. "按类型". */
+.navgroup {
+  margin-top: var(--space-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.navgroup__head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  height: 26px;
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 600;
+  text-align: left;
+  transition: color var(--dur-fast) var(--ease);
+}
+
+.navgroup__head:hover {
+  color: var(--text-secondary);
+}
+
+.navgroup__chevron {
+  display: grid;
+  place-items: center;
+  width: 14px;
+  transition: transform var(--dur-base) var(--ease);
+}
+
+.navgroup__chevron--collapsed {
+  transform: rotate(-90deg);
+}
+
+.navgroup__title {
+  flex: 1;
+}
+
+.navgroup__body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+/* One file-type group inside the section. */
+.navsub {
+  display: flex;
+  flex-direction: column;
+}
+
+.navsub__head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  height: 28px;
+  /* Indented so the hierarchy against the status entries is visible. */
+  padding: 0 var(--space-2) 0 var(--space-4);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  font-size: 12px;
+  text-align: left;
+  transition: background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+
+.navsub__head:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.navsub__chevron {
+  display: grid;
+  place-items: center;
+  width: 12px;
+  transition: transform var(--dur-base) var(--ease);
+}
+
+.navsub__chevron--collapsed {
+  transform: rotate(-90deg);
+}
+
+.navsub__label {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.navsub__body {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  padding: var(--space-1) var(--space-2) var(--space-2) var(--space-8);
+}
+
+.extchip {
+  padding: 1px var(--space-1);
+  border-radius: var(--radius-sm);
+  background: var(--bg-hover);
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 14px;
 }
 
 .nav-item {
@@ -527,6 +665,67 @@ input:focus {
   flex: 1;
 }
 
+.toolbar__summary {
+  font-size: 12px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+/* The sortable header stays put; only the list below it scrolls. */
+.listwrap {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ------------------------------------------------------------- settings --- */
+
+.settings {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--space-4) var(--space-4) var(--space-8);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-6);
+}
+
+.settings-section {
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: var(--space-2) var(--space-4);
+}
+
+.settings-section__title {
+  margin: var(--space-2) 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.settings__foot {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  position: sticky;
+  bottom: 0;
+  padding: var(--space-3) 0;
+  background: linear-gradient(
+    to top,
+    var(--bg-base) 60%,
+    rgba(13, 15, 20, 0)
+  );
+}
+
+.settings__status {
+  font-size: 12px;
+  color: var(--success);
+}
+
 .list {
   flex: 1;
   padding: var(--space-3) var(--space-4) var(--space-4);
@@ -571,13 +770,56 @@ input:focus {
   margin-top: var(--space-2);
 }
 
+/* ------------------------------------------------------- sortable header --- */
+
+.listhead {
+  display: grid;
+  grid-template-columns: var(--task-cols);
+  gap: var(--space-2);
+  align-items: center;
+  padding: var(--space-2) var(--space-4);
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-surface);
+}
+
+.listhead__cell {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: 0;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-muted);
+  text-align: left;
+  white-space: nowrap;
+  transition: color var(--dur-fast) var(--ease);
+}
+
+.listhead__cell:hover {
+  color: var(--text-primary);
+}
+
+/* The active sort column is marked with both an arrow and a colour change, so
+   the state is not carried by colour alone. */
+.listhead__cell--active {
+  color: var(--accent-hover);
+}
+
+.listhead__cell--right {
+  justify-content: flex-end;
+}
+
+.listhead__arrow {
+  opacity: 0.9;
+}
+
 /* ----------------------------------------------------------------- task --- */
 
 .task {
   display: grid;
-  grid-template-columns: 1fr auto;
-  grid-template-rows: auto auto auto;
-  gap: var(--space-2) var(--space-3);
+  grid-template-columns: var(--task-cols);
+  gap: var(--space-2);
+  align-items: start;
   min-height: var(--task-row-h);
   padding: var(--space-3) var(--space-4);
   background: var(--bg-surface);
@@ -600,12 +842,28 @@ input:focus {
   border-left: 3px solid var(--danger);
 }
 
-.task__head {
-  grid-column: 1;
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
+.task__cell {
   min-width: 0;
+  overflow: hidden;
+}
+
+.task__cell--right {
+  text-align: right;
+}
+
+.task__cell--name {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.task__url {
+  font-size: 11px;
+  line-height: 14px;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .task__name {
@@ -616,35 +874,319 @@ input:focus {
   font-weight: 500;
 }
 
-.task__progress {
-  grid-column: 1;
+.task__cell--status {
+  display: flex;
+  align-items: center;
 }
 
 .task__meta {
-  grid-column: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 12px;
+  line-height: 16px;
+  color: var(--text-secondary);
+}
+
+.task__meta-primary {
+  color: var(--text-primary);
+}
+
+.task__error {
+  grid-column: 1 / -1;
+  font-size: 12px;
+  line-height: 16px;
+  color: var(--danger);
+}
+
+/* ------------------------------------------------------------- grouping --- */
+
+.group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.group__head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  padding: var(--space-2) var(--space-4);
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+  text-align: left;
+  transition: color var(--dur-fast) var(--ease);
+}
+
+.group__head:hover {
+  color: var(--text-primary);
+}
+
+.group__chevron {
+  display: grid;
+  place-items: center;
+  width: 14px;
+  transition: transform var(--dur-base) var(--ease);
+}
+
+.group__chevron--collapsed {
+  transform: rotate(-90deg);
+}
+
+.group__count {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.group__body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.task__actions {
+  grid-column: 6;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-1);
+}
+
+/* ---------------------------------------------------------------- modal --- */
+
+.overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: grid;
+  place-items: center;
+  padding: var(--space-4);
+  background: rgba(4, 6, 10, 0.62);
+  animation: overlay-in var(--dur-slow) var(--ease);
+}
+
+@keyframes overlay-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.modal {
+  display: flex;
+  flex-direction: column;
+  width: min(560px, 100%);
+  max-height: 100%;
+  background: var(--bg-raised);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-modal);
+  animation: modal-in var(--dur-slow) var(--ease);
+}
+
+@keyframes modal-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.modal--wide {
+  width: min(680px, 100%);
+}
+
+.modal__head {
   display: flex;
   align-items: center;
   gap: var(--space-3);
+  padding: var(--space-4);
+  border-bottom: 1px solid var(--border);
+}
+
+.modal__title {
+  flex: 1;
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.modal__body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  padding: var(--space-4);
+  overflow-y: auto;
+}
+
+.modal__foot {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  border-top: 1px solid var(--border);
+}
+
+.modal__foot-spacer {
+  flex: 1;
+}
+
+/* --------------------------------------------------------------- fields --- */
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.field__label {
   font-size: 12px;
   color: var(--text-secondary);
 }
 
-.task__meta-sep {
+.field__row {
+  display: flex;
+  gap: var(--space-2);
+}
+
+.field__row input {
+  flex: 1;
+  min-width: 0;
+}
+
+.field__error {
+  margin: 0;
+  font-size: 12px;
+  color: var(--danger);
+}
+
+.field-grid {
+  display: grid;
+  grid-template-columns: 1fr 120px;
+  gap: var(--space-4);
+}
+
+/* A switch row: label and description on the left, the control on the right. */
+.setting {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-4);
+  padding: var(--space-3) 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.setting:last-child {
+  border-bottom: none;
+}
+
+.setting__text {
+  flex: 1;
+  min-width: 0;
+}
+
+.setting__title {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.setting__hint {
+  margin-top: 2px;
+  font-size: 12px;
+  line-height: 16px;
   color: var(--text-muted);
 }
 
-.task__actions {
-  grid-column: 2;
-  grid-row: 1 / -1;
-  display: flex;
-  align-items: center;
-  gap: var(--space-1);
+/* The switch is a real checkbox kept visually hidden, so it stays reachable by
+   keyboard and announced correctly by a screen reader. */
+.switch {
+  position: relative;
+  flex: 0 0 auto;
+  width: 38px;
+  height: 22px;
+  margin-top: 2px;
 }
 
-.task__error {
-  grid-column: 1;
+.switch input {
+  position: absolute;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.switch__track {
+  position: absolute;
+  inset: 0;
+  border-radius: var(--radius-full);
+  background: var(--bg-hover);
+  border: 1px solid var(--border-strong);
+  transition: background var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease);
+  pointer-events: none;
+}
+
+.switch__thumb {
+  position: absolute;
+  top: 4px;
+  left: 4px;
+  width: 14px;
+  height: 14px;
+  border-radius: var(--radius-full);
+  background: var(--text-muted);
+  transition: transform var(--dur-fast) var(--ease),
+    background var(--dur-fast) var(--ease);
+  pointer-events: none;
+}
+
+.switch input:checked ~ .switch__track {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.switch input:checked ~ .switch__thumb {
+  transform: translateX(16px);
+  background: #fff;
+}
+
+.switch input:focus-visible ~ .switch__track {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.switch input:disabled ~ .switch__track,
+.switch input:disabled ~ .switch__thumb {
+  opacity: 0.45;
+}
+
+/* Sub-options of a setting read as belonging to it. */
+.setting--nested {
+  padding-left: var(--space-6);
+  border-bottom-color: transparent;
+}
+
+.settings-section {
+  display: flex;
+  flex-direction: column;
+}
+
+.settings-section__title {
+  margin: 0 0 var(--space-1);
   font-size: 12px;
-  color: var(--danger);
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: none;
 }
 
 @media (prefers-reduced-motion: reduce) {

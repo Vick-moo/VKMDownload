@@ -1,125 +1,170 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { JSX } from "react";
-import { Version } from "../wailsjs/go/main/App";
-import {
-  IconAlert,
-  IconCheck,
-  IconDownload,
-  IconFolder,
-  IconInbox,
-  IconPlus,
-  IconSettings,
-} from "./components/Icons";
-import type { Config, Filter, TaskView } from "./types";
-
-/**
- * Navigation entries. The counts come from the task list once it exists; they
- * are rendered now so the layout is settled rather than shifting later.
- */
-const NAV: Array<{
-  key: Filter | "settings";
-  label: string;
-  icon: JSX.Element;
-}> = [
-  { key: "all", label: "全部", icon: <IconInbox size={18} /> },
-  { key: "active", label: "下载中", icon: <IconDownload size={18} /> },
-  { key: "completed", label: "已完成", icon: <IconCheck size={18} /> },
-  { key: "failed", label: "失败", icon: <IconAlert size={18} /> },
-];
-
-/** Formats a byte count with binary units. */
-function formatBytes(bytes: number): string {
-  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
-  const units = ["B", "KiB", "MiB", "GiB", "TiB"];
-  const exp = Math.min(
-    Math.floor(Math.log(bytes) / Math.log(1024)),
-    units.length - 1,
-  );
-  const value = bytes / 1024 ** exp;
-  return `${value >= 100 || exp === 0 ? Math.round(value) : value.toFixed(1)} ${units[exp]}`;
-}
-
-/** Formats a byte/sec rate. Zero renders as "0 B/s" rather than a dash so the
- * top-bar stat keeps a constant width instead of twitching as transfers start
- * and stop. */
-function formatSpeed(bytesPerSecond: number): string {
-  if (!Number.isFinite(bytesPerSecond) || bytesPerSecond <= 0) return "0 B/s";
-  return `${formatBytes(bytesPerSecond)}/s`;
-}
-
-/** Formats a count of seconds as a compact remaining-time string. */
-function formatEta(seconds: number): string {
-  if (!Number.isFinite(seconds) || seconds <= 0) return "—";
-  const s = Math.round(seconds);
-  if (s < 60) return `${s}s`;
-  if (s < 3600) return `${Math.floor(s / 60)}m${String(s % 60).padStart(2, "0")}s`;
-  return `${Math.floor(s / 3600)}h${String(Math.floor((s % 3600) / 60)).padStart(2, "0")}m`;
-}
+import { EVENTS, api, on } from "./api";
+import { NewTaskDialog } from "./components/NewTaskDialog";
+import { SettingsPage } from "./components/SettingsPage";
+import { Sidebar } from "./components/Sidebar";
+import { TaskList } from "./components/TaskList";
+import { formatSpeed } from "./format";
+import type { Config, Filter, SortDir, SortKey, TaskView } from "./types";
+import { groupOf } from "./types";
+import { IconDownload, IconPlus } from "./components/Icons";
 
 function App(): JSX.Element {
-  const [filter, setFilter] = useState<Filter>("all");
-  const [showSettings, setShowSettings] = useState(false);
   const [tasks, setTasks] = useState<TaskView[]>([]);
   const [config, setConfig] = useState<Config | null>(null);
   const [version, setVersion] = useState("");
 
-  // Proves the Go bridge works; replaced by real data in the next step.
-  useEffect(() => {
-    Version()
-      .then(setVersion)
-      .catch(() => setVersion(""));
+  const [filter, setFilter] = useState<Filter>("all");
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [sortKey, setSortKey] = useState<SortKey>("added");
+  const [sortDir, setSortDir] = useState<SortDir>("desc");
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+
+  const [dialogOpen, setDialogOpen] = useState(false);
+  const [dialogURL, setDialogURL] = useState("");
+  const [pendingURL, setPendingURL] = useState("");
+
+  const typesOpen = filter.startsWith("type:");
+  const activeType = typesOpen ? filter.slice(5) : "";
+
+  const reload = useCallback(async () => {
+    try {
+      setTasks(await api.listTasks());
+    } catch (e) {
+      console.error(e);
+    }
   }, []);
 
-  const counts = useMemo(() => {
-    const active = tasks.filter((t) => t.status === "downloading").length;
-    const completed = tasks.filter((t) => t.status === "completed").length;
-    const failed = tasks.filter((t) => t.status === "failed").length;
-    return { all: tasks.length, active, completed, failed };
-  }, [tasks]);
+  useEffect(() => {
+    void api.version().then(setVersion).catch(() => setVersion(""));
+    void api
+      .getConfig()
+      .then((c) => setConfig(c))
+      .catch(() => setConfig(null));
+    void reload();
+  }, [reload]);
+
+  // A single set of subscriptions drives every list update. Progress events
+  // arrive several times a second per task, so they patch one entry in place
+  // rather than reloading the whole list.
+  useEffect(() => {
+    const offs = [
+      on<TaskView>(EVENTS.progress, (v) =>
+        setTasks((prev) => prev.map((t) => (t.id === v.id ? v : t))),
+      ),
+      on<TaskView>(EVENTS.done, (v) =>
+        setTasks((prev) => prev.map((t) => (t.id === v.id ? v : t))),
+      ),
+      on<TaskView>(EVENTS.failed, (v) =>
+        setTasks((prev) => prev.map((t) => (t.id === v.id ? v : t))),
+      ),
+      on<TaskView>(EVENTS.added, (v) =>
+        setTasks((prev) => (prev.some((t) => t.id === v.id) ? prev : [v, ...prev])),
+      ),
+      on<string>(EVENTS.removed, (id) =>
+        setTasks((prev) => prev.filter((t) => t.id !== id)),
+      ),
+      // A captured link either opens the dialog for confirmation or is acted
+      // on by the Go side, depending on the settings.
+      on<string>(EVENTS.clipboardURL, (url) => {
+        setPendingURL(url);
+        setDialogURL(url);
+        setDialogOpen(true);
+      }),
+    ];
+    return () => offs.forEach((off) => off());
+  }, []);
+
+  const visible = useMemo(() => {
+    let list = tasks;
+    if (filter === "active") {
+      list = tasks.filter(
+        (t) => t.status === "downloading" || t.status === "queued",
+      );
+    } else if (filter === "completed") {
+      list = tasks.filter((t) => t.status === "completed");
+    } else if (filter === "failed") {
+      list = tasks.filter((t) => t.status === "failed");
+    } else if (typesOpen) {
+      list = tasks.filter((t) => groupOf(t.name) === activeType);
+    }
+    return list;
+  }, [tasks, filter, typesOpen, activeType]);
 
   const stats = useMemo(() => {
     const active = tasks.filter((t) => t.status === "downloading");
     return {
       activeCount: active.length,
-      totalSpeed: active.reduce((sum, t) => sum + (t.speed || 0), 0),
+      totalSpeed: active.reduce((s, t) => s + (t.speed || 0), 0),
+      total: tasks.length,
     };
   }, [tasks]);
 
-  const visible = useMemo(() => {
-    const matching = tasks.filter((t) => {
-      if (filter === "active") {
-        return t.status === "downloading" || t.status === "queued";
+  /** Cycles the sort: a new column starts descending, the same column flips. */
+  const onSort = useCallback(
+    (key: SortKey) => {
+      if (key === sortKey) {
+        setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+        return;
       }
-      if (filter === "completed") return t.status === "completed";
-      if (filter === "failed") return t.status === "failed";
-      return true;
-    });
-    // Failures first: burying them under a long list is how a user misses that
-    // a download silently gave up.
-    return [...matching].sort((a, b) => {
-      if (a.status === "failed" && b.status !== "failed") return -1;
-      if (b.status === "failed" && a.status !== "failed") return 1;
-      return b.createdAt.localeCompare(a.createdAt);
-    });
-  }, [tasks, filter]);
+      setSortKey(key);
+      setSortDir(key === "name" ? "asc" : "desc");
+    },
+    [sortKey],
+  );
 
-  const onNewTask = useCallback(() => {
-    // Wired to the new-task dialog in the next step.
+  const onSelect = useCallback((id: string, additive: boolean) => {
+    setSelected((prev) => {
+      const next = additive ? new Set(prev) : new Set<string>();
+      if (additive && prev.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
   }, []);
 
+  const onNewTask = useCallback(() => {
+    setDialogURL(pendingURL);
+    setDialogOpen(true);
+  }, [pendingURL]);
+
+  // Keyboard shortcuts from the design spec.
   useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "n" && (event.ctrlKey || event.metaKey)) {
-        event.preventDefault();
-        onNewTask();
+    const onKey = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement | null)?.tagName;
+      const typing = tag === "INPUT" || tag === "TEXTAREA";
+      if (e.key === "n" && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        setDialogURL("");
+        setDialogOpen(true);
       }
-      if (event.key === "Escape" && showSettings) {
-        setShowSettings(false);
+      if (e.key === "Escape" && settingsOpen) setSettingsOpen(false);
+      if (e.key === "Escape" && dialogOpen) setDialogOpen(false);
+      // Space toggles pause on a single selected task.
+      if (e.key === " " && !typing && selected.size === 1) {
+        e.preventDefault();
+        const id = [...selected][0];
+        const t = tasks.find((x) => x.id === id);
+        if (!t) return;
+        if (t.status === "downloading") void api.pauseTask(id).then(reload);
+        else if (t.status === "paused") void api.resumeTask(id).then(reload);
+      }
+      // Delete removes the selected tasks.
+      if (e.key === "Delete" && !typing && selected.size > 0) {
+        e.preventDefault();
+        void Promise.all(
+          [...selected].map((id) => api.removeTask(id, false)),
+        ).then(() => {
+          setSelected(new Set());
+          void reload();
+        });
       }
     };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [onNewTask, showSettings]);
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [settingsOpen, dialogOpen, selected, tasks, reload]);
+
+  const hasTasks = tasks.length > 0;
 
   return (
     <div className="shell">
@@ -138,65 +183,30 @@ function App(): JSX.Element {
         </span>
       </header>
 
-      <nav className="sidebar" aria-label="任务筛选">
-        {NAV.map((item) => (
-          <button
-            key={item.key}
-            type="button"
-            className={`nav-item${
-              !showSettings && filter === item.key ? " nav-item--active" : ""
-            }`}
-            aria-current={!showSettings && filter === item.key ? "page" : undefined}
-            onClick={() => {
-              setShowSettings(false);
-              setFilter(item.key as Filter);
-            }}
-          >
-            <span className="nav-item__icon">{item.icon}</span>
-            <span className="nav-item__label">{item.label}</span>
-            <span className="nav-item__count">
-              {counts[item.key as keyof typeof counts] ?? 0}
-            </span>
-          </button>
-        ))}
-
-        <div className="sidebar__spacer" />
-
-        <button
-          type="button"
-          className={`nav-item${showSettings ? " nav-item--active" : ""}`}
-          aria-current={showSettings ? "page" : undefined}
-          onClick={() => setShowSettings(true)}
-        >
-          <span className="nav-item__icon">
-            <IconSettings size={18} />
-          </span>
-          <span className="nav-item__label">设置</span>
-        </button>
-
-        <div className="sidebar__stats">
-          <div className="sidebar__stat">
-            <span className="sidebar__stat-label">活动任务</span>
-            <span className="sidebar__stat-value num">{stats.activeCount}</span>
-          </div>
-          <div className="sidebar__stat">
-            <span className="sidebar__stat-label">总速度</span>
-            <span className="sidebar__stat-value num">
-              {formatSpeed(stats.totalSpeed)}
-            </span>
-          </div>
-        </div>
-      </nav>
+      <Sidebar
+        tasks={tasks}
+        filter={filter}
+        activeCount={stats.activeCount}
+        totalSpeed={stats.totalSpeed}
+        settingsOpen={settingsOpen}
+        onFilter={(f) => {
+          setSettingsOpen(false);
+          setFilter(f);
+        }}
+        onOpenSettings={() => setSettingsOpen(true)}
+      />
 
       <main className="main">
-        {showSettings ? (
-          <div className="empty">
-            <span className="empty__icon">
-              <IconSettings size={48} />
-            </span>
-            <p className="empty__title">设置</p>
-            <p className="empty__hint">设置页将在下一步实现。</p>
-          </div>
+        {settingsOpen ? (
+          <SettingsPage
+            config={config}
+            onSaved={(c) => {
+              setConfig(c);
+              // Re-read from the Go side: normalisation may have adjusted
+              // values the user typed.
+              void api.getConfig().then(setConfig).catch(() => undefined);
+            }}
+          />
         ) : (
           <>
             <div className="toolbar">
@@ -209,9 +219,14 @@ function App(): JSX.Element {
                 新建下载
               </button>
               <span className="toolbar__spacer" />
+              <span className="toolbar__summary num">
+                {stats.total > 0
+                  ? `${stats.total} 个任务 · ${formatSpeed(stats.totalSpeed)}`
+                  : "暂无任务"}
+              </span>
             </div>
 
-            {visible.length === 0 ? (
+            {!hasTasks ? (
               <div className="empty">
                 <span className="empty__icon">
                   <IconDownload size={48} />
@@ -232,14 +247,41 @@ function App(): JSX.Element {
                   </button>
                 </div>
               </div>
-            ) : (
-              <div className="list">
-                {/* Task rows arrive with the manager in the next step. */}
+            ) : visible.length === 0 ? (
+              <div className="empty">
+                <p className="empty__title">这个分类下没有任务</p>
+                <p className="empty__hint">
+                  换个筛选条件看看，或点左上角「全部」。
+                </p>
               </div>
+            ) : (
+              <TaskList
+                tasks={visible}
+                sortKey={sortKey}
+                sortDir={sortDir}
+                onSort={onSort}
+                selected={selected}
+                onSelect={onSelect}
+                groupByType={filter === "all"}
+                onChanged={() => void reload()}
+              />
             )}
           </>
         )}
       </main>
+
+      <NewTaskDialog
+        open={dialogOpen}
+        initialURL={dialogURL}
+        config={config}
+        onClose={() => {
+          setDialogOpen(false);
+          setPendingURL("");
+          // A captured link that the user declined must not come back on the
+          // next poll.
+        }}
+        onCreated={() => void reload()}
+      />
     </div>
   );
 }

@@ -40,9 +40,9 @@ func main() {
 			Assets: assets,
 		},
 
-		OnStartup: app.startup,
-		OnDomReady: app.domReady,
-		OnShutdown: app.shutdown,
+		OnStartup:     app.startup,
+		OnDomReady:    app.domReady,
+		OnShutdown:    app.shutdown,
 		OnBeforeClose: app.beforeClose,
 
 		Windows: &windows.Options{
