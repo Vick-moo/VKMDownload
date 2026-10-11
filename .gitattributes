@@ -1,0 +1,28 @@
+# Normalise line endings so a Windows checkout and a Linux checkout agree.
+#
+# Without this, core.autocrlf rewrites every text file on checkout, which shows
+# up as whole-file diffs the moment anyone on another platform touches a file.
+
+* text=auto eol=lf
+
+# Windows-only scripts must keep CRLF to run.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Binary-ish files git should never try to convert.
+*.exe binary
+*.dll binary
+*.ico binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.zip binary
+*.woff binary
+*.woff2 binary
+
+# Generated front-end assets and lockfiles get huge, noisy diffs.
+pnpm-lock.yaml -diff linguist-generated
+package-lock.json -diff linguist-generated

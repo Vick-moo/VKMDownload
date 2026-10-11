@@ -1,0 +1,32 @@
+# Go build artifacts
+/bin/
+/build/bin/
+*.exe
+*.test
+*.out
+/cmd/idm/idm
+/cmd/testsrv/testsrv
+
+# Download staging / partial data
+*.vdownload.part
+*.vdownload.json
+*.vdownload.tmp
+/testdata/downloads/
+/bench/out/
+/bench/results/
+
+# Wails desktop app
+/desktop/build/bin/
+/desktop/frontend/node_modules/
+/desktop/frontend/dist/
+wailsjs/
+
+# Editors / OS
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+
+# Local debug traces
+*.trace.log
+*.corrupt
