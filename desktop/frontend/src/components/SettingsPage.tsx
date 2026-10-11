@@ -6,6 +6,8 @@ import { IconFolder } from "./Icons";
 
 interface Props {
   config: Config | null;
+  /** From the binding; shown at the foot of the page. */
+  version: string;
   onSaved: (cfg: Config) => void;
 }
 
@@ -53,7 +55,11 @@ function Switch({
  * capturing links without downloading them is a real workflow, and so is
  * downloading without being asked.
  */
-export function SettingsPage({ config, onSaved }: Props): JSX.Element {
+export function SettingsPage({
+  config,
+  version,
+  onSaved,
+}: Props): JSX.Element {
   const [draft, setDraft] = useState<Config | null>(config);
   const [status, setStatus] = useState("");
   // Holds the outcome of the clipboard test button.
@@ -403,6 +409,13 @@ export function SettingsPage({ config, onSaved }: Props): JSX.Element {
           保存设置
         </button>
       </div>
+
+      {/* The version lived in a top bar that the brand row replaced, and it went
+          with the bar rather than moving. It belongs here: the first thing
+          anyone reporting a problem is asked for is this number. */}
+      {version ? (
+        <p className="settings__version">VKMDownload v{version}</p>
+      ) : null}
     </div>
   );
 }

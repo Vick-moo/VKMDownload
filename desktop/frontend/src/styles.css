@@ -808,6 +808,15 @@ input:focus {
   white-space: nowrap;
 }
 
+/* Selectable, because the first thing anyone reporting a problem is asked for
+   is this number. */
+.settings__version {
+  margin: var(--space-4) 0 0;
+  font-size: 12px;
+  color: var(--text-dim);
+  user-select: text;
+}
+
 .sidebar__stat-value {
   font-size: 16px;
   line-height: 20px;

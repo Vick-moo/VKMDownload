@@ -48,6 +48,8 @@ function App(): JSX.Element {
 
   const [dialogOpen, setDialogOpen] = useState(false);
   const [dialogURL, setDialogURL] = useState("");
+  /** From the binding; shown at the foot of the sidebar. */
+  const [version, setVersion] = useState("");
   /** The bulk-delete confirmation; the count in it comes from the live list. */
   const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
@@ -75,6 +77,13 @@ function App(): JSX.Element {
       .getConfig()
       .then((c) => setConfig(c))
       .catch(() => setConfig(null));
+    // Asked once: the version cannot change while the app is running.
+    void api
+      .version()
+      .then((v) => setVersion(v))
+      .catch(() => {
+        // A missing version is not worth surfacing; the footer just stays empty.
+      });
     void reload();
   }, [reload]);
 
@@ -302,6 +311,7 @@ function App(): JSX.Element {
         {settingsOpen ? (
           <SettingsPage
             config={config}
+            version={version}
             onSaved={(c) => {
               setConfig(c);
               // Re-read from the Go side: normalisation may have adjusted

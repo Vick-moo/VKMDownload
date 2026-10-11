@@ -14,7 +14,7 @@ import (
 )
 
 // appVersion is what Version() reports and the browser extension displays.
-const appVersion = "0.2.1"
+const appVersion = "0.2.2"
 
 // App is the object exposed to the front-end. Every exported method becomes a
 // callable binding, so internal state is kept unexported.
@@ -462,7 +462,11 @@ func (a *App) ClipboardProbe() (map[string]string, error) {
 // --------------------------------------------------------------- lifecycle
 
 // Version reports the build identifier shown in the UI.
-func (a *App) Version() string { return "0.2.0" }
+// Version reports the running version.
+//
+// It reads the same constant the loopback endpoint hands the browser extension,
+// so the two cannot drift: they did, briefly, because this was a literal.
+func (a *App) Version() string { return appVersion }
 
 // Quit terminates the application, backing the front-end's own exit control.
 func (a *App) Quit() {

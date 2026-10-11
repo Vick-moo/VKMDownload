@@ -13,7 +13,7 @@
   "info": {
     "companyName": "VKMDownload",
     "productName": "VKMDownload",
-    "productVersion": "0.2.1",
+    "productVersion": "0.2.2",
     "copyright": "MIT licensed",
     "comments": "Multi-connection download manager"
   }
