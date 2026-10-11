@@ -196,9 +196,9 @@ export function TaskRow({
           <button
             type="button"
             className="icon-btn"
-            aria-label="取消并清除断点"
-            title="取消并清除断点"
-            onClick={() => void run(() => api.cancelTask(task.id))}
+            aria-label="从列表移除"
+            title="从列表移除（不删除文件）"
+            onClick={() => void run(() => api.removeTask(task.id, false))}
           >
             <IconX size={16} />
           </button>
@@ -207,8 +207,8 @@ export function TaskRow({
         <button
           type="button"
           className="icon-btn"
-          aria-label="删除任务"
-          title="删除任务"
+          aria-label="从列表移除"
+          title="从列表移除（不删除文件）"
           onClick={() => void run(() => api.removeTask(task.id, false))}
         >
           <IconTrash size={16} />

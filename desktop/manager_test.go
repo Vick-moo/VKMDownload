@@ -669,23 +669,18 @@ func TestRemoveDeletesOnlyFinishedFiles(t *testing.T) {
 	}
 }
 
-// TestRemoveClearsScratchButKeepsTheFile covers what the delete button does.
-// Removing a task must not touch the file the user downloaded, but the partial
-// data and the sidecar are this app's own scratch: they exist only so a
-// transfer can be resumed, and once the task is gone they can never be used
-// again, so they go with it rather than littering the download folder.
-func TestRemoveClearsScratchButKeepsTheFile(t *testing.T) {
+// TestRemoveLeavesEveryFileAlone covers what the delete button does. The user
+// was explicit: removing a row from the list must not disturb anything on disk.
+// That includes the partial file and sidecar, which are what a later attempt at
+// the same URL resumes from.
+func TestRemoveLeavesEveryFileAlone(t *testing.T) {
 	app := newTestApp(t)
 	dest := filepath.Join(t.TempDir(), "kept.bin")
 
-	if err := os.WriteFile(dest, []byte("finished"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(dest+engine.PartSuffix, []byte("partial"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(dest+engine.StateSuffix, []byte("{}"), 0o644); err != nil {
-		t.Fatal(err)
+	for _, p := range []string{dest, dest + engine.PartSuffix, dest + engine.StateSuffix} {
+		if err := os.WriteFile(p, []byte("keep me"), 0o644); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	task, err := app.mgr.Start(StartRequest{
@@ -698,14 +693,15 @@ func TestRemoveClearsScratchButKeepsTheFile(t *testing.T) {
 		t.Fatalf("Remove: %v", err)
 	}
 
-	if _, err := os.Stat(dest); err != nil {
-		t.Errorf("the downloaded file was removed: %v", err)
+	for _, p := range []string{dest, dest + engine.PartSuffix, dest + engine.StateSuffix} {
+		if _, err := os.Stat(p); err != nil {
+			t.Errorf("%s was removed: %v", filepath.Base(p), err)
+		}
 	}
-	if _, err := os.Stat(dest + engine.PartSuffix); !os.IsNotExist(err) {
-		t.Error("the partial file was left behind")
-	}
-	if _, err := os.Stat(dest + engine.StateSuffix); !os.IsNotExist(err) {
-		t.Error("the sidecar was left behind")
+
+	// Nothing may remain in the index either.
+	if _, ok := find(app.mgr, task.ID); ok {
+		t.Error("the task is still listed")
 	}
 }
 
