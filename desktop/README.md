@@ -50,6 +50,9 @@ wails build
 | `tasks.json` | 任务列表（重启后恢复） |
 | `vkmdownload.log` | 诊断日志，含每个经由扩展创建的下载及其来源 |
 
+更新下载中的新版暂存放在程序所在目录（`VKMDownload.new.exe`），校验通过、重启换文件后即删除；
+下的是 Releases 里的正式包。
+
 设置统一存放在 `%APPDATA%\VKMDownload\`，全新安装直接使用该目录，不做旧目录迁移。
 
 ## 注意
