@@ -82,7 +82,11 @@
 - module：`vkmdownload`，桌面 `vkmdownload/desktop`，`replace vkmdownload => ../`
 - 后缀：`.vkmdownload.part` / `.vkmdownload.json` / `.vkmdownload.tmp`
 - 环境变量：`VKMDOWNLOAD_DEBUG`（`=1` 进 stderr，`=路径` 进文件）、`VKMDOWNLOAD_DIAGNOSE`（压力诊断）、`VKMDOWNLOAD_LEGACY_ACCOUNTING`（回归对照）
-- 数据目录：`%APPDATA%\VKMDownload\`（`config.json`、`tasks.json`、`vkmdownload.log`），无旧目录迁移
+- 数据目录：`%APPDATA%\VKMDownload\`（`config.json`、`tasks.json`、`vkmdownload.log`）。
+  早先的 `migrateLegacyDataDir`（从 `VKDownload`/`VDownload` 搬运 `config.json` 与 `tasks.json`）
+  已移除。影响仅限"装过 0.2.2 之前的版本、之后直接跳到当前版"的安装 —— 那种情况下任务列表与设置
+  不会自动搬过来。0.2.2 起的所有版本都已经写进 `VKMDownload`，新装也直接用它。需要恢复的话，
+  `git show 7dde868:desktop/app.go` 里有完整实现。
 - 列宽键：`vkmdownload.column-widths`
 
 ## 6. 常用命令
@@ -115,7 +119,11 @@ cd desktop && wails build            # 产出 build/bin/VKMDownload.exe
 - `Remove`/`Cancel` 在 binding 线程同步 `waitStopped(3s)`：为保正确性保留，批量删运行中任务时会 block；要改需异步化清理。
 - `moveFile` 跨卷 `tmp` 固定名：并发同目标有互踩可能，未改（罕见路径）。
 - `state.matches` 不比 `URL`：换 URL 同长度且无 validator 时可误用旧分片，未改（需版本号升级）。
-- 前端 `as never` 两处、`wailsjs/` 缺失：无 Node 构建环境，未做类型重生成；`NewTaskDialog` 已加前端 scheme 预检。
+- 前端 `as never` 两处（`NewTaskDialog.tsx:85`、`SettingsPage.tsx:88`）：把 `StartRequest`/`Config`
+  断言掉以绕开类型检查，说明 `types.ts` 里手写的类型与 Wails 生成的 `models.ts` 有出入。未修。
+  **注意：本机有 Node（v24.16.0），`npx tsc --noEmit` 与 `wails build` 都能跑**，
+  `wailsjs/` 绑定也已生成（含 `RemoveTasks`/`ClearFailedTasks`/`Version`）——
+  改完 Go 的 binding 后直接 `wails build` 就会重新生成，不必手写类型。
 - 扩展 `ownDownloads` 只增不删、`handOver` 先删后送的降级保真：未改，属行为设计范畴。
 - `shutdownMachine` 无二次确认：保留（计划下载页已有开关），动前需与你确认。
 
