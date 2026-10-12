@@ -117,8 +117,8 @@ cd desktop && wails build            # 产出 build/bin/VKMDownload.exe
 ## 8. 剩下未动的（有意延后）
 
 - `Remove`/`Cancel` 在 binding 线程同步 `waitStopped(3s)`：为保正确性保留，批量删运行中任务时会 block；要改需异步化清理。
-- `moveFile` 跨卷 `tmp` 固定名：并发同目标有互踩可能，未改（罕见路径）。
-- `state.matches` 不比 `URL`：换 URL 同长度且无 validator 时可误用旧分片，未改（需版本号升级）。
+- ~~`moveFile` 跨卷 `tmp` 固定名~~：已修——staging 名带 pid + 计数器（`download.go:nextTmpID`）。
+- ~~`state.matches` 不比 `URL`~~：已修——`FinalURL`（都有时）否则 `URL` 不一致即丢弃（`state.go:matches`）。
 - 前端 `as never` 两处（`NewTaskDialog.tsx:85`、`SettingsPage.tsx:88`）：把 `StartRequest`/`Config`
   断言掉以绕开类型检查，说明 `types.ts` 里手写的类型与 Wails 生成的 `models.ts` 有出入。未修。
   **注意：本机有 Node（v24.16.0），`npx tsc --noEmit` 与 `wails build` 都能跑**，
