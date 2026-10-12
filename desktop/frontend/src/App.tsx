@@ -52,6 +52,14 @@ function App(): JSX.Element {
   const [version, setVersion] = useState("");
   /** A newer release announced by the Go side; null until one arrives. */
   const [update, setUpdate] = useState<UpdateInfo | null>(null);
+  /** The "where to update later" hint after dismissing the banner. */
+  const [updateHintOpen, setUpdateHintOpen] = useState(false);
+  /** One-click update in flight from the banner; progress shows in the bar. */
+  const [updating, setUpdating] = useState(false);
+  const [updPct, setUpdPct] = useState("");
+  /** Set when the banner is dismissed mid-download: the staging keeps going
+      in the backend, but the automatic restart is called off. */
+  const updateCancelled = useRef(false);
   /** The bulk-delete confirmation; the count in it comes from the live list. */
   const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
@@ -79,6 +87,18 @@ function App(): JSX.Element {
       .getConfig()
       .then((c) => setConfig(c))
       .catch(() => setConfig(null));
+    // Asked once: the version cannot change while the app is running.
+    // The update banner has two triggers: the event from the Go side, and
+    // this direct check. The event alone is not enough — it can fire before
+    // the subscription below exists and would then be missed silently.
+    void api
+      .checkUpdate()
+      .then((info) => {
+        if (info && info.available) setUpdate(info);
+      })
+      .catch(() => {
+        // Offline is not an error worth surfacing.
+      });
     // Asked once: the version cannot change while the app is running.
     void api
       .version()
@@ -252,14 +272,57 @@ function App(): JSX.Element {
     }
   }, [visible, flash]);
 
-  const openUpdate = useCallback(async () => {
-    if (!update) return;
+  // One-click update from the banner: download, then restart straight into
+  // the new version. The backend pauses every task before swapping files, so
+  // updating mid-download loses nothing; after the restart everything loads
+  // as paused, ready to resume.
+  const startUpdateNow = useCallback(async () => {
+    updateCancelled.current = false;
+    setUpdating(true);
+    setUpdPct("");
     try {
-      await api.openReleasePage(update.url);
+      const s = await api.startUpdate();
+      if (s.state === "failed") {
+        setUpdating(false);
+        flash(`更新失败：${s.error || "未知错误"}`);
+        return;
+      }
+      for (;;) {
+        await new Promise((r) => setTimeout(r, 800));
+        if (updateCancelled.current) {
+          setUpdating(false);
+          return;
+        }
+        let p;
+        try {
+          p = await api.updateProgress();
+        } catch {
+          continue;
+        }
+        if (p.state === "ready") {
+          setUpdPct("正在应用…");
+          try {
+            await api.applyUpdate();
+          } catch (e) {
+            setUpdating(false);
+            flash(`更新失败：${e instanceof Error ? e.message : String(e)}`);
+          }
+          return;
+        }
+        if (p.state === "failed") {
+          setUpdating(false);
+          flash(`更新失败：${p.error || "未知错误"}`);
+          return;
+        }
+        if (p.total > 0) {
+          setUpdPct(`${Math.floor((p.downloaded / p.total) * 100)}%`);
+        }
+      }
     } catch (e) {
-      flash(`打不开下载页：${e instanceof Error ? e.message : String(e)}`);
+      setUpdating(false);
+      flash(`更新失败：${e instanceof Error ? e.message : String(e)}`);
     }
-  }, [update, flash]);
+  }, [flash]);
 
   // Keyboard shortcuts from the design spec.
   useEffect(() => {
@@ -326,21 +389,29 @@ function App(): JSX.Element {
         {update && (
           <div className="updatebar" role="status">
             <span>
-              发现新版本 {update.version}
-              {version ? `（当前 ${version}）` : ""}
+              {updating
+                ? `正在更新到 ${update.version}${updPct ? ` ${updPct}` : "…"}`
+                : `发现新版本 ${update.version}${version ? `（当前 ${version}）` : ""}，更新时会先暂停全部任务，重启后可继续`}
             </span>
             <span className="updatebar__actions">
-              <button
-                type="button"
-                className="btn btn--primary"
-                onClick={() => void openUpdate()}
-              >
-                去下载
-              </button>
+              {!updating ? (
+                <button
+                  type="button"
+                  className="btn btn--primary"
+                  onClick={() => void startUpdateNow()}
+                >
+                  立即更新
+                </button>
+              ) : null}
               <button
                 type="button"
                 className="btn"
-                onClick={() => setUpdate(null)}
+                onClick={() => {
+                  updateCancelled.current = true;
+                  setUpdating(false);
+                  setUpdate(null);
+                  setUpdateHintOpen(true);
+                }}
               >
                 不再提示
               </button>
@@ -488,6 +559,20 @@ function App(): JSX.Element {
         }}
         onCreated={() => void reload()}
       />
+
+      {updateHintOpen ? (
+        <ConfirmDialog
+          title="更新在设置里"
+          message="以后想更新时，随时可以手动检查并安装。"
+          detail="设置 → 拉到最底部 → 软件更新 → 检查更新。"
+          confirmLabel="去设置页"
+          onConfirm={() => {
+            setUpdateHintOpen(false);
+            setSettingsOpen(true);
+          }}
+          onCancel={() => setUpdateHintOpen(false)}
+        />
+      ) : null}
 
       {confirmDeleteOpen ? (
         <ConfirmDialog

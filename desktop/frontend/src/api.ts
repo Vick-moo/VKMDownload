@@ -6,6 +6,7 @@
  * string literals.
  */
 import {
+  ApplyUpdate,
   CancelTask,
   CheckUpdate,
   ClipboardProbe,
@@ -15,6 +16,8 @@ import {
   OpenFile,
   OpenReleasePage,
   PauseTask,
+  StartUpdate,
+  UpdateProgress,
   ClearFailedTasks,
   PickDirectory,
   PlanRunning,
@@ -30,10 +33,13 @@ import {
   Version,
 } from "../wailsjs/go/main/App";
 import { EventsOn } from "../wailsjs/runtime/runtime";
-import type { Config, StartRequest, TaskView, UpdateInfo } from "./types";
+import type { Config, StartRequest, TaskView, UpdateInfo, UpdateStatus } from "./types";
 export const api = {
   version: (): Promise<string> => Version(),
   checkUpdate: (): Promise<UpdateInfo> => CheckUpdate(),
+  startUpdate: (): Promise<UpdateStatus> => StartUpdate(),
+  updateProgress: (): Promise<UpdateStatus> => UpdateProgress(),
+  applyUpdate: (): Promise<void> => ApplyUpdate(),
   openReleasePage: (url: string): Promise<void> => OpenReleasePage(url),
   listTasks: (): Promise<TaskView[]> => ListTasks(),
   newTask: (req: StartRequest): Promise<TaskView> => NewTask(req),

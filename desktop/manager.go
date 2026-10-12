@@ -165,6 +165,11 @@ type Manager struct {
 
 	// planRunning is set while a plan is working through its tasks.
 	planRunning bool
+
+	// updating freezes scheduling: set while an update is being applied, so
+	// pausing everything for the restart cannot be undone by the queue
+	// starter waking a queued task back up.
+	updating bool
 }
 
 func NewManager(app *App) *Manager {
@@ -333,6 +338,17 @@ func (m *Manager) startRun(t *task) {
 	// so holding t.mu across it would deadlock against itself.
 	// (A sequential overshoot by concurrent starters is benign: the next pump
 	// corrects it, and StartAll/pumpQueue both start tasks one at a time.)
+	m.mu.Lock()
+	frozen := m.updating
+	m.mu.Unlock()
+	if frozen {
+		// An update is being applied: park the task instead of starting it.
+		t.mu.Lock()
+		t.view.Status = StatusQueued
+		t.mu.Unlock()
+		_ = m.saveTasks()
+		return
+	}
 	if m.activeCount() >= m.maxConcurrent() {
 		t.mu.Lock()
 		t.view.Status = StatusQueued
@@ -398,8 +414,15 @@ func (m *Manager) activeCount() int {
 
 // pumpQueue starts queued tasks while slots are free. It runs after every
 // settle point (completion, failure, pause, cancel, removal), so a freed slot
-// is never left idle while work waits.
+// is never left idle while work waits. It does nothing while an update is
+// being applied: waking work up mid-shutdown would defeat the pause-all.
 func (m *Manager) pumpQueue() {
+	m.mu.Lock()
+	frozen := m.updating
+	m.mu.Unlock()
+	if frozen {
+		return
+	}
 	for {
 		if m.activeCount() >= m.maxConcurrent() {
 			return
@@ -478,6 +501,13 @@ func (m *Manager) Resume(id string) error {
 		return fmt.Errorf("当前状态无法继续（%s）", st)
 	}
 	t.mu.Unlock()
+
+	m.mu.Lock()
+	frozen := m.updating
+	m.mu.Unlock()
+	if frozen {
+		return fmt.Errorf("正在更新，稍后再试")
+	}
 
 	// The spawn (and the MaxConcurrent gate) lives in startRun: it creates
 	// cancel and done under one lock, so a pause arriving mid-start cannot

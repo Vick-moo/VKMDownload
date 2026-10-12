@@ -32,6 +32,10 @@ type App struct {
 
 	mgr *Manager
 
+	// updMu guards upd, the self-update state machine in update.go.
+	updMu sync.Mutex
+	upd   UpdateStatus
+
 	// clipboard monitoring state
 	lastClip    string
 	lastClipHit string

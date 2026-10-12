@@ -11,6 +11,7 @@ export type TaskView = main.TaskView;
 export type Config = main.Config;
 export type StartRequest = main.StartRequest;
 export type UpdateInfo = main.UpdateInfo;
+export type UpdateStatus = main.UpdateStatus;
 
 /** Task lifecycle, matching the TaskStatus constants in manager.go. */
 export type TaskStatus =

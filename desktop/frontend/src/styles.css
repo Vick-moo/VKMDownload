@@ -934,9 +934,10 @@ input:focus {
 }
 
 /* An explanatory paragraph inside a section, for settings that need more than
-   a one-line hint. */
+   a one-line hint. It carries a top margin so it never hugs the divider of
+   the row above it. */
 .settings-section__note {
-  margin: 0 0 var(--space-2);
+  margin: var(--space-2) 0;
   font-size: 12px;
   line-height: 17px;
   color: var(--text-muted);

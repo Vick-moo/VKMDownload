@@ -1,7 +1,7 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { JSX } from "react";
 import { api } from "../api";
-import type { Config } from "../types";
+import type { Config, UpdateStatus } from "../types";
 import { IconFolder } from "./Icons";
 
 interface Props {
@@ -64,10 +64,123 @@ export function SettingsPage({
   const [status, setStatus] = useState("");
   // Holds the outcome of the clipboard test button.
   const [probe, setProbe] = useState("");
+  // Self-update state, polled while a download is in flight.
+  const [upd, setUpd] = useState<UpdateStatus | null>(null);
+  const [updMsg, setUpdMsg] = useState("");
+  const [updBusy, setUpdBusy] = useState(false);
+  const pollTimer = useRef<number | null>(null);
 
   useEffect(() => {
     setDraft(config);
   }, [config]);
+
+  // The update state lives in the backend: leaving this page unmounts it, so
+  // re-entering must restore whatever the backend already knows instead of
+  // forcing another download of the same file.
+  useEffect(() => {
+    let cancelled = false;
+    void api
+      .updateProgress()
+      .then((s) => {
+        if (cancelled) return;
+        if (s.state !== "idle") {
+          setUpd(s);
+          if (s.state === "downloading") pollUpdate();
+        }
+      })
+      .catch(() => {
+        // Offline is not an error worth surfacing.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(
+    () => () => {
+      if (pollTimer.current !== null) window.clearTimeout(pollTimer.current);
+    },
+    [],
+  );
+
+  function pollUpdate() {
+    if (pollTimer.current !== null) window.clearTimeout(pollTimer.current);
+    pollTimer.current = window.setTimeout(async () => {
+      try {
+        const s = await api.updateProgress();
+        setUpd(s);
+        if (s.state === "downloading") pollUpdate();
+      } catch {
+        // A failed poll is not worth surfacing; the next one retries.
+      }
+    }, 800);
+  }
+
+  async function checkNow() {
+    setUpdBusy(true);
+    setUpdMsg("");
+    try {
+      const info = await api.checkUpdate();
+      setUpdMsg(
+        info.available
+          ? `发现新版本 ${info.version}，可以一键更新。`
+          : "已是最新版本。",
+      );
+      if (info.available) {
+        setUpd({
+          state: "idle",
+          version: info.version,
+          downloaded: 0,
+          total: 0,
+          error: "",
+        });
+      }
+    } catch (e) {
+      setUpdMsg(`检查失败：${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setUpdBusy(false);
+    }
+  }
+
+  async function startDl() {
+    setUpdBusy(true);
+    setUpdMsg("");
+    try {
+      const s = await api.startUpdate();
+      setUpd(s);
+      if (s.state === "downloading") pollUpdate();
+    } catch (e) {
+      setUpdMsg(`更新失败：${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setUpdBusy(false);
+    }
+  }
+
+  async function applyUpd() {
+    setUpdBusy(true);
+    try {
+      await api.applyUpdate();
+      // The app quits for the swap; if we are still here it failed.
+      setUpdMsg("应用更新失败，程序还在运行。");
+    } catch (e) {
+      setUpdMsg(`更新失败：${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setUpdBusy(false);
+    }
+  }
+
+  function updLine(): string {
+    if (updMsg) return updMsg;
+    if (!upd) return "自动检查新版本，有更新时顶部会出现横幅。";
+    if (upd.state === "downloading") {
+      const pct =
+        upd.total > 0 ? ` ${Math.floor((upd.downloaded / upd.total) * 100)}%` : "";
+      return `正在下载新版${upd.version}${pct}…`;
+    }
+    if (upd.state === "ready") return `新版 ${upd.version} 已下好，重启即生效。`;
+    if (upd.state === "failed" && upd.error) return `更新失败：${upd.error}`;
+    return "自动检查新版本，有更新时顶部会出现横幅。";
+  }
 
   if (!draft) {
     return (
@@ -336,6 +449,52 @@ export function SettingsPage({
           checked={draft.minimizeToTray}
           onChange={(v) => patch({ minimizeToTray: v })}
         />
+      </section>
+
+      <section className="settings-section">
+        <h3 className="settings-section__title">软件更新</h3>
+
+        <div className="setting">
+          <span className="setting__text">
+            <span className="setting__title">当前版本 v{version || "…"}</span>
+            <span className="setting__hint">{updLine()}</span>
+          </span>
+          <span className="field__row" style={{ flex: "0 0 auto" }}>
+            <button
+              type="button"
+              className="btn"
+              disabled={updBusy}
+              onClick={checkNow}
+            >
+              检查更新
+            </button>
+            {upd && upd.version && upd.state !== "ready" ? (
+              <button
+                type="button"
+                className="btn btn--primary"
+                disabled={updBusy || upd.state === "downloading"}
+                onClick={startDl}
+              >
+                {upd.state === "downloading" ? "下载中…" : "立即更新"}
+              </button>
+            ) : null}
+            {upd && upd.state === "ready" ? (
+              <button
+                type="button"
+                className="btn btn--primary"
+                disabled={updBusy}
+                onClick={applyUpd}
+              >
+                重启生效
+              </button>
+            ) : null}
+          </span>
+        </div>
+
+        <p className="settings-section__note">
+          更新会先暂停全部任务再换文件，重启后任务都在，可继续下载。
+          下载中的新版文件会做哈希校验，失败就丢弃重来。
+        </p>
       </section>
 
       <section className="settings-section">
