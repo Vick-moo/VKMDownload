@@ -37,7 +37,7 @@ wails build
 
 ## 依赖引擎的方式
 
-`go.mod` 里用 `replace vdownload => ../` 指向父目录，所以本地构建用的**始终是工作区的引擎代码**，
+`go.mod` 里用 `replace vkmdownload => ../` 指向父目录，所以本地构建用的**始终是工作区的引擎代码**，
 而不是某个已发布版本。改了引擎不必发版，重新 `wails build` 即可。
 
 ## 设置存放位置
@@ -50,8 +50,7 @@ wails build
 | `tasks.json` | 任务列表（重启后恢复） |
 | `vkmdownload.log` | 诊断日志，含每个经由扩展创建的下载及其来源 |
 
-> 产品改过两次名（VDownload → VKDownload → VKMDownload），启动时会自动把旧目录里的
-> `config.json` 和 `tasks.json` 迁移过来，**逐文件迁移且不覆盖**，不会丢任务列表。
+设置统一存放在 `%APPDATA%\VKMDownload\`，全新安装直接使用该目录，不做旧目录迁移。
 
 ## 注意
 

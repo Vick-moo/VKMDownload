@@ -67,7 +67,7 @@ Go 编写的多连接下载管理器（IDM 风格），带 Wails 桌面 GUI 与�
 | 组件 | 版本 | 说明 |
 |---|---|---|
 | Go | 1.26.4 | |
-| Wails CLI | v2.16.0 | `C:\Users\vickm\go\bin\wails.exe` |
+| Wails CLI | v2.16.0 | `wails.exe`（PATH 中可用即可） |
 | Node / npm | v24.16.0 / 11.13.0 | 前端构建 |
 | WebView2 Runtime | 154.0.4258.62 | Wails 运行时依赖，已装 |
 | gcc | msys64 mingw64 | cgo（`-race` 与新能验证需要） |
@@ -101,10 +101,10 @@ StartTask(req) ──立刻返回 taskID──▶ 前端拿到 id，开始监听
 
 ### 2.2 任务持久化
 
-引擎的 sidecar（`*.vdownload.json`）本身就是完整的任务描述（URL、大小、ETag、分片表）。
+引擎的 sidecar（`*.vkmdownload.json`）本身就是完整的任务描述（URL、大小、ETag、分片表）。
 GUI 启动时：
 
-1. 读 GUI 自己的任务索引（`%APPDATA%\vdownload\tasks.json`）——记录用户意向、
+1. 读 GUI 自己的任务索引（`%APPDATA%\VKMDownload\tasks.json`）——记录用户意向、
    下载目录、创建时间等 GUI 层面的信息；
 2. 对每个未完成任务检查 sidecar 是否存在 → 决定其状态是"可续传"还是"已丢失"。
 
@@ -114,7 +114,7 @@ GUI 启动时：
 ### 2.3 目录结构
 
 ```
-vdownload/
+vkmdownload/
 ├── go.mod
 ├── internal/engine/          # 下载引擎（已完成）
 ├── testsrv/                  # 故障注入测试服务器（已完成）
@@ -201,30 +201,28 @@ TestClipboardURL()           string      // 便于"立即测试"按钮
 5. **设置页 + 持久化** — 逐项开关落盘。验证：改设置→重启→设置还在。
 6. **剪贴板监控** — 轮询 + 去重 + 按开关动作。验证：复制一个 URL 能触发预期行为。
 7. **打开文件 / 打开目录 / 托盘** — Wails runtime + 托盘菜单。
-8. **打包** — `wails build`，产出 `desktop/build/bin/vdownload.exe`。验证：双击能跑。
+8. **打包** — `wails build`，产出 `desktop/build/bin/VKMDownload.exe`。验证：双击能跑。
 
 ---
 
 ## 5. 上传 GitHub
 
-**已完成**：<https://github.com/vickmoololl-ui/VDownload>（Public）
+**已完成**：<https://github.com/Vick-moo/VKMDownload>（Public）
 
 本地仓库与远程 `origin` 已配好，`main` 分支跟踪 `origin/main`，工作区干净。
 
 推送过程中遇到并解决的问题，留个记录以防换机器时再撞上：
 
 - 机器上**没有 `gh` CLI**，走的是手动建仓 + `git remote add` 的路线。
-- 首次 `git push` 报 `403 Permission to vickmoololl-ui/VDownload.git denied to
-  Vickmoomoo`。原因是 Windows 凭据管理器里存的是**另一个 GitHub 账号**
-  （`Vickmoomoo`）的凭据，与仓库属主 `vickmoololl-ui` 不匹配。
-  用 `cmdkey /delete:git:https://Vickmoomoo@github.com` 清掉后推送成功。
-- 遗留一条删不掉的 `GitHub for Visual Studio - https://Vickmoomoo@github.com/`
-  凭据（`cmdkey` 处理不了带空格的目标名），但它不影响 git 命令行推送。
+- 首次 `git push` 报 `403 Permission denied`。原因是 Windows 凭据管理器里存的是**另一个 GitHub 账号**
+  的凭据，与仓库属主不匹配。
+  用凭据管理器清掉旧的 `git:https://github.com` 凭据后推送成功。
+- 遗留一条删不掉的 Visual Studio GitHub 凭据，但它不影响 git 命令行推送。
 
 日常推送就用：
 
 ```powershell
-cd C:\Users\vickm\deepseek-harness\default-workspace\VDownload
+cd <workspace>\VKMDownload
 git push
 ```
 
@@ -245,6 +243,6 @@ gh auth login
   合并 TS 分片）。当前引擎只做直链文件。
 - **HTTP/2 被刻意禁用**：`transport.go` 里 pin 到 HTTP/1.1。这是分片下载能真正加速的
   前提——h2 会把 N 个 Range 请求复用到**一条** TCP 连接上，多连接的加速就变成纯装饰。
-- **排障日志**：`VDOWNLOAD_DEBUG=1` 打开引擎的 `debugf` 输出（默认静默，也可指向文件）。
-  `VDOWNLOAD_DIAGNOSE=1` 会把高频压力诊断从 12/16 轮提升到 40/60 轮。
-  `VDOWNLOAD_LEGACY_ACCOUNTING=1` 可复现修复前的记账缺陷，用于回归对照。
+- **排障日志**：`VKMDOWNLOAD_DEBUG=1` 打开引擎的 `debugf` 输出（默认静默，也可指向文件）。
+  `VKMDOWNLOAD_DIAGNOSE=1` 会把高频压力诊断从 12/16 轮提升到 40/60 轮。
+  `VKMDOWNLOAD_LEGACY_ACCOUNTING=1` 可复现修复前的记账缺陷，用于回归对照。

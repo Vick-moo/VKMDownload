@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"vdownload/testsrv"
+	"vkmdownload/testsrv"
 )
 
 // TestDiagnoseLegacyAccounting pins down which bookkeeping step lets a segment's
@@ -24,11 +24,11 @@ import (
 //
 // Run with the legacy model to reproduce:
 //
-//	VDOWNLOAD_DIAGNOSE=1 VDOWNLOAD_LEGACY_ACCOUNTING=1 \
+//	VKMDOWNLOAD_DIAGNOSE=1 VKMDOWNLOAD_LEGACY_ACCOUNTING=1 \
 //	  go test ./internal/engine -run TestDiagnoseLegacyAccounting -v
 func TestDiagnoseLegacyAccounting(t *testing.T) {
-	if os.Getenv("VDOWNLOAD_DIAGNOSE") == "" {
-		t.Skip("set VDOWNLOAD_DIAGNOSE=1 to run the accounting diagnostic")
+	if os.Getenv("VKMDOWNLOAD_DIAGNOSE") == "" {
+		t.Skip("set VKMDOWNLOAD_DIAGNOSE=1 to run the accounting diagnostic")
 	}
 
 	mode := "current"

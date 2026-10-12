@@ -15,7 +15,7 @@ import (
 	"sync"
 	"time"
 
-	"vdownload/internal/engine"
+	"vkmdownload/internal/engine"
 )
 
 // debugLog appends a diagnostic line to the app's log file. It exists so a
@@ -26,12 +26,22 @@ import (
 // a test's override applies here too. When it did not, every test run appended
 // to the real log and, worse, created the real directory as a side effect —
 // which then defeated the migration that moves the folder after a rename.
+//
+// The log is capped: past debugLogMaxBytes it is rotated to a single backup,
+// so a hot loop can never fill the disk.
+const debugLogMaxBytes = 2 << 20
+
 func (a *App) debugLog(format string, args ...any) {
 	dir := a.dataDir()
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return
 	}
-	f, err := os.OpenFile(filepath.Join(dir, "vkmdownload.log"),
+	path := filepath.Join(dir, "vkmdownload.log")
+	if st, err := os.Stat(path); err == nil && st.Size() > debugLogMaxBytes {
+		_ = os.Remove(path + ".1")
+		_ = os.Rename(path, path+".1")
+	}
+	f, err := os.OpenFile(path,
 		os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
 		return
@@ -268,8 +278,12 @@ func (m *Manager) Start(req StartRequest) (TaskView, error) {
 	// Until it does, the task has no name. Taking filepath.Base(dest) here — as
 	// this did — reads the *directory* when no filename was given, which
 	// labelled every such download after the folder it was going into.
+	//
+	// The filename is sanitised like a browser suggestion: the dialog is a
+	// local trust boundary away from a remote server, but "../" or an absolute
+	// path here would still escape the download folder.
 	name := ""
-	if fn := strings.TrimSpace(req.Filename); fn != "" {
+	if fn := sanitizeSuggestedName(req.Filename); fn != "" {
 		dest = filepath.Join(dest, fn)
 		name = fn
 	}
@@ -279,7 +293,7 @@ func (m *Manager) Start(req StartRequest) (TaskView, error) {
 		conns = cfg.Connections
 	}
 
-	t := &task{referer: strings.TrimSpace(req.Referer)}
+	t := &task{referer: strings.ReplaceAll(strings.ReplaceAll(strings.TrimSpace(req.Referer), "\r", ""), "\n", "")}
 	t.view = TaskView{
 		ID:      id,
 		URL:     url,
@@ -298,14 +312,123 @@ func (m *Manager) Start(req StartRequest) (TaskView, error) {
 	m.app.emit("task:added", snapshot(t))
 
 	if req.Start {
-		ctx, cancel := context.WithCancel(m.app.ctx)
-		t.mu.Lock()
-		t.cancel = cancel
-		t.mu.Unlock()
-		go m.run(t, ctx, cancel)
+		m.startRun(t)
 	}
 	_ = m.saveTasks()
 	return snapshot(t), nil
+}
+
+// startRun launches the transfer goroutine for t, honouring MaxConcurrent.
+//
+// The done channel is created here, under the same lock as cancel, so a
+// Pause/Cancel arriving while the goroutine is still starting always finds
+// something to wait on. Creating it inside run instead left a window where
+// done was nil and the stop returned without waiting — the transfer then
+// carried on after the user had stopped it.
+//
+// When no slot is free the task stays queued and pumpQueue starts it once a
+// transfer settles.
+func (m *Manager) startRun(t *task) {
+	// Count first, lock second: activeCount inspects every task including t,
+	// so holding t.mu across it would deadlock against itself.
+	// (A sequential overshoot by concurrent starters is benign: the next pump
+	// corrects it, and StartAll/pumpQueue both start tasks one at a time.)
+	if m.activeCount() >= m.maxConcurrent() {
+		t.mu.Lock()
+		t.view.Status = StatusQueued
+		t.mu.Unlock()
+		_ = m.saveTasks()
+		return
+	}
+	// The done channel is created here, under the same lock as cancel, so a
+	// Pause/Cancel arriving while the goroutine is still starting always finds
+	// something to wait on. Creating it inside run instead left a window where
+	// done was nil and the stop returned without waiting — the transfer then
+	// carried on after the user had stopped it.
+	ctx, cancel := context.WithCancel(m.app.ctx)
+	t.mu.Lock()
+	t.cancel = cancel
+	// A fresh run has no stop to report yet.
+	t.stopIntent = ""
+	t.view.Status = StatusDownloading
+	t.view.Error = ""
+	done := make(chan struct{})
+	t.done = done
+	t.mu.Unlock()
+
+	go m.run(t, ctx, cancel, done)
+}
+
+// maxConcurrent bounds how many tasks transfer at once; the rest queue.
+// It honours the setting's own clamp rather than trusting it.
+func (m *Manager) maxConcurrent() int {
+	n := m.app.Config().MaxConcurrent
+	if n < 1 {
+		n = 1
+	}
+	if n > 16 {
+		n = 16
+	}
+	return n
+}
+
+// activeCount counts transferring tasks. It copies the task pointers under
+// m.mu and inspects them after releasing it: locking a task while holding m.mu
+// would invert the lock order used everywhere else (task first, manager
+// second) and could deadlock against a concurrent Pause.
+func (m *Manager) activeCount() int {
+	m.mu.Lock()
+	tasks := make([]*task, 0, len(m.tasks))
+	for _, t := range m.tasks {
+		tasks = append(tasks, t)
+	}
+	m.mu.Unlock()
+
+	n := 0
+	for _, t := range tasks {
+		t.mu.Lock()
+		running := t.view.Status == StatusDownloading
+		t.mu.Unlock()
+		if running {
+			n++
+		}
+	}
+	return n
+}
+
+// pumpQueue starts queued tasks while slots are free. It runs after every
+// settle point (completion, failure, pause, cancel, removal), so a freed slot
+// is never left idle while work waits.
+func (m *Manager) pumpQueue() {
+	for {
+		if m.activeCount() >= m.maxConcurrent() {
+			return
+		}
+		// List returns newest first; walk from the end so the oldest queued
+		// task wins the freed slot.
+		list := m.List()
+		var nextID string
+		for i := len(list) - 1; i >= 0; i-- {
+			if list[i].Status == StatusQueued {
+				nextID = list[i].ID
+				break
+			}
+		}
+		if nextID == "" {
+			return
+		}
+		next := m.get(nextID)
+		if next == nil {
+			return
+		}
+		next.mu.Lock()
+		stillQueued := next.view.Status == StatusQueued
+		next.mu.Unlock()
+		if !stillQueued {
+			continue
+		}
+		m.startRun(next)
+	}
 }
 
 // Pause stops the transfer but keeps the partial file and its sidecar, so
@@ -336,6 +459,7 @@ func (m *Manager) Pause(id string) error {
 	}
 	m.app.emit("task:progress", v)
 	_ = m.saveTasks()
+	m.pumpQueue()
 	return nil
 }
 
@@ -349,26 +473,18 @@ func (m *Manager) Resume(id string) error {
 	switch t.view.Status {
 	case StatusPaused, StatusFailed, StatusCanceled, StatusQueued:
 	default:
+		st := t.view.Status
 		t.mu.Unlock()
-		return fmt.Errorf("当前状态无法继续")
+		return fmt.Errorf("当前状态无法继续（%s）", st)
 	}
-
-	// The cancel function is created here rather than inside the goroutine.
-	// Otherwise a pause that arrives while the goroutine is still starting would
-	// find the previous run's cancel — or none at all — and the transfer would
-	// carry on after the user had stopped it.
-	ctx, cancel := context.WithCancel(m.app.ctx)
-	t.cancel = cancel
-	// A fresh run has no stop to report yet.
-	t.stopIntent = ""
-	// Marked as running straight away rather than queued. The goroutine may not
-	// be scheduled for a moment, and during that window a queued status made a
-	// second StartAll pick the same task up again and start it twice.
-	t.view.Status = StatusDownloading
-	t.view.Error = ""
 	t.mu.Unlock()
 
-	go m.run(t, ctx, cancel)
+	// The spawn (and the MaxConcurrent gate) lives in startRun: it creates
+	// cancel and done under one lock, so a pause arriving mid-start cannot
+	// miss them. No pump here: nothing settled, so no slot was freed — and
+	// pumping would start a sibling the caller's own loop is about to reach,
+	// making bulk counts wrong.
+	m.startRun(t)
 	return nil
 }
 
@@ -403,6 +519,7 @@ func (m *Manager) Cancel(id string) error {
 
 	m.app.emit("task:progress", v)
 	_ = m.saveTasks()
+	m.pumpQueue()
 	return nil
 }
 
@@ -451,6 +568,7 @@ func (m *Manager) Remove(id string, deleteFiles bool) error {
 
 	m.app.emit("task:removed", id)
 	_ = m.saveTasks()
+	m.pumpQueue()
 	return nil
 }
 
@@ -499,17 +617,27 @@ func (m *Manager) RemoveFailed() int {
 
 // ------------------------------------------------------------- bulk verbs
 
-// StartAll resumes every task that is waiting to run.
+// StartAll resumes every task that is waiting to run, up to MaxConcurrent.
 //
 // Tasks already transferring are left alone, as are completed ones: "start all"
-// means "get everything going", not "start everything over".
+// means "get everything going", not "start everything over". Tasks beyond the
+// concurrency budget stay queued (and uncounted); pumpQueue starts them as
+// slots free up.
 func (m *Manager) StartAll() int {
 	n := 0
 	for _, v := range m.List() {
 		switch v.Status {
 		case StatusPaused, StatusFailed, StatusCanceled, StatusQueued:
-			if err := m.Resume(v.ID); err == nil {
-				n++
+			if err := m.Resume(v.ID); err != nil {
+				continue
+			}
+			if t := m.get(v.ID); t != nil {
+				t.mu.Lock()
+				running := t.view.Status == StatusDownloading
+				t.mu.Unlock()
+				if running {
+					n++
+				}
 			}
 		}
 	}
@@ -586,6 +714,15 @@ func (m *Manager) finishPlan() {
 	m.planRunning = false
 	m.mu.Unlock()
 
+	// A plan that ends with cancelled tasks did not run to completion: the
+	// user intervened. Firing the end-of-plan actions anyway — especially a
+	// machine shutdown — would punish cancelling.
+	if stats := m.Stats(); stats["canceled"] > 0 {
+		m.app.emit("plan:done", nil)
+		m.app.debugLog("plan finished with cancellations: end actions skipped")
+		return
+	}
+
 	cfg := m.app.Config()
 	m.app.emit("plan:done", nil)
 	m.app.debugLog("plan finished: sound=%v shutdown=%v", cfg.PlanSound, cfg.PlanShutdown)
@@ -620,14 +757,19 @@ func shutdownMachine() {
 
 // run performs the transfer for one task.
 //
-// ctx and cancel come from the caller: Resume creates them before launching the
-// goroutine so that a pause arriving immediately still cancels this run.
+// ctx, cancel and done come from the caller: startRun creates them before
+// launching the goroutine so that a pause arriving immediately still cancels
+// this run and waits on the right channel.
 //
 // A panic in a task goroutine would otherwise take the whole app down without a
 // word, which is exactly the kind of failure a user can only report as "it
 // crashed". The recover turns it into a failed task plus a log line, so the
 // cause survives.
-func (m *Manager) run(t *task, ctx context.Context, cancel context.CancelFunc) {
+func (m *Manager) run(t *task, ctx context.Context, cancel context.CancelFunc, done chan struct{}) {
+	// Pump last: queued tasks start only after this run's done channel has
+	// closed, so a waiter on the old run never observes the new one.
+	defer m.pumpQueue()
+
 	t.mu.Lock()
 	t.generation++
 	gen := t.generation
@@ -636,7 +778,6 @@ func (m *Manager) run(t *task, ctx context.Context, cancel context.CancelFunc) {
 	t.view.Speed = 0
 	t.view.ETA = 0
 	url, dest, conns := t.view.URL, t.view.Dest, t.view.Conns
-	done := make(chan struct{})
 	t.done = done
 	t.mu.Unlock()
 
@@ -774,6 +915,7 @@ func (m *Manager) fail(t *task, gen int64, err error) {
 // what to try next is what makes an error worth showing.
 func humanError(err error) string {
 	msg := err.Error()
+	lower := strings.ToLower(msg)
 	switch {
 	case errors.Is(err, engine.ErrNeedsSignIn):
 		// Checked before ErrNotAFile: both arrive as an HTML body, but the fix
@@ -786,27 +928,28 @@ func humanError(err error) string {
 		return "这是网页地址，不是文件下载地址 · 请改用文件的直链（例如网盘的「直接下载」链接）"
 	case errors.Is(err, engine.ErrSizeMismatch):
 		return "文件长度与服务器声明不符 · 已阻止发布，避免留下损坏的文件"
-	case strings.Contains(msg, "403"):
+	case strings.Contains(msg, "HTTP 403") || strings.Contains(msg, "status 403") || strings.Contains(msg, "(403)"):
 		return "服务器拒绝了请求（403）· 可能需要登录，或该链接已失效"
-	case strings.Contains(msg, "404"):
+	case strings.Contains(msg, "HTTP 404") || strings.Contains(msg, "status 404") || strings.Contains(msg, "(404)"):
 		return "链接不存在（404）· 请检查地址是否写错"
-	case strings.Contains(msg, "401"):
+	case strings.Contains(msg, "HTTP 401") || strings.Contains(msg, "status 401") || strings.Contains(msg, "(401)"):
 		return "需要登录（401）· 该资源要求身份验证"
-	case strings.Contains(msg, "416"):
+	case strings.Contains(msg, "HTTP 416") || strings.Contains(msg, "status 416") || strings.Contains(msg, "(416)"):
 		return "服务器无法满足该范围请求（416）· 文件可能已变化"
-	case strings.Contains(msg, "no such host"),
-		strings.Contains(msg, "dial tcp"),
-		strings.Contains(msg, "connection refused"):
+	case strings.Contains(lower, "no such host"),
+		strings.Contains(lower, "dial tcp"),
+		strings.Contains(lower, "connection refused"):
 		return "无法连接到服务器 · 请检查网络或链接是否有效"
-	case strings.Contains(msg, "certificate"), strings.Contains(msg, "x509"):
+	case strings.Contains(lower, "certificate"), strings.Contains(lower, "x509"):
 		return "TLS 证书校验失败 · 站点证书有问题，或被中间环节拦截"
-	case strings.Contains(msg, "announced size"):
+	case strings.Contains(lower, "announced size"):
 		return "文件长度与服务器声明不符 · 已阻止发布，避免留下损坏的文件"
-	case strings.Contains(msg, "timeout"), strings.Contains(msg, "deadline exceeded"):
+	case strings.Contains(lower, "timeout"), strings.Contains(lower, "deadline exceeded"):
 		return "连接超时 · 服务器响应过慢或网络不稳定"
-	case strings.Contains(msg, "no space"):
+	case strings.Contains(lower, "no space"), strings.Contains(lower, "not enough space"),
+		strings.Contains(lower, "insufficient disk space"), strings.Contains(lower, "disk full"):
 		return "磁盘空间不足 · 请清理后重试"
-	case strings.Contains(msg, "access is denied"), strings.Contains(msg, "permission denied"):
+	case strings.Contains(lower, "access is denied"), strings.Contains(lower, "permission denied"):
 		return "没有写入权限 · 请换一个保存目录"
 	}
 	return msg
@@ -822,7 +965,8 @@ func (m *Manager) Stats() map[string]int64 {
 	list := m.List()
 	out := map[string]int64{
 		"active": 0, "completed": 0, "failed": 0,
-		"queued": 0, "paused": 0, "total": int64(len(list)), "speed": 0,
+		"queued": 0, "paused": 0, "canceled": 0,
+		"total": int64(len(list)), "speed": 0,
 	}
 	for _, v := range list {
 		switch v.Status {
@@ -837,6 +981,8 @@ func (m *Manager) Stats() map[string]int64 {
 			out["queued"]++
 		case StatusPaused:
 			out["paused"]++
+		case StatusCanceled:
+			out["canceled"]++
 		}
 	}
 	return out

@@ -114,6 +114,9 @@ func (o Options) Normalize() Options {
 	if o.ChunkSize <= 0 {
 		o.ChunkSize = 128 << 10
 	}
+	if o.ChunkSize > bufPoolBlockSize {
+		o.ChunkSize = bufPoolBlockSize
+	}
 	if o.ReserveSize <= 0 {
 		o.ReserveSize = 512 << 10
 	}
@@ -680,15 +683,17 @@ func (d *Downloader) doWithRetry(ctx context.Context, op func(context.Context) e
 	return lastErr
 }
 
-// debugf writes a diagnostic line when VDOWNLOAD_DEBUG is set.
+// debugf writes a diagnostic line when VKMDOWNLOAD_DEBUG is set.
 //
-// With VDOWNLOAD_DEBUG=1 the lines go to stderr; with VDOWNLOAD_DEBUG=<path>
+// With VKMDOWNLOAD_DEBUG=1 the lines go to stderr; with VKMDOWNLOAD_DEBUG=<path>
 // they are appended to that file, which makes a high-volume trace analysable
 // without fighting the test runner's own output.
 var debugMu sync.Mutex
+var debugFile *os.File
+var debugDest string
 
 func debugf(format string, args ...any) {
-	dest := os.Getenv("VDOWNLOAD_DEBUG")
+	dest := os.Getenv("VKMDOWNLOAD_DEBUG")
 	if dest == "" {
 		return
 	}
@@ -701,12 +706,21 @@ func debugf(format string, args ...any) {
 		fmt.Fprint(os.Stderr, line)
 		return
 	}
-	f, err := os.OpenFile(dest, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
-	if err != nil {
-		return
+	// Reuse one append handle per destination instead of open-write-close per
+	// line: the reserve/commit/write path calls debugf at high frequency.
+	if debugFile == nil || debugDest != dest {
+		if debugFile != nil {
+			_ = debugFile.Close()
+			debugFile = nil
+		}
+		f, err := os.OpenFile(dest, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+		if err != nil {
+			return
+		}
+		debugFile = f
+		debugDest = dest
 	}
-	_, _ = f.WriteString(line)
-	_ = f.Close()
+	_, _ = debugFile.WriteString(line)
 }
 
 // fetchOnce performs a single ranged request for up to ReserveSize bytes of the
@@ -1009,7 +1023,14 @@ func (s *session) singleAttempt(ctx context.Context, offset int64, canResume boo
 	bufp := bufPool.Get().(*[]byte)
 	defer bufPool.Put(bufp)
 
-	buf := (*bufp)[:s.d.opt.ChunkSize]
+	// Defensive: ChunkSize comes from user options; Normalize clamps it, but a
+	// Downloader built before this clamp (or a hand-filled Options) must not
+	// be able to slice past the pooled buffer and panic.
+	chunk := s.d.opt.ChunkSize
+	if chunk <= 0 || chunk > len(*bufp) {
+		chunk = len(*bufp)
+	}
+	buf := (*bufp)[:chunk]
 	for {
 		n, rerr := resp.Body.Read(buf)
 		if n > 0 {
@@ -1120,10 +1141,15 @@ func (s *session) cleanup() {
 	}
 }
 
+// bufPoolBlockSize is the single read-buffer size shared by all workers.
+// Options.ChunkSize is clamped to it in Normalize, and every use site clamps
+// again, so a custom ChunkSize can never slice past the pooled array.
+const bufPoolBlockSize = 256 << 10
+
 // bufPool recycles per-request read buffers across workers.
 var bufPool = sync.Pool{
 	New: func() any {
-		b := make([]byte, 256<<10)
+		b := make([]byte, bufPoolBlockSize)
 		return &b
 	},
 }
@@ -1184,6 +1210,11 @@ func resolveTarget(dest, suggested string) (string, error) {
 	return abs, nil
 }
 
+// tmpIDs numbers cross-volume staging files within this process.
+var tmpIDs atomic.Uint64
+
+func nextTmpID() uint64 { return tmpIDs.Add(1) }
+
 // moveFile moves src onto dst atomically when both live on the same volume,
 // and falls back to copy-then-delete across volumes, where os.Rename cannot
 // work.
@@ -1205,8 +1236,10 @@ func moveFile(src, dst string) error {
 	defer in.Close()
 
 	// Copy to a sibling of the destination so the final rename stays on one
-	// volume and remains atomic.
-	tmp := dst + ".vdownload.tmp"
+	// volume and remains atomic. The name carries pid plus a counter so two
+	// concurrent downloads of the same target never step on each other's
+	// staging file.
+	tmp := fmt.Sprintf("%s.vkmdownload-%d-%d.tmp", dst, os.Getpid(), nextTmpID())
 	out, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
 	if err != nil {
 		return fmt.Errorf("cross-volume move: create %s: %w", tmp, err)
@@ -1311,14 +1344,17 @@ func (p *progressTracker) emit(bytes, total int64, speed float64) {
 	if p == nil {
 		return
 	}
+	// Persist the sidecar before serialising the callback. The save does disk
+	// IO and must not hold emitMu: every worker reports through here, and a
+	// slow flush would otherwise serialise all workers behind one file write.
+	if p.save != nil {
+		_ = p.save()
+	}
 	// Serialise emission: add() decides which goroutine fires, but a slow
 	// callback must not be entered concurrently.
 	p.emitMu.Lock()
 	defer p.emitMu.Unlock()
 
-	if p.save != nil {
-		_ = p.save()
-	}
 	if p.report == nil {
 		return
 	}

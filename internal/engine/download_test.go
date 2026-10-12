@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	"vdownload/testsrv"
+	"vkmdownload/testsrv"
 )
 
 // TestDownloadWithoutLengthOrRanges covers a server that announces neither a

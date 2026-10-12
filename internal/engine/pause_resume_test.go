@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"vdownload/testsrv"
+	"vkmdownload/testsrv"
 )
 
 // TestSegmentedPauseResumeIsByteExact reproduces the sequence the desktop app

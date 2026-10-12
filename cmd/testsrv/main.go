@@ -14,7 +14,7 @@ import (
 	"os/signal"
 	"time"
 
-	"vdownload/testsrv"
+	"vkmdownload/testsrv"
 )
 
 func main() {

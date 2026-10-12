@@ -11,8 +11,8 @@ import (
 // rather than in a global state directory so that a download is fully
 // self-describing: move the pair together and resuming still works.
 const (
-	PartSuffix  = ".vdownload.part"
-	StateSuffix = ".vdownload.json"
+	PartSuffix  = ".vkmdownload.part"
+	StateSuffix = ".vkmdownload.json"
 )
 
 // StateVersion is bumped whenever the on-disk layout changes, so that a stale
@@ -111,6 +111,16 @@ func loadState(path string) (*State, error) {
 // right length.
 func (st *State) matches(p *ProbeResult) bool {
 	if st.Size != p.Size {
+		return false
+	}
+	// The validators and the identity both have to agree. A different URL (or
+	// a changed redirect target) with the same length and no validators would
+	// otherwise let one resource's bytes resume into another.
+	if st.FinalURL != "" && p.FinalURL != "" {
+		if st.FinalURL != p.FinalURL {
+			return false
+		}
+	} else if st.URL != p.URL {
 		return false
 	}
 	if st.ETag != p.ETag {

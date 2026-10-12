@@ -263,7 +263,12 @@ chrome.runtime.onInstalled.addListener(() => {
 chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   if (info.menuItemId !== "vkm-add") return;
 
-  const url = info.linkUrl || info.srcUrl || info.selectionText || "";
+  // Selection text is free-form: trim it and pull the first URL out of it
+  // rather than handing the raw highlight to the app, where leading spaces
+  // or surrounding prose would fail the scheme check.
+  const raw = (info.linkUrl || info.srcUrl || info.selectionText || "").trim();
+  const picked = /https?:[^\s"'<>]+/i.exec(raw);
+  const url = picked ? picked[0] : "";
   if (!/^https?:/i.test(url)) {
     report({ ok: false, error: "这个地址不能下载" }, "");
     return;

@@ -93,9 +93,18 @@ func (a *App) apiGuard(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
 
-		// An empty Origin means the request did not come from a page at all
-		// (curl, a test). Anything else has to be an extension.
-		if origin != "" &&
+		// Mutations require a browser-extension Origin. An empty Origin (curl,
+		// a local test) may still use the read-only endpoints, but must not
+		// enqueue downloads: without this, any process on the machine could
+		// push arbitrary tasks into the queue with no credential at all.
+		if r.Method != http.MethodOptions && (r.URL.Path == "/add" || r.Method == http.MethodPost) {
+			if !strings.HasPrefix(origin, "chrome-extension://") &&
+				!strings.HasPrefix(origin, "moz-extension://") {
+				http.Error(w, "this endpoint only accepts requests from the browser extension",
+					http.StatusForbidden)
+				return
+			}
+		} else if origin != "" &&
 			!strings.HasPrefix(origin, "chrome-extension://") &&
 			!strings.HasPrefix(origin, "moz-extension://") {
 			http.Error(w, "this endpoint only accepts requests from the browser extension",
@@ -261,6 +270,38 @@ func sanitizeSuggestedName(name string) string {
 	name = strings.TrimSpace(name)
 	if name == "" || name == "." || name == ".." {
 		return ""
+	}
+	// A drive-relative name such as "C:foo" has no separator but still escapes
+	// the download folder on Windows; the colon filter below neutralises it.
+	var b strings.Builder
+	for _, r := range name {
+		switch {
+		case r < 0x20 || r == 0x7f:
+			b.WriteRune('_')
+		case strings.ContainsRune(`:*?"<>|`, r):
+			b.WriteRune('_')
+		default:
+			b.WriteRune(r)
+		}
+	}
+	name = b.String()
+	// Windows ignores trailing dots and spaces, which makes "evil. . " land on
+	// "evil" and can hide the real extension.
+	name = strings.TrimRight(name, ". ")
+	if name == "" || name == "." || name == ".." {
+		return ""
+	}
+	// Reserved device names (NUL, CON, COM1, ...) cannot be created and refer
+	// to devices when used bare; neutralise them with a suffix.
+	upper := strings.ToUpper(name)
+	if i := strings.Index(upper, "."); i >= 0 {
+		upper = upper[:i]
+	}
+	switch upper {
+	case "CON", "PRN", "AUX", "NUL",
+		"COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+		"LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9":
+		name += "_"
 	}
 	return name
 }

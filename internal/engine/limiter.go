@@ -89,14 +89,17 @@ func (l *Limiter) Wait(ctx context.Context, n int) error {
 		}
 
 		// Not enough credit yet: sleep for exactly as long as the shortfall
-		// needs and try again.
+		// needs and try again. NewTimer (not time.After) so a cancelled
+		// context does not leave the timer hanging until it fires.
 		if wait <= 0 {
 			wait = time.Millisecond
 		}
+		t := time.NewTimer(wait)
 		select {
 		case <-ctx.Done():
+			t.Stop()
 			return ctx.Err()
-		case <-time.After(wait):
+		case <-t.C:
 		}
 	}
 	return nil

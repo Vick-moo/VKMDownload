@@ -151,10 +151,10 @@ func (m *segmentManager) take() *Segment {
 // single counter that a *claim* advanced and that Next() read as progress.
 //
 // It exists so the difference between the two models can be demonstrated with
-// one set of tests rather than argued about. Set VDOWNLOAD_LEGACY_ACCOUNTING=1
+// one set of tests rather than argued about. Set VKMDOWNLOAD_LEGACY_ACCOUNTING=1
 // to enable it; it is a diagnostic, not a supported mode.
 func legacyAccounting() bool {
-	return os.Getenv("VDOWNLOAD_LEGACY_ACCOUNTING") != ""
+	return os.Getenv("VKMDOWNLOAD_LEGACY_ACCOUNTING") != ""
 }
 
 // reserve claims up to max bytes of the segment and returns the absolute offset

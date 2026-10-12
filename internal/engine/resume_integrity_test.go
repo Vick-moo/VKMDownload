@@ -7,15 +7,15 @@ import (
 	"path/filepath"
 	"testing"
 
-	"vdownload/testsrv"
+	"vkmdownload/testsrv"
 )
 
 // TestDiagnoseResumeHoles is a temporary diagnostic. It reports every byte range
 // that differs after a resume, plus the segment tables before and after, so the
 // cause can be read off rather than guessed at.
 func TestDiagnoseResumeHoles(t *testing.T) {
-	if os.Getenv("VDOWNLOAD_DIAGNOSE") == "" {
-		t.Skip("set VDOWNLOAD_DIAGNOSE=1 to run the resume diagnostic")
+	if os.Getenv("VKMDOWNLOAD_DIAGNOSE") == "" {
+		t.Skip("set VKMDOWNLOAD_DIAGNOSE=1 to run the resume diagnostic")
 	}
 
 	srv, url := startServer(t, func(c *testsrv.Config) {

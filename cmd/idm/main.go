@@ -26,8 +26,8 @@ import (
 	"syscall"
 	"time"
 
-	"vdownload/internal/engine"
-	"vdownload/testsrv"
+	"vkmdownload/internal/engine"
+	"vkmdownload/testsrv"
 )
 
 const usage = `idm - multi-connection download manager
@@ -334,7 +334,7 @@ func runBench(args []string) error {
 
 	workDir := *dir
 	if workDir == "" {
-		workDir, err = os.MkdirTemp("", "vdownload-bench-")
+		workDir, err = os.MkdirTemp("", "vkmdownload-bench-")
 		if err != nil {
 			return err
 		}

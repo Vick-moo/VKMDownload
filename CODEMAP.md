@@ -1,0 +1,126 @@
+# CODEMAP — VKMDownload AI 维修地图
+
+> 给 AI 看的索引，不是文档复读。修 bug 时先看这张表定位文件，再读源码。
+> 约定：`file:line` 行号以当前 `main` 为准，改动后可能漂移，用 grep 二次确认。
+
+## 0. 一句话架构
+
+`internal/engine`（多连接下载引擎）+ `desktop`（Wails Go 后端 + React 前端）+ `extension`（Chromium 扩展，经回环 HTTP 与应用通信）+ `testsrv`（故障注入测试服务器）。
+
+## 1. 目录职责
+
+| 目录 | 职责 | 入口 |
+|---|---|---|
+| `internal/engine/` | 探测、规划分片、并发下载、续传、重试、限速 | `download.go:Download` |
+| `testsrv/` | 可编程恶劣服务器（假 Range、断流、谎报长度、403、chunked） | `server.go` |
+| `cmd/idm/` | CLI：`get` / `info` / `bench` | `main.go` |
+| `cmd/testsrv/` | 独立运行的测试服务器 | `main.go` |
+| `desktop/` | Wails 后端：任务状态机、设置、剪贴板、回环 API | `app.go:NewApp`、`manager.go:Manager`、`api.go`、`config.go` |
+| `desktop/frontend/src/` | React 界面：列表、设置、新建任务 | `App.tsx`、`api.ts`、`components/` |
+| `extension/` | 浏览器扩展：拦截下载、右键菜单、策略轮询 | `background.js:findApp`、`handOver` |
+| `design/DESIGN.md` | 界面设计规范，改界面前先读 | — |
+
+## 2. 关键文件索引
+
+### 引擎（`internal/engine/`）
+
+| 文件 | 管什么 | 修什么先看它 |
+|---|---|---|
+| `download.go` | 下载主梯（segmented+if-range → segmented → single）、`fetchSegment`/`fetchOnce`、`publish`、`progressTracker`、`debugf` | 下载失败、数据损坏、进度不动、发布逻辑 |
+| `probe.go` | HEAD + Range 实测探测，不信 `Accept-Ranges` 头 | 误判服务器能力、登录页识别（`ErrNeedsSignIn`） |
+| `segment.go` | 分片规划 `planSegments`、动态切分 `splitLargest`、`reserve/commit/unreserve` | 并发空洞、进度计数对不上 |
+| `state.go` | sidecar 读写（`PartSuffix=.vkmdownload.part`、`StateSuffix=.vkmdownload.json`）、`matches` 严格校验 | 续传失败、版本不匹配 |
+| `transport.go` | 强制 HTTP/1.1（多连接加速的前提） | 速度异常、连接复用问题 |
+| `limiter.go` | token bucket 全局限速 | 限速不准、取消后 timer 堆积 |
+| `backoff.go` | 指数退避 + `isRetryable` 分类 | 重试过多/过少、429/5xx 处理 |
+
+### 桌面后端（`desktop/*.go`）
+
+| 文件 | 管什么 | 修什么先看它 |
+|---|---|---|
+| `manager.go` | `Manager` 状态机：Start/Pause/Resume/Cancel/Remove、批量操作、计划下载、`Stats`、`loadTasks/saveTasks` | 任务卡住、暂停变取消、批量卡死、计数对不上 |
+| `app.go` | Wails 生命周期、binding、剪贴板轮询、托盘关闭语义 | 启动崩溃、关不掉窗口、剪贴板重复建任务 |
+| `api.go` | 回环端点 `/ping` `/settings` `/add`、`apiGuard`、`sanitizeSuggestedName` | 扩展连不上、文件名越界 |
+| `config.go` | 设置结构、默认值、`normalize`（含 `MaxConcurrent` 校验） | 设置不生效、默认值异常 |
+
+### 前端与扩展
+
+| 文件 | 管什么 |
+|---|---|
+| `frontend/src/api.ts` | binding 封装 + 事件订阅（`on` 取消语义注意） |
+| `frontend/src/App.tsx` | 界面骨架与 6 个事件订阅 |
+| `frontend/src/components/TaskList.tsx` | 列表 + 列宽记忆（键 `vkmdownload.column-widths`） |
+| `frontend/src/components/NewTaskDialog.tsx` | 新建任务输入（前端无路径净化，靠后端） |
+| `frontend/src/components/SettingsPage.tsx` | 设置页 |
+| `extension/background.js` | `findApp` 端口扫描 18888–18898、`handOver` 先删后送、`nameFromUrl` |
+| `extension/manifest.json` | 权限（`downloads` + `contextMenus` 必需，`storage` 当前无调用） |
+
+## 3. 改某功能该看哪
+
+| 想改 | 看这些 | 测试 |
+|---|---|---|
+| 分片/动态切分 | `segment.go` 全文件 + `download.go:runSegmented` | `go test ./internal/engine -run 'Segment|Split' -v` |
+| 续传一致性 | `state.go:matches`、`download.go:loadResumable/saveState` | `go test ./internal/engine -run 'Resume\|Pause' -v` |
+| 重试/退避 | `backoff.go`、`download.go:fetchSegment/doWithRetry/isRetryable` | `go test ./internal/engine -run 'Retry\|Backoff\|Probe' -v` |
+| 限速 | `limiter.go` + `download.go` 内两处 `Limiter.Wait` | `limiter_test.go` |
+| 任务状态机 | `manager.go:Start/Pause/Resume/Cancel/Remove*` + `stopIntent` | `cd desktop && go test ./...` |
+| 设置项 | `config.go` + `SettingsPage.tsx` + `types.ts`（Go 改了要同步） | 改设置→重启→还在 |
+| 剪贴板 | `app.go:clipboardLoop/offerClipboardURL` | 复制 URL 看预期行为 |
+| 扩展接管 | `api.go` + `background.js:findApp/handOver/getPolicy` | 先启动应用再加载未打包扩展 |
+| 进度/速度显示 | `download.go:progressTracker` + `TaskRow.tsx` | 本地 testsrv 限速对比 |
+
+## 4. 关键流程速查
+
+- **下载梯**：`download.go:Download` → 有 sidecar 则 `segmented+if-range` → 可分片则 `segmented` → 兜底 `single`。`ErrIfRangeIgnored` 表示换策略，不是传输失败。
+- **进度节流**：`250ms / 1MiB` 先到先发（`download.go:newTracker`），`emit` 内先落盘 sidecar 再回调。
+- **发布顺序**：`publish` 先 `Sync+Close` → `moveFile` → `track.finish()` → 删 sidecar。删早了会被 `finish` 复活。
+- **任务持久化**：`tasks.json`（GUI 意图）与 sidecar（引擎真相）分离，索引坏了不影响续传。
+- **扩展握手**：扩展轮询 `127.0.0.1:18888–18898/ping`，认 `app=="VKMDownload"`；每次拦截前 GET `/settings` 取策略。应用必须先启动。
+
+## 5. 命名与环境（统一小写 `vkmdownload`）
+
+- module：`vkmdownload`，桌面 `vkmdownload/desktop`，`replace vkmdownload => ../`
+- 后缀：`.vkmdownload.part` / `.vkmdownload.json` / `.vkmdownload.tmp`
+- 环境变量：`VKMDOWNLOAD_DEBUG`（`=1` 进 stderr，`=路径` 进文件）、`VKMDOWNLOAD_DIAGNOSE`（压力诊断）、`VKMDOWNLOAD_LEGACY_ACCOUNTING`（回归对照）
+- 数据目录：`%APPDATA%\VKMDownload\`（`config.json`、`tasks.json`、`vkmdownload.log`），无旧目录迁移
+- 列宽键：`vkmdownload.column-widths`
+
+## 6. 常用命令
+
+```bash
+go build ./...                       # 根模块构建
+go vet ./...                         # 根模块静态检查
+go test ./...                        # 根模块全部测试
+go test -race ./...                  # 并发正确性（推荐）
+VKMDOWNLOAD_DIAGNOSE=1 go test ./internal/engine -run Diagnose -v
+cd desktop && go test ./...          # 后端测试
+cd desktop && wails build            # 产出 build/bin/VKMDownload.exe
+```
+
+## 7. 已修好的坑（历史记录，备查）
+
+1. `download.go` 单流缓冲 panic：`ChunkSize` 已在 `Normalize` 与使用点双重 clamp 到 `bufPoolBlockSize`。
+2. `MaxConcurrent` 只校验不排队：已实现 `startRun` 门控 + `pumpQueue` 调度，`StartAll` 只计入真正启动的任务。
+3. `Start`/`Resume` 与 `run` 之间的 `done==nil` 窗口：`done` 改由 `startRun` 在同一把锁内创建并传入 `run`。
+4. `apiGuard` 放行空 `Origin`：写操作（`/add`、POST）现在必须带浏览器扩展 `Origin`，只读端点与预检不受影响。
+5. `emit` 在锁内同步落盘：`save` 已移到 `emitMu` 之外；`debugf` 改用按目标缓存的 append 句柄；`Limiter.Wait` 改用 `NewTimer+Stop`。
+6. `debugLog` 无轮转：超过 2 MiB 转到单备份 `.1`。
+7. `humanError` 子串误报：状态码只认 `HTTP 403`/`status 403`/`(403)` 形式，磁盘与网络匹配改为大小写不敏感并补全措辞。
+8. 计划下载在取消后仍关机：`finishPlan` 在有取消任务时跳过收尾动作。
+9. 剪贴板旧轮询器残留：`clipGen` 代际计数保证旧 loop 退出；`timer` 改复用。
+10. 文件名净化：`sanitizeSuggestedName` 补过滤 `:*?"<>|`、控制字符、尾部点空格、保留设备名；`Start` 的手工文件名走同一净化；`Referer` 剥 `CRLF`。
+
+## 8. 剩下未动的（有意延后）
+
+- `Remove`/`Cancel` 在 binding 线程同步 `waitStopped(3s)`：为保正确性保留，批量删运行中任务时会 block；要改需异步化清理。
+- `moveFile` 跨卷 `tmp` 固定名：并发同目标有互踩可能，未改（罕见路径）。
+- `state.matches` 不比 `URL`：换 URL 同长度且无 validator 时可误用旧分片，未改（需版本号升级）。
+- 前端 `as never` 两处、`wailsjs/` 缺失：无 Node 构建环境，未做类型重生成；`NewTaskDialog` 已加前端 scheme 预检。
+- 扩展 `ownDownloads` 只增不删、`handOver` 先删后送的降级保真：未改，属行为设计范畴。
+- `shutdownMachine` 无二次确认：保留（计划下载页已有开关），动前需与你确认。
+
+## 8. 公开注意事项（仓库是 Public）
+
+- `extension.pem` / `extension.crx` 在工作区但已被 `.gitignore` 忽略，**绝不 `git add -f`**；`manifest.json` 无内嵌 `key`，正常。
+- 提 issue 贴日志前脱敏：`vkmdownload.log`、`tasks.json`、sidecar、`probe` 输出的 URL 可能含 `?token=/session=` 签名参数。
+- 不要提交真实 `tasks.json`、用户目录的 `*.vkmdownload.json`、带签名的重定向 URL。

@@ -8,9 +8,9 @@
 /cmd/testsrv/testsrv
 
 # Download staging / partial data
-*.vdownload.part
-*.vdownload.json
-*.vdownload.tmp
+*.vkmdownload.part
+*.vkmdownload.json
+*.vkmdownload.tmp
 /testdata/downloads/
 
 # Wails desktop app

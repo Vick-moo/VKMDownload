@@ -16,7 +16,7 @@
 
 - **多连接分片下载** —— 每段一个独立 HTTP 请求，各自写入文件的不同偏移
 - **动态分段** —— 某个 worker 空闲时，把最长的剩余段对半切开交给它，不让慢连接拖住整体
-- **断点续传** —— 进度写进 sidecar（`.vdownload.json`），取消 / 崩溃后可继续
+- **断点续传** —— 进度写进 sidecar（`.vkmdownload.json`），取消 / 崩溃后可继续
 - **一致性校验** —— 用 ETag / Last-Modified 判断服务器端文件是否变过；变了就重下，不拼接
 - **自适应降级** —— 服务器不支持 Range 时自动退回单连接流式下载
 - **重试与退避** —— 网络中断、5xx、429 按指数退避重试；4xx 直接失败不做无用功
@@ -155,8 +155,8 @@ vdl get https://example.com/big.zip -resume                    # 断点续传
 
 ```
 big.zip                    成品
-big.zip.vdownload.part     半成品数据（各 worker 用 WriteAt 写入自己的偏移）
-big.zip.vdownload.json     分段进度 + ETag + 总大小
+big.zip.vkmdownload.part     半成品数据（各 worker 用 WriteAt 写入自己的偏移）
+big.zip.vkmdownload.json     分段进度 + ETag + 总大小
 ```
 
 全部下载完成后，`.part` 被重命名为成品名，`.json` 被删除。
@@ -209,14 +209,14 @@ IDM 那种做法要装一个 native messaging host，还要为每家浏览器写
 ```bash
 go test ./...            # 全部测试
 go test -race ./...      # 并发正确性（推荐，历史上抓出过真 bug）
-VDOWNLOAD_DIAGNOSE=1 go test ./internal/engine -run Diagnose -v   # 长时间压力诊断
+VKMDOWNLOAD_DIAGNOSE=1 go test ./internal/engine -run Diagnose -v   # 长时间压力诊断
 ```
 
 排障时打开引擎的详细日志：
 
 ```bash
-VDOWNLOAD_DEBUG=1 vdl get <url>               # 打到 stderr
-VDOWNLOAD_DEBUG=C:\trace.log vdl get <url>    # 打到文件
+VKMDOWNLOAD_DEBUG=1 vdl get <url>               # 打到 stderr
+VKMDOWNLOAD_DEBUG=%TEMP%\vkm-trace.log vdl get <url>    # 打到文件
 ```
 
 应用侧的日志在 `%APPDATA%\VKMDownload\vkmdownload.log`。
@@ -252,17 +252,17 @@ PLAN.md              实施计划与已知取舍
 
 ---
 
-## 关于代码里还留着的 `vdownload`
+## 命名
 
-项目曾经叫 `VDownload`，改名时留下了几个**故意没改**的标识符。它们看起来像漏改，其实每一个改了都会造成实际损失：
+统一使用 `VKMDownload`（用户可见名）与 `vkmdownload`（module 名、文件后缀、环境变量前缀 `VKMDOWNLOAD_`）：
 
-| 位置 | 为什么留着 |
+| 位置 | 命名 |
 |---|---|
-| Go module 名 `vdownload` | 改它要动 `go.mod` 与全部 import，收益为零 |
-| `.vdownload.part` / `.vdownload.json` | 已下到一半的文件就是这两个后缀，改了它们**无法续传** |
-| `VDOWNLOAD_DEBUG` 等环境变量 | 可能已经有人写在脚本或 CI 里 |
-| 旧数据目录名 `VDownload` / `VKDownload` | 启动时正是靠这两个名字把旧设置和任务列表迁移过来 |
-| `vdownload.column-widths` | localStorage 的键，改了用户调好的列宽会丢 |
+| Go module | `vkmdownload` |
+| `.vkmdownload.part` / `.vkmdownload.json` | 未完成的半成品与续传进度 |
+| `VKMDOWNLOAD_DEBUG` 等环境变量 | 引擎日志与诊断开关 |
+| 数据目录 `%APPDATA%\VKMDownload` | 设置与任务列表 |
+| `vkmdownload.column-widths` | localStorage 列宽键 |
 
 **面向用户的名字**（窗口标题、可执行文件、侧栏、开始菜单、发布包）全部是 **`VKMDownload`**。
 

@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"vdownload/internal/engine"
+	"vkmdownload/internal/engine"
 )
 
 // newTestApp builds an App pointed at a throwaway data directory.
@@ -36,8 +36,8 @@ func newTestApp(t *testing.T) *App {
 
 	// Route the engine's trace to a fixed path so it survives the test's own
 	// temp-directory cleanup and can be read after a failure.
-	t.Setenv("VDOWNLOAD_DEBUG", filepath.Join(os.TempDir(), "vdownload-engine-trace.log"))
-	_ = os.Remove(filepath.Join(os.TempDir(), "vdownload-engine-trace.log"))
+	t.Setenv("VKMDOWNLOAD_DEBUG", filepath.Join(os.TempDir(), "vkmdownload-engine-trace.log"))
+	_ = os.Remove(filepath.Join(os.TempDir(), "vkmdownload-engine-trace.log"))
 	return a
 }
 
@@ -169,7 +169,7 @@ func TestDownloadCompletesEndToEnd(t *testing.T) {
 	assertFileEquals(t, dest, want)
 
 	// The working set must be gone once the download is published.
-	for _, suffix := range []string{".vdownload.part", ".vdownload.json"} {
+	for _, suffix := range []string{".vkmdownload.part", ".vkmdownload.json"} {
 		if _, err := os.Stat(dest + suffix); !os.IsNotExist(err) {
 			t.Errorf("%s still exists after a completed download", suffix)
 		}
@@ -212,7 +212,7 @@ func TestPauseThenResumeProducesAWholeFile(t *testing.T) {
 	})
 
 	// The partial file must survive a pause; that is what makes resume work.
-	partPath := dest + ".vdownload.part"
+	partPath := dest + ".vkmdownload.part"
 	if _, err := os.Stat(partPath); err != nil {
 		t.Fatalf("partial file missing after pause: %v", err)
 	}
@@ -323,10 +323,10 @@ func TestResumePauseOnTaskWithMissingFile(t *testing.T) {
 
 	// Leave an orphaned partial and sidecar behind, which is what a task whose
 	// directory was removed looks like.
-	if err := os.WriteFile(dest+".vdownload.part", make([]byte, 4096), 0o644); err != nil {
+	if err := os.WriteFile(dest+".vkmdownload.part", make([]byte, 4096), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(dest+".vdownload.json", []byte(`{"version":1}`), 0o644); err != nil {
+	if err := os.WriteFile(dest+".vkmdownload.json", []byte(`{"version":1}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -557,7 +557,7 @@ func TestCancelDiscardsPartialData(t *testing.T) {
 		return v.Status == StatusCanceled
 	})
 
-	for _, suffix := range []string{".vdownload.part", ".vdownload.json"} {
+	for _, suffix := range []string{".vkmdownload.part", ".vkmdownload.json"} {
 		if _, err := os.Stat(dest + suffix); !os.IsNotExist(err) {
 			t.Errorf("%s should have been removed by Cancel", suffix)
 		}
@@ -876,8 +876,12 @@ func TestStartAllAndStopAll(t *testing.T) {
 		}
 	}
 
-	if n := app.mgr.StartAll(); n != count {
-		t.Errorf("StartAll started %d, want %d", n, count)
+	if n := app.mgr.StartAll(); n != 2 {
+		t.Errorf("StartAll started %d, want 2 (MaxConcurrent)", n)
+	}
+	// The third task waits for a slot rather than starting.
+	if s := app.mgr.Stats(); s["queued"] != 1 {
+		t.Errorf("queued = %d, want 1", s["queued"])
 	}
 	// A second call has nothing left to start.
 	if n := app.mgr.StartAll(); n != 0 {
@@ -986,7 +990,7 @@ func TestStatsAggregatesActiveTasks(t *testing.T) {
 	// The files live outside t.TempDir because this test lets the downloads run
 	// to completion; a directory torn down mid-transfer would fail the cleanup
 	// rather than the assertion under test.
-	outDir, err := os.MkdirTemp("", "vdownload-stats-")
+	outDir, err := os.MkdirTemp("", "vkmdownload-stats-")
 	if err != nil {
 		t.Fatal(err)
 	}

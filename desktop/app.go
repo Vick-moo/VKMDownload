@@ -36,6 +36,10 @@ type App struct {
 	lastClip    string
 	lastClipHit string
 	clipRunning bool
+	// clipGen increments on every restart, so a poller from a previous
+	// generation always exits even if a new one already set clipRunning back
+	// to true — a bare bool let the old loop survive as a duplicate.
+	clipGen int64
 
 	// api is the loopback endpoint the browser extension talks to.
 	api apiState
@@ -79,10 +83,6 @@ func NewAppWithDataDir(dir string) *App {
 // startup is called once the runtime is ready but before the window is shown.
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
-
-	// Before anything reads the settings: the product was renamed, and the old
-	// folder has to move or the user's tasks and preferences are simply gone.
-	migrateLegacyDataDir()
 
 	a.mu.Lock()
 	a.cfg = loadConfig(a.configPath())
@@ -155,14 +155,6 @@ const (
 	appDirName = "VKMDownload"
 )
 
-// legacyDirNames are the folders this app has used before, newest first.
-//
-// A list rather than a single name because the product has been renamed more
-// than once: someone upgrading may be coming from any of them, and being told
-// "your task list is gone" because the code only looked one step back would be
-// the worst possible outcome of a cosmetic change.
-var legacyDirNames = []string{"VKDownload", "VDownload"}
-
 // dataDir is where settings and the task index live.
 func (a *App) dataDir() string {
 	if a.dataDirOverride != "" {
@@ -179,45 +171,6 @@ func configBase() string {
 		return "."
 	}
 	return base
-}
-
-// migrateLegacyDataDir moves the settings and the task index out of the folders
-// this app used before it was renamed.
-//
-// It works file by file rather than renaming a folder. A destination folder can
-// already exist for an unrelated reason — a log written by an earlier run is
-// enough — and testing for the directory made the migration conclude it had
-// nothing to do, leaving the user's tasks and preferences behind. It also never
-// overwrites: a file already in the new folder is the more recent one.
-func migrateLegacyDataDir() {
-	newDir := filepath.Join(configBase(), appDirName)
-
-	for _, legacy := range legacyDirNames {
-		oldDir := filepath.Join(configBase(), legacy)
-
-		var movable []string
-		for _, name := range []string{"config.json", "tasks.json"} {
-			if _, err := os.Stat(filepath.Join(oldDir, name)); err == nil {
-				movable = append(movable, name)
-			}
-		}
-		if len(movable) == 0 {
-			continue
-		}
-
-		if err := os.MkdirAll(newDir, 0o755); err != nil {
-			return
-		}
-		for _, name := range movable {
-			dst := filepath.Join(newDir, name)
-			if _, err := os.Stat(dst); err == nil {
-				continue // already migrated
-			}
-			// Not fatal if it fails: the app starts with defaults, which is
-			// better than refusing to run over a folder.
-			_ = os.Rename(filepath.Join(oldDir, name), dst)
-		}
-	}
 }
 
 func (a *App) configPath() string { return filepath.Join(a.dataDir(), "config.json") }
@@ -361,13 +314,12 @@ func (a *App) OpenFile(id string) error {
 // current setting. It is safe to call repeatedly.
 func (a *App) RestartClipboardWatch() {
 	a.mu.Lock()
-	if a.clipRunning {
-		// Bump the generation so the running poller notices and exits, then
-		// let the new one take over below.
-		a.clipRunning = false
-	}
+	// Invalidate any running poller first: it exits on its next tick.
+	a.clipGen++
+	a.clipRunning = false
 	want := a.cfg.ClipboardWatch
 	interval := a.cfg.ClipboardIntervalMs
+	gen := a.clipGen
 	a.mu.Unlock()
 
 	if !want || a.ctx == nil {
@@ -376,7 +328,7 @@ func (a *App) RestartClipboardWatch() {
 	a.mu.Lock()
 	a.clipRunning = true
 	a.mu.Unlock()
-	go a.clipboardLoop(interval)
+	go a.clipboardLoop(interval, gen)
 }
 
 // clipboardLoop polls the clipboard for URLs.
@@ -385,12 +337,14 @@ func (a *App) RestartClipboardWatch() {
 // OS clipboard is queried at a fixed interval and the text is compared against
 // the previous value, which also means an unchanged clipboard costs one cheap
 // call and nothing else.
-func (a *App) clipboardLoop(intervalMs int) {
+func (a *App) clipboardLoop(intervalMs int, gen int64) {
 	urlRe := regexp.MustCompile(`(?i)https?://[^\s"'<>]+`)
+	timer := time.NewTimer(time.Duration(intervalMs) * time.Millisecond)
+	defer timer.Stop()
 
 	for {
 		a.mu.Lock()
-		running := a.clipRunning
+		running := a.clipRunning && a.clipGen == gen
 		a.mu.Unlock()
 		if !running || a.ctx == nil {
 			return
@@ -423,7 +377,8 @@ func (a *App) clipboardLoop(intervalMs int) {
 		select {
 		case <-a.ctx.Done():
 			return
-		case <-time.After(time.Duration(intervalMs) * time.Millisecond):
+		case <-timer.C:
+			timer.Reset(time.Duration(intervalMs) * time.Millisecond)
 		}
 	}
 }

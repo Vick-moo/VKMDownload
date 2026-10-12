@@ -64,7 +64,7 @@ const DEFAULT_WIDTHS = [280, 76, 104, 96, 120, 140];
 const MIN_WIDTHS = [140, 62, 84, 78, 96, 112];
 
 /** Where the column widths are remembered between sessions. */
-const WIDTHS_KEY = "vdownload.column-widths";
+const WIDTHS_KEY = "vkmdownload.column-widths";
 
 /**
  * Reads the column widths saved by a previous session, falling back to the

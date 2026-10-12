@@ -62,8 +62,15 @@ export function NewTaskDialog({
   if (!open) return null;
 
   async function submit(start: boolean) {
-    if (!url.trim()) {
+    const trimmed = url.trim();
+    if (!trimmed) {
       setError("请填写下载链接");
+      return;
+    }
+    // Same rule as the backend: only http(s) reaches the engine. Checking here
+    // fails fast at the dialog instead of round-tripping through Go.
+    if (!/^https?:\/\//i.test(trimmed)) {
+      setError("链接必须以 http:// 或 https:// 开头");
       return;
     }
     setBusy(true);
