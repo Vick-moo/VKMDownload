@@ -7,7 +7,7 @@ import { SettingsPage } from "./components/SettingsPage";
 import { Sidebar } from "./components/Sidebar";
 import { TaskList } from "./components/TaskList";
 import { formatSpeed } from "./format";
-import type { Config, Filter, SortDir, SortKey, TaskView } from "./types";
+import type { Config, Filter, SortDir, SortKey, TaskView, UpdateInfo } from "./types";
 import { extFilter, fileExt, filterExt, taskLabel } from "./types";
 import {
   IconDownload,
@@ -50,6 +50,8 @@ function App(): JSX.Element {
   const [dialogURL, setDialogURL] = useState("");
   /** From the binding; shown at the foot of the sidebar. */
   const [version, setVersion] = useState("");
+  /** A newer release announced by the Go side; null until one arrives. */
+  const [update, setUpdate] = useState<UpdateInfo | null>(null);
   /** The bulk-delete confirmation; the count in it comes from the live list. */
   const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
@@ -113,6 +115,10 @@ function App(): JSX.Element {
         setPendingURL(url);
         setDialogURL(url);
         setDialogOpen(true);
+      }),
+      // A newer release, announced once per run by the Go side.
+      on<UpdateInfo>(EVENTS.updateAvailable, (info) => {
+        if (info && info.available) setUpdate(info);
       }),
     ];
     return () => offs.forEach((off) => off());
@@ -246,6 +252,15 @@ function App(): JSX.Element {
     }
   }, [visible, flash]);
 
+  const openUpdate = useCallback(async () => {
+    if (!update) return;
+    try {
+      await api.openReleasePage(update.url);
+    } catch (e) {
+      flash(`打不开下载页：${e instanceof Error ? e.message : String(e)}`);
+    }
+  }, [update, flash]);
+
   // Keyboard shortcuts from the design spec.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -308,6 +323,30 @@ function App(): JSX.Element {
       />
 
       <main className="main">
+        {update && (
+          <div className="updatebar" role="status">
+            <span>
+              发现新版本 {update.version}
+              {version ? `（当前 ${version}）` : ""}
+            </span>
+            <span className="updatebar__actions">
+              <button
+                type="button"
+                className="btn btn--primary"
+                onClick={() => void openUpdate()}
+              >
+                去下载
+              </button>
+              <button
+                type="button"
+                className="btn"
+                onClick={() => setUpdate(null)}
+              >
+                不再提示
+              </button>
+            </span>
+          </div>
+        )}
         {settingsOpen ? (
           <SettingsPage
             config={config}

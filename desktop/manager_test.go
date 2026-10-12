@@ -557,11 +557,16 @@ func TestCancelDiscardsPartialData(t *testing.T) {
 		return v.Status == StatusCanceled
 	})
 
-	for _, suffix := range []string{".vkmdownload.part", ".vkmdownload.json"} {
-		if _, err := os.Stat(dest + suffix); !os.IsNotExist(err) {
-			t.Errorf("%s should have been removed by Cancel", suffix)
+	// The file deletion runs off the binding thread (the UI updates at once),
+	// so allow it a moment rather than asserting synchronously.
+	waitFor(t, "the partial data to be discarded", 10*time.Second, func() bool {
+		for _, suffix := range []string{".vkmdownload.part", ".vkmdownload.json"} {
+			if _, err := os.Stat(dest + suffix); !os.IsNotExist(err) {
+				return false
+			}
 		}
-	}
+		return true
+	})
 }
 
 // TestServerErrorBecomesAReadableMessage checks that a failure surfaces

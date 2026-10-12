@@ -867,6 +867,26 @@ input:focus {
   text-overflow: ellipsis;
 }
 
+/* Persistent strip above the toolbar announcing a newer release. It stays
+   until dismissed: unlike a bulk-action notice, it must survive a re-render
+   minutes later when the user finally looks at it. */
+.updatebar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-4);
+  font-size: 12px;
+  color: var(--text);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  border-bottom: 1px solid var(--border);
+}
+
+.updatebar__actions {
+  display: flex;
+  gap: var(--space-2);
+  margin-left: auto;
+}
+
 /* The sortable header stays put; only the list below it scrolls.
    No horizontal scrolling: the columns are laid out to fit the container, so
    there is never anything to scroll to sideways.

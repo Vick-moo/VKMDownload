@@ -34,6 +34,28 @@ let apiBase = null;
  */
 const ownDownloads = new Set();
 
+/**
+ * Remembers a download the extension started itself, so its completion is not
+ * mistaken for a new user download. Entries leave when the download settles;
+ * the cap bounds a long-running browser profile that never restarts.
+ */
+function trackOwn(id) {
+  if (typeof id !== "number") return;
+  ownDownloads.add(id);
+  if (ownDownloads.size > 1000) {
+    const oldest = ownDownloads.values().next();
+    if (!oldest.done) ownDownloads.delete(oldest.value);
+  }
+}
+
+chrome.downloads.onChanged.addListener((delta) => {
+  if (!delta || typeof delta.id !== "number") return;
+  const state = delta.state && delta.state.current;
+  if (state === "complete" || state === "interrupted") {
+    ownDownloads.delete(delta.id);
+  }
+});
+
 // --------------------------------------------------------------- talking ---
 
 /** Finds the app, trying each port it may be listening on. */
@@ -240,10 +262,13 @@ chrome.downloads.onCreated.addListener(async (item) => {
   });
 
   // The app answered the policy question but refused the task itself. Put the
-  // download back rather than silently dropping what the user asked for.
+  // download back rather than silently dropping what the user asked for, and
+  // keep the original filename: re-downloading by bare URL would lose it.
   if (!result.ok) {
-    const id = await chrome.downloads.download({ url });
-    if (typeof id === "number") ownDownloads.add(id);
+    const retry = { url };
+    const name = (item.filename || "").split(/[\\/]/).pop();
+    if (name) retry.filename = name;
+    trackOwn(await chrome.downloads.download(retry));
     report(result, item.filename);
   }
 });

@@ -7,11 +7,13 @@
  */
 import {
   CancelTask,
+  CheckUpdate,
   ClipboardProbe,
   Config as GetConfig,
   ListTasks,
   NewTask,
   OpenFile,
+  OpenReleasePage,
   PauseTask,
   ClearFailedTasks,
   PickDirectory,
@@ -28,9 +30,11 @@ import {
   Version,
 } from "../wailsjs/go/main/App";
 import { EventsOn } from "../wailsjs/runtime/runtime";
-import type { Config, StartRequest, TaskView } from "./types";
+import type { Config, StartRequest, TaskView, UpdateInfo } from "./types";
 export const api = {
   version: (): Promise<string> => Version(),
+  checkUpdate: (): Promise<UpdateInfo> => CheckUpdate(),
+  openReleasePage: (url: string): Promise<void> => OpenReleasePage(url),
   listTasks: (): Promise<TaskView[]> => ListTasks(),
   newTask: (req: StartRequest): Promise<TaskView> => NewTask(req),
   pauseTask: (id: string): Promise<void> => PauseTask(id),
@@ -62,6 +66,7 @@ export const EVENTS = {
   removed: "task:removed",
   clipboardURL: "clipboard:url",
   filesDropped: "files:dropped",
+  updateAvailable: "update:available",
 } as const;
 
 /**

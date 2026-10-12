@@ -497,6 +497,7 @@ func (m *Manager) Cancel(id string) error {
 	t.mu.Lock()
 	cancel := t.cancel
 	dest := t.view.Dest
+	gen := t.generation
 	t.stopIntent = StatusCanceled
 	t.view.Status = StatusCanceled
 	t.view.Speed = 0
@@ -507,19 +508,34 @@ func (m *Manager) Cancel(id string) error {
 	if cancel != nil {
 		cancel()
 	}
-	// Wait for the transfer goroutine to stop before deleting: cancelling only
-	// asks it to stop, and a write in flight would recreate the partial file
-	// immediately after it was removed.
-	t.waitStopped(3 * time.Second)
-
-	// A cancelled task should start clean, so the partial file and the sidecar
-	// that would resume it are both removed.
-	_ = os.Remove(dest + engine.PartSuffix)
-	_ = os.Remove(dest + engine.StateSuffix)
 
 	m.app.emit("task:progress", v)
 	_ = m.saveTasks()
-	m.pumpQueue()
+
+	// The wait and the deletion run off the binding thread: the UI already
+	// shows the task as cancelled, and a 3s block per task made bulk cancels
+	// feel frozen. The generation guard is what keeps this safe: if the task
+	// was resumed again before the old goroutine exited, the generation has
+	// moved on and there is nothing left for us to delete.
+	go func() {
+		// Wait for the transfer goroutine to stop before deleting: cancelling
+		// only asks it to stop, and a write in flight would recreate the
+		// partial file immediately after it was removed.
+		t.waitStopped(3 * time.Second)
+
+		t.mu.Lock()
+		superseded := t.generation != gen
+		t.mu.Unlock()
+		if superseded {
+			return
+		}
+
+		// A cancelled task should start clean, so the partial file and the
+		// sidecar that would resume it are both removed.
+		_ = os.Remove(dest + engine.PartSuffix)
+		_ = os.Remove(dest + engine.StateSuffix)
+		m.pumpQueue()
+	}()
 	return nil
 }
 
@@ -538,24 +554,13 @@ func (m *Manager) Remove(id string, deleteFiles bool) error {
 	if cancel != nil {
 		cancel()
 	}
-	// Same reasoning as Cancel: the goroutine may still be writing, so waiting
-	// avoids a race between removal and a final flush.
-	t.waitStopped(3 * time.Second)
 
-	// Removing a task touches nothing on disk unless the caller asked for it.
-	// The partial file and its sidecar are deliberately left too: they are what
-	// a later attempt at the same URL resumes from, and the user's instruction
-	// was explicit that deleting a row must not disturb any file.
-	if deleteFiles {
-		_ = os.Remove(dest + engine.PartSuffix)
-		_ = os.Remove(dest + engine.StateSuffix)
-		// Only delete the published file when the task actually produced one,
-		// so a failed task cannot remove an unrelated file sharing the name.
-		if wasComplete {
-			_ = os.Remove(dest)
-		}
-	}
-
+	// The record leaves the list synchronously so the UI updates at once; the
+	// wait and any file deletion happen off the binding thread. No generation
+	// guard here (unlike Cancel): this object is detached from the map, so a
+	// task re-added for the same destination is a different object and must
+	// not be second-guessed — the wait below is what separates the old
+	// goroutine's last write from the deletion.
 	m.mu.Lock()
 	delete(m.tasks, id)
 	for i, v := range m.order {
@@ -568,7 +573,29 @@ func (m *Manager) Remove(id string, deleteFiles bool) error {
 
 	m.app.emit("task:removed", id)
 	_ = m.saveTasks()
-	m.pumpQueue()
+
+	go func() {
+		// Same reasoning as Cancel: the goroutine may still be writing, so
+		// waiting avoids a race between removal and a final flush.
+		t.waitStopped(3 * time.Second)
+
+		// Removing a task touches nothing on disk unless the caller asked for
+		// it. The partial file and its sidecar are deliberately left too: they
+		// are what a later attempt at the same URL resumes from, and the
+		// user's instruction was explicit that deleting a row must not disturb
+		// any file.
+		if deleteFiles {
+			_ = os.Remove(dest + engine.PartSuffix)
+			_ = os.Remove(dest + engine.StateSuffix)
+			// Only delete the published file when the task actually produced
+			// one, so a failed task cannot remove an unrelated file sharing
+			// the name.
+			if wasComplete {
+				_ = os.Remove(dest)
+			}
+		}
+		m.pumpQueue()
+	}()
 	return nil
 }
 

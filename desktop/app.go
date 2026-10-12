@@ -111,6 +111,10 @@ func (a *App) startup(ctx context.Context) {
 	})
 
 	a.RestartClipboardWatch()
+
+	// Update check never blocks startup and never fails it: offline machines
+	// start exactly as fast as online ones.
+	go a.checkUpdateOnce()
 }
 
 // domReady runs after the front-end has loaded.

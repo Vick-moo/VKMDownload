@@ -39,6 +39,7 @@
 | 文件 | 管什么 | 修什么先看它 |
 |---|---|---|
 | `manager.go` | `Manager` 状态机：Start/Pause/Resume/Cancel/Remove、批量操作、计划下载、`Stats`、`loadTasks/saveTasks` | 任务卡住、暂停变取消、批量卡死、计数对不上 |
+| `update.go` | 更新检查：`CheckUpdate` binding、`isNewerVersion` 对比、`checkUpdateOnce` 启动通知、`OpenReleasePage` | 更新横幅不出现、版本号比错 |
 | `app.go` | Wails 生命周期、binding、剪贴板轮询、托盘关闭语义 | 启动崩溃、关不掉窗口、剪贴板重复建任务 |
 | `api.go` | 回环端点 `/ping` `/settings` `/add`、`apiGuard`、`sanitizeSuggestedName` | 扩展连不上、文件名越界 |
 | `config.go` | 设置结构、默认值、`normalize`（含 `MaxConcurrent` 校验） | 设置不生效、默认值异常 |
@@ -113,10 +114,11 @@ cd desktop && wails build            # 产出 build/bin/VKMDownload.exe
 8. 计划下载在取消后仍关机：`finishPlan` 在有取消任务时跳过收尾动作。
 9. 剪贴板旧轮询器残留：`clipGen` 代际计数保证旧 loop 退出；`timer` 改复用。
 10. 文件名净化：`sanitizeSuggestedName` 补过滤 `:*?"<>|`、控制字符、尾部点空格、保留设备名；`Start` 的手工文件名走同一净化；`Referer` 剥 `CRLF`。
+11. 更新检查（新功能）：`update.go` 查 `releases/latest`，启动时后台跑、失败静默；有新版发 `update:available` 事件，前端顶部常驻横幅；`OpenReleasePage` 只允许本项目发布页。
 
 ## 8. 剩下未动的（有意延后）
 
-- `Remove`/`Cancel` 在 binding 线程同步 `waitStopped(3s)`：为保正确性保留，批量删运行中任务时会 block；要改需异步化清理。
+- ~~`Remove`/`Cancel` 在 binding 线程同步 `waitStopped(3s)`~~：已修——等删改走后台 goroutine，`Cancel` 用代际 guard 防误删（`manager.go:Cancel/Remove`）。
 - ~~`moveFile` 跨卷 `tmp` 固定名~~：已修——staging 名带 pid + 计数器（`download.go:nextTmpID`）。
 - ~~`state.matches` 不比 `URL`~~：已修——`FinalURL`（都有时）否则 `URL` 不一致即丢弃（`state.go:matches`）。
 - 前端 `as never` 两处（`NewTaskDialog.tsx:85`、`SettingsPage.tsx:88`）：把 `StartRequest`/`Config`
@@ -124,7 +126,7 @@ cd desktop && wails build            # 产出 build/bin/VKMDownload.exe
   **注意：本机有 Node（v24.16.0），`npx tsc --noEmit` 与 `wails build` 都能跑**，
   `wailsjs/` 绑定也已生成（含 `RemoveTasks`/`ClearFailedTasks`/`Version`）——
   改完 Go 的 binding 后直接 `wails build` 就会重新生成，不必手写类型。
-- 扩展 `ownDownloads` 只增不删、`handOver` 先删后送的降级保真：未改，属行为设计范畴。
+- ~~扩展 `ownDownloads` 只增不删、`handOver` 先删后送的降级保真~~：已修——`onChanged` 结算即删 + 1000 上限（`trackOwn`），回退重下带原文件名。
 - `shutdownMachine` 无二次确认：保留（计划下载页已有开关），动前需与你确认。
 
 ## 8. 公开注意事项（仓库是 Public）

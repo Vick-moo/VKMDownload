@@ -10,6 +10,7 @@ import type { main } from "../wailsjs/go/models";
 export type TaskView = main.TaskView;
 export type Config = main.Config;
 export type StartRequest = main.StartRequest;
+export type UpdateInfo = main.UpdateInfo;
 
 /** Task lifecycle, matching the TaskStatus constants in manager.go. */
 export type TaskStatus =
