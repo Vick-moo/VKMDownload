@@ -1411,6 +1411,15 @@ body.resizing {
   color: var(--danger);
 }
 
+/* Neutral note line inside a dialog, for context that is neither an error
+   nor a field label (e.g. where an intercepted download came from). */
+.field__hint {
+  margin: 0;
+  font-size: 12px;
+  line-height: 17px;
+  color: var(--text-muted);
+}
+
 .field-grid {
   display: grid;
   grid-template-columns: 1fr 120px;

@@ -110,6 +110,10 @@ type task struct {
 	// into a cancel and cost the user the ability to resume.
 	stopIntent TaskStatus
 
+	// manual mirrors StartRequest.Manual: the user placed this task
+	// explicitly, so the organize step leaves it alone on completion.
+	manual bool
+
 	// referer is sent with every request for this task. Set once at creation and
 	// never changed, so it needs no lock.
 	referer string
@@ -141,6 +145,10 @@ type StartRequest struct {
 	// supplies it, because some hosts refuse a download whose request does not
 	// appear to come from their own page.
 	Referer string `json:"referer"`
+	// Manual marks a task the user placed explicitly (the dialog). Automatic
+	// arrivals leave it false, which is what the organize step keys on: only
+	// unplaced tasks are sorted into group folders on completion.
+	Manual bool `json:"manual"`
 }
 
 // Manager owns every task.
@@ -298,7 +306,7 @@ func (m *Manager) Start(req StartRequest) (TaskView, error) {
 		conns = cfg.Connections
 	}
 
-	t := &task{referer: strings.ReplaceAll(strings.ReplaceAll(strings.TrimSpace(req.Referer), "\r", ""), "\n", "")}
+	t := &task{referer: strings.ReplaceAll(strings.ReplaceAll(strings.TrimSpace(req.Referer), "\r", ""), "\n", ""), manual: req.Manual}
 	t.view = TaskView{
 		ID:      id,
 		URL:     url,
@@ -884,6 +892,12 @@ func (m *Manager) run(t *task, ctx context.Context, cancel context.CancelFunc, d
 			t.view.Downloaded = p.Downloaded
 			t.view.Size = p.Total
 			t.view.Speed = int64(p.Speed)
+			// The server's suggested name arrives with the first progress,
+			// long before completion renames the row. Take it once: a name
+			// the user typed wins over a later suggestion.
+			if t.view.Name == "" && p.Suggested != "" {
+				t.view.Name = p.Suggested
+			}
 			if p.ETA > 0 {
 				t.view.ETA = int64(p.ETA.Seconds())
 			} else {
@@ -927,9 +941,36 @@ func (m *Manager) run(t *task, ctx context.Context, cancel context.CancelFunc, d
 		t.mu.Unlock()
 		return
 	}
-	t.view.Status = StatusCompleted
+	// Name and Dest first; Status flips last, after organizing below, so no
+	// observer ever sees "completed" pointing at the pre-organize location.
 	t.view.Name = filepath.Base(res.Path)
 	t.view.Dest = res.Path
+	manual := t.manual
+	name := t.view.Name
+	t.mu.Unlock()
+
+	// Organize: automatic arrivals with a matching extension move into their
+	// group folder now that the final name is known. Manual tasks skip this —
+	// the user already placed them. A failed move keeps the file where it
+	// landed and only logs: the download itself succeeded.
+	// (cfg is the settings snapshot taken above for the engine options.)
+	if !manual && cfg.OrganizeEnabled {
+		if dst := organizeTarget(cfg.OrganizeGroups,
+			cfg.OrganizeDir, name); dst != "" && dst != res.Path {
+			if err := moveIntoPlace(res.Path, dst); err != nil {
+				m.app.debugLog("organize %s: %v", res.Path, err)
+			} else {
+				t.mu.Lock()
+				if t.generation == gen {
+					t.view.Dest = dst
+				}
+				t.mu.Unlock()
+			}
+		}
+	}
+
+	t.mu.Lock()
+	t.view.Status = StatusCompleted
 	t.view.Size = res.Size
 	t.view.Downloaded = res.Size
 	t.view.Speed = 0
@@ -944,6 +985,17 @@ func (m *Manager) run(t *task, ctx context.Context, cancel context.CancelFunc, d
 	m.app.emit("task:done", v)
 	m.app.afterTaskFinished(v)
 	_ = m.saveTasks()
+}
+
+// moveIntoPlace moves a finished file into its group folder. Source and
+// destination always share a volume (one is inside the other's directory),
+// so MkdirAll plus Rename is atomic and sufficient — no cross-volume copy
+// path is needed.
+func moveIntoPlace(src, dst string) error {
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return err
+	}
+	return os.Rename(src, dst)
 }
 
 // fail records a task failure with a message meant for a human.

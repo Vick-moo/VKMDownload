@@ -3,6 +3,7 @@ module vkmdownload/desktop
 go 1.26.4
 
 require (
+	fyne.io/systray v1.12.2
 	github.com/wailsapp/wails/v2 v2.16.0
 	vkmdownload v0.0.0-00010101000000-000000000000
 )

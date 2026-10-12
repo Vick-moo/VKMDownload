@@ -48,6 +48,10 @@ function App(): JSX.Element {
 
   const [dialogOpen, setDialogOpen] = useState(false);
   const [dialogURL, setDialogURL] = useState("");
+  /** Prefill for the ask-location flow; empty for a manual dialog. */
+  const [dialogFilename, setDialogFilename] = useState("");
+  const [dialogReferer, setDialogReferer] = useState("");
+  const [dialogAsk, setDialogAsk] = useState(false);
   /** From the binding; shown at the foot of the sidebar. */
   const [version, setVersion] = useState("");
   /** A newer release announced by the Go side; null until one arrives. */
@@ -134,8 +138,25 @@ function App(): JSX.Element {
       on<string>(EVENTS.clipboardURL, (url) => {
         setPendingURL(url);
         setDialogURL(url);
+        setDialogFilename("");
+        setDialogReferer("");
+        setDialogAsk(false);
         setDialogOpen(true);
       }),
+      // Ask-location arrivals (extension or clipboard): nothing is created
+      // yet. The dialog collects the placement; closing it abandons the
+      // download, which is what the user chose.
+      on<{ url: string; filename: string; referer: string }>(
+        EVENTS.locationAsk,
+        (req) => {
+          setPendingURL(req.url);
+          setDialogURL(req.url);
+          setDialogFilename(req.filename ?? "");
+          setDialogReferer(req.referer ?? "");
+          setDialogAsk(true);
+          setDialogOpen(true);
+        },
+      ),
       // A newer release, announced once per run by the Go side.
       on<UpdateInfo>(EVENTS.updateAvailable, (info) => {
         if (info && info.available) setUpdate(info);
@@ -550,10 +571,14 @@ function App(): JSX.Element {
       <NewTaskDialog
         open={dialogOpen}
         initialURL={dialogURL}
+        initialFilename={dialogFilename}
+        initialReferer={dialogReferer}
+        fromAsk={dialogAsk}
         config={config}
         onClose={() => {
           setDialogOpen(false);
           setPendingURL("");
+          setDialogAsk(false);
           // A captured link that the user declined must not come back on the
           // next poll.
         }}

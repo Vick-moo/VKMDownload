@@ -231,6 +231,22 @@ func (a *App) apiAdd(w http.ResponseWriter, r *http.Request) {
 	}
 
 	cfg := a.Config()
+	if cfg.AskLocation {
+		// Ask first, create later: the front-end opens the new-task dialog
+		// prefilled with these values, and closing it abandons the download.
+		// The reply stays 200 with no id so the extension does not fall back
+		// to a browser download of something the user is about to place.
+		fn := sanitizeSuggestedName(req.Filename)
+		a.debugLog("extension asked %s (origin=%q ua=%q)",
+			req.URL, r.Header.Get("Origin"), r.Header.Get("User-Agent"))
+		a.emit("location:ask", map[string]string{
+			"url":      req.URL,
+			"filename": fn,
+			"referer":  req.Referer,
+		})
+		writeJSON(w, http.StatusOK, map[string]any{"pending": true, "name": fn})
+		return
+	}
 	task, err := a.mgr.Start(StartRequest{
 		URL:      req.URL,
 		Filename: sanitizeSuggestedName(req.Filename),

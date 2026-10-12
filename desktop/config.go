@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // Config holds every user setting. Each one is an independent switch so the
@@ -12,6 +13,26 @@ type Config struct {
 	// AutoStart begins a task as soon as it is created. With it off, a new task
 	// is added to the list and waits for an explicit start.
 	AutoStart bool `json:"autoStart"`
+
+	// AskLocation opens the new-task dialog for every non-manual arrival
+	// (browser extension, clipboard) so the save location is confirmed before
+	// anything is created. Closing the dialog abandons that download. With it
+	// off, arrivals follow AutoStart / the clipboard switches instead.
+	AskLocation bool `json:"askLocation"`
+
+	// OrganizeEnabled sorts automatic arrivals into group folders when they
+	// complete. Manual tasks (the dialog) and anything whose extension
+	// matches no group stay where they were put. Folders appear lazily: a
+	// group folder is created only when its first file finishes.
+	//
+	// The folders live under OrganizeDir, not DownloadDir: the two are
+	// independent roots, so pointing downloads at a test folder does not drag
+	// the groups along with it.
+	OrganizeEnabled bool            `json:"organizeEnabled"`
+	OrganizeGroups  []OrganizeGroup `json:"organizeGroups"`
+	// OrganizeDir is the root for relative group folders. Empty means the
+	// system Downloads folder, resolved per machine like DownloadDir.
+	OrganizeDir string `json:"organizeDir"`
 
 	DownloadDir string `json:"downloadDir"`
 
@@ -79,6 +100,15 @@ type Config struct {
 	ClipboardIntervalMs int `json:"clipboardIntervalMs"`
 }
 
+// OrganizeGroup maps filename extensions (without the dot, any case) to one
+// folder. Dir empty means a folder called Name under the organize root
+// (portable across machines); a picked Dir is absolute and wins over Name.
+type OrganizeGroup struct {
+	Name string   `json:"name"`
+	Exts []string `json:"exts"`
+	Dir  string   `json:"dir"`
+}
+
 // DefaultConfig returns the settings a fresh install starts with.
 //
 // The defaults are deliberately conservative about doing things on the user's
@@ -87,6 +117,7 @@ type Config struct {
 func DefaultConfig() Config {
 	return Config{
 		AutoStart:           true,
+		AskLocation:         true,
 		DownloadDir:         defaultDownloadDir(),
 		Connections:         8,
 		MinSegmentSize:      1 << 20,
@@ -110,11 +141,23 @@ func DefaultConfig() Config {
 		ExtensionEnabled:   true,
 		ExtensionMinSizeKB: 1024,
 		ExtensionSkipHosts: "",
+
+		// Off by default: sorting is a surprise until the user asks for it.
+		OrganizeEnabled: false,
+		OrganizeDir:     defaultDownloadDir(),
+		OrganizeGroups: []OrganizeGroup{
+			{Name: "Programs", Exts: []string{"exe", "msi", "bat", "cmd", "ps1", "com", "scr"}},
+			{Name: "Documents", Exts: []string{"pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "txt", "md", "csv"}},
+			{Name: "Archives", Exts: []string{"zip", "rar", "7z", "tar", "gz", "bz2", "xz", "iso"}},
+		},
 	}
 }
 
-// defaultDownloadDir is the user's Downloads folder, falling back to the home
-// directory when the shell does not report one.
+// DefaultOrganizeGroups returns a fresh copy of the default group table for
+// the settings page's reset button.
+func (a *App) DefaultOrganizeGroups() []OrganizeGroup {
+	return DefaultConfig().OrganizeGroups
+}
 func defaultDownloadDir() string {
 	if home, err := os.UserHomeDir(); err == nil {
 		dl := filepath.Join(home, "Downloads")
@@ -170,6 +213,68 @@ func (c *Config) normalize() {
 	if c.ClipboardIntervalMs > 10000 {
 		c.ClipboardIntervalMs = 10000
 	}
+	c.OrganizeGroups = normalizeOrganizeGroups(c.OrganizeGroups)
+	if strings.TrimSpace(c.OrganizeDir) == "" {
+		c.OrganizeDir = d.OrganizeDir
+	}
+}
+
+// normalizeOrganizeGroups cleans the group table: names are trimmed and must
+// survive sanitizeSuggestedName (no separators, no device names) unless an
+// absolute Dir carries the location instead, extensions are lower-cased
+// without the dot, and empty entries go away. First group wins on overlap,
+// so order is preserved.
+func normalizeOrganizeGroups(groups []OrganizeGroup) []OrganizeGroup {
+	out := groups[:0]
+	seen := map[string]bool{}
+	for _, g := range groups {
+		name := sanitizeSuggestedName(g.Name)
+		dir := strings.TrimSpace(g.Dir)
+		if dir != "" {
+			dir = filepath.Clean(dir)
+		}
+		if name == "" && dir == "" {
+			continue
+		}
+		var exts []string
+		for _, e := range g.Exts {
+			e = strings.ToLower(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(e), ".")))
+			if e == "" || e == "." || e == ".." || strings.ContainsAny(e, `/\`) || seen[name+"\x00"+e] {
+				continue
+			}
+			seen[name+"\x00"+e] = true
+			exts = append(exts, e)
+		}
+		if len(exts) == 0 {
+			continue
+		}
+		out = append(out, OrganizeGroup{Name: name, Exts: exts, Dir: dir})
+	}
+	return out
+}
+
+// organizeTarget maps a finished filename to its group folder. A group with
+// an absolute Dir lands there; otherwise it lands under root (the organize
+// root, independent of the download directory). It returns "" when the name
+// matches no group, in which case the file stays put.
+func organizeTarget(groups []OrganizeGroup, root, name string) string {
+	dot := strings.LastIndex(name, ".")
+	if dot < 0 || dot == len(name)-1 {
+		return ""
+	}
+	ext := strings.ToLower(name[dot+1:])
+	for _, g := range groups {
+		for _, e := range g.Exts {
+			if e == ext {
+				base := g.Dir
+				if base == "" {
+					base = filepath.Join(root, g.Name)
+				}
+				return filepath.Join(base, name)
+			}
+		}
+	}
+	return ""
 }
 
 // loadConfig reads the settings file, falling back to defaults. A corrupt file

@@ -11,6 +11,7 @@ import {
   CheckUpdate,
   ClipboardProbe,
   Config as GetConfig,
+  DefaultOrganizeGroups,
   ListTasks,
   NewTask,
   OpenFile,
@@ -33,13 +34,14 @@ import {
   Version,
 } from "../wailsjs/go/main/App";
 import { EventsOn } from "../wailsjs/runtime/runtime";
-import type { Config, StartRequest, TaskView, UpdateInfo, UpdateStatus } from "./types";
+import type { Config, OrganizeGroup, StartRequest, TaskView, UpdateInfo, UpdateStatus } from "./types";
 export const api = {
   version: (): Promise<string> => Version(),
   checkUpdate: (): Promise<UpdateInfo> => CheckUpdate(),
   startUpdate: (): Promise<UpdateStatus> => StartUpdate(),
   updateProgress: (): Promise<UpdateStatus> => UpdateProgress(),
   applyUpdate: (): Promise<void> => ApplyUpdate(),
+  defaultOrganizeGroups: (): Promise<OrganizeGroup[]> => DefaultOrganizeGroups(),
   openReleasePage: (url: string): Promise<void> => OpenReleasePage(url),
   listTasks: (): Promise<TaskView[]> => ListTasks(),
   newTask: (req: StartRequest): Promise<TaskView> => NewTask(req),
@@ -72,6 +74,7 @@ export const EVENTS = {
   removed: "task:removed",
   clipboardURL: "clipboard:url",
   filesDropped: "files:dropped",
+  locationAsk: "location:ask",
   updateAvailable: "update:available",
 } as const;
 

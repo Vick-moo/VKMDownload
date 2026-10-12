@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -80,6 +81,8 @@ func TestLocalAPIPingIdentifiesTheApp(t *testing.T) {
 // TestLocalAPIAddCreatesTask covers the extension's main call.
 func TestLocalAPIAddCreatesTask(t *testing.T) {
 	app := newTestApp(t)
+	// Ask-location would hold the arrival for placement instead of creating.
+	disableAskLocation(t, app)
 	base := startAPI(t, app)
 
 	resp := postJSON(t, base+"/add", "chrome-extension://abcdefghijklmnop",
@@ -111,6 +114,65 @@ func TestLocalAPIAddCreatesTask(t *testing.T) {
 	}
 	if v.URL != "http://127.0.0.1:1/from-extension.bin" {
 		t.Errorf("url = %q", v.URL)
+	}
+}
+
+// disableAskLocation pins the pre-ask behaviour for tests that cover direct
+// creation: with the default on, arrivals wait for placement instead.
+func disableAskLocation(t *testing.T, app *App) {
+	t.Helper()
+	cfg := app.Config()
+	cfg.AskLocation = false
+	if err := app.SetConfig(cfg); err != nil {
+		t.Fatalf("SetConfig: %v", err)
+	}
+}
+
+// TestLocalAPIAddAsksForLocation covers the ask-location flow: with the
+// default on, the extension's arrival creates nothing — the front-end opens
+// the placement dialog, and closing that dialog abandons the download.
+func TestLocalAPIAddAsksForLocation(t *testing.T) {
+	app := newTestApp(t)
+
+	var mu sync.Mutex
+	var events []string
+	app.emit = func(name string, _ ...any) {
+		mu.Lock()
+		events = append(events, name)
+		mu.Unlock()
+	}
+	base := startAPI(t, app)
+
+	resp := postJSON(t, base+"/add", "chrome-extension://abcdefghijklmnop",
+		`{"url":"http://127.0.0.1:1/wait.bin","filename":"wait.bin"}`)
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	var body struct {
+		Pending bool `json:"pending"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !body.Pending {
+		t.Error("pending = false, want the arrival held for placement")
+	}
+	if n := len(app.mgr.List()); n != 0 {
+		t.Errorf("%d tasks created, want none before placement", n)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	found := false
+	for _, name := range events {
+		if name == "location:ask" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("events = %v, want a location:ask", events)
 	}
 }
 
@@ -307,6 +369,8 @@ func TestPolicyViewSplitsSkipHosts(t *testing.T) {
 
 func TestLocalAPIAddKeepsTheFilenameInTheDownloadFolder(t *testing.T) {
 	app := newTestApp(t)
+	// Ask-location would hold the arrival for placement instead of creating.
+	disableAskLocation(t, app)
 	base := startAPI(t, app)
 
 	resp := postJSON(t, base+"/add", "chrome-extension://abc",

@@ -8,6 +8,13 @@ interface Props {
   open: boolean;
   /** Pre-filled URL, used when a link is captured from the clipboard. */
   initialURL?: string;
+  /** Pre-filled filename from the ask-location flow (extension suggestion). */
+  initialFilename?: string;
+  /** Carried through to the created task; some hosts require it. */
+  initialReferer?: string;
+  /** True when opened to place an intercepted download: closing abandons it,
+      and the browser-hint below applies. */
+  fromAsk?: boolean;
   config: Config | null;
   onClose: () => void;
   /** Called after a task is created, with whether it was started. */
@@ -24,6 +31,9 @@ interface Props {
 export function NewTaskDialog({
   open,
   initialURL,
+  initialFilename,
+  initialReferer,
+  fromAsk,
   config,
   onClose,
   onCreated,
@@ -31,6 +41,7 @@ export function NewTaskDialog({
   const [url, setURL] = useState("");
   const [dest, setDest] = useState("");
   const [filename, setFilename] = useState("");
+  const [referer, setReferer] = useState("");
   const [conns, setConns] = useState(8);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -42,7 +53,8 @@ export function NewTaskDialog({
     if (!open) return;
     setURL(initialURL ?? "");
     setError("");
-    setFilename("");
+    setFilename(initialFilename ?? "");
+    setReferer(initialReferer ?? "");
     setBusy(false);
     setDest(config?.downloadDir ?? "");
     setConns(config?.connections ?? 8);
@@ -77,10 +89,11 @@ export function NewTaskDialog({
     setError("");
     try {
       await api.newTask({
-        url: url.trim(),
+        url: trimmed,
         dest: dest.trim(),
         filename: filename.trim(),
         connections: conns,
+        referer,
         start,
       } as never);
       onCreated();
@@ -172,6 +185,12 @@ export function NewTaskDialog({
             </label>
           </div>
 
+          {fromAsk ? (
+            <p className="field__hint">
+              浏览器里拦截到的下载，请确认保存位置后开始；关闭此窗口则放弃这次下载。
+              若浏览器开了“下载前询问保存位置”，请关掉，否则同一个文件会弹两次。
+            </p>
+          ) : null}
           {error ? <p className="field__error">{error}</p> : null}
         </div>
 

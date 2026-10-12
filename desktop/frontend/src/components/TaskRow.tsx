@@ -8,7 +8,7 @@ import {
   formatWhen,
   ellipsizeMiddle,
 } from "../format";
-import { STATUS_LABEL, STATUS_TONE } from "../types";
+import { STATUS_LABEL, STATUS_TONE, urlTail } from "../types";
 import type { TaskStatus, TaskView } from "../types";
 import {
   IconAlert,
@@ -76,13 +76,14 @@ export function TaskRow({
     >
       <div className="task__cell task__cell--name">
         {/* The name is unknown until the server answers, and stays unknown if
-            the transfer fails early; the URL is a better label than nothing. */}
+            the transfer fails early; the URL's last segment is a better label
+            than the whole address. */}
         <span className="task__name" title={task.name || task.url}>
           {task.name ? (
             ellipsizeMiddle(task.name, 60)
           ) : (
             <span className="task__name-pending">
-              {ellipsizeMiddle(task.url, 60)}
+              {ellipsizeMiddle(urlTail(task.url), 60)}
             </span>
           )}
         </span>
@@ -154,7 +155,7 @@ export function TaskRow({
       </div>
 
       <div className="task__actions" onClick={(e) => e.stopPropagation()}>
-        {task.status === "downloading" || task.status === "queued" ? (
+        {task.status === "downloading" ? (
           <button
             type="button"
             className="icon-btn"

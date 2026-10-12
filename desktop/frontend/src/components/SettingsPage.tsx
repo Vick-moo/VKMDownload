@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import type { JSX } from "react";
+import { main } from "../../wailsjs/go/models";
 import { api } from "../api";
-import type { Config, UpdateStatus } from "../types";
+import type { Config, OrganizeGroup, UpdateStatus } from "../types";
 import { IconFolder } from "./Icons";
 
 interface Props {
@@ -169,8 +170,34 @@ export function SettingsPage({
     }
   }
 
-  function updLine(): string {
-    if (updMsg) return updMsg;
+  /** Where a group's files land: an absolute Dir wins, otherwise the organize root/Name. */
+  function groupPlace(organizeDir: string, g: OrganizeGroup): string {
+    const dir = (g.dir || "").trim();
+    if (dir) return dir;
+    const name = (g.name || "").trim();
+    if (!name) return "";
+    return `${(organizeDir || "").replace(/[/\\]+$/, "")}\\${name}`;
+  }
+
+  async function pickGroupDir(i: number) {
+    try {
+      const picked = await api.pickDirectory();
+      if (!picked || !draft) return;
+      const base =
+        picked
+          .split(/[\\/]/)
+          .filter((s) => s !== "")
+          .pop() || "";
+      const groups: OrganizeGroup[] = draft.organizeGroups.slice();
+      const cur = groups[i];
+      groups[i] = { ...cur, dir: picked, name: base || cur.name } as OrganizeGroup;
+      patch({ organizeGroups: groups });
+    } catch {
+      // A cancelled dialog is not an error worth reporting.
+    }
+  }
+
+  function updLine(): string {   if (updMsg) return updMsg;
     if (!upd) return "自动检查新版本，有更新时顶部会出现横幅。";
     if (upd.state === "downloading") {
       const pct =
@@ -192,7 +219,10 @@ export function SettingsPage({
 
   /** Applies a partial change to the draft. */
   function patch(p: Partial<Config>) {
-    setDraft((d) => (d ? { ...d, ...p } : d));
+    // Object.assign onto a fresh instance rather than {...d, ...p}: spreading
+    // a generated model class drops its prototype methods, and the result no
+    // longer typechecks as a Config.
+    setDraft((d) => (d ? Object.assign(new main.Config(), d, p) : d));
   }
 
   async function save() {
@@ -243,6 +273,156 @@ export function SettingsPage({
           checked={draft.autoStart}
           onChange={(v) => patch({ autoStart: v })}
         />
+
+        <Switch
+          title="每次下载先问保存位置"
+          hint="浏览器和剪贴板来的下载会先弹窗确认位置，关掉弹窗等于放弃这次下载。关闭后按上面的自动开始/剪贴板规则直接建任务。"
+          checked={draft.askLocation}
+          onChange={(v) => patch({ askLocation: v })}
+        />
+
+        <p className="settings-section__note">
+          开启上面一项时，若浏览器也开了“下载前询问保存位置”，同一个文件会弹两次——请关掉浏览器那边的。
+        </p>
+
+        <Switch
+          title="按类型自动整理"
+          hint="自动到来的下载（非弹窗手动创建的）在完成后按扩展名搬进下面的分组文件夹。未命中任何分组的留在原处。"
+          checked={draft.organizeEnabled}
+          onChange={(v) => patch({ organizeEnabled: v })}
+        />
+
+        {draft.organizeEnabled ? (
+          <>
+            <label className="setting">
+              <span className="setting__text">
+                <span className="setting__title">整理根目录</span>
+                <span className="setting__hint">
+                  {draft.organizeDir || "系统下载文件夹"}（和上面的默认保存目录无关）
+                </span>
+              </span>
+              <span className="field__row" style={{ flex: "0 0 auto" }}>
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={() => {
+                    void api
+                      .pickDirectory()
+                      .then((picked) => {
+                        if (picked) patch({ organizeDir: picked });
+                      })
+                      .catch(() => undefined);
+                  }}
+                >
+                  浏览
+                </button>
+              </span>
+            </label>
+            {draft.organizeGroups.map((g, i) => (
+              <div className="setting" key={i}>
+                <span className="setting__text">
+                  <span className="field__row" style={{ flex: "1 1 auto" }}>
+                    <input
+                      type="text"
+                      aria-label="文件夹名"
+                      style={{ width: 110 }}
+                      value={g.name}
+                      spellCheck={false}
+                      onChange={(e) => {
+                        const groups: OrganizeGroup[] =
+                          draft.organizeGroups.slice();
+                        groups[i] = { ...g, name: e.target.value } as OrganizeGroup;
+                        patch({ organizeGroups: groups });
+                      }}
+                    />
+                    <input
+                      type="text"
+                      aria-label="扩展名，用逗号或空格分隔"
+                      style={{ flex: "1 1 auto" }}
+                      placeholder="exe, msi"
+                      value={g.exts.join(", ")}
+                      spellCheck={false}
+                      onChange={(e) => {
+                        const groups: OrganizeGroup[] =
+                          draft.organizeGroups.slice();
+                        groups[i] = {
+                          ...g,
+                          exts: e.target.value
+                            .split(/[,，\s]+/)
+                            .map((s) => s.trim())
+                            .filter((s) => s !== ""),
+                        } as OrganizeGroup;
+                        patch({ organizeGroups: groups });
+                      }}
+                    />
+                    <button
+                      type="button"
+                      className="btn"
+                      title="直接指定这个分组的文件夹（绝对路径），不跟下载目录走"
+                      onClick={() => pickGroupDir(i)}
+                    >
+                      浏览
+                    </button>
+                  </span>
+                  {groupPlace(draft.organizeDir, g) ? (
+                    <span className="setting__hint">
+                      文件会进 {groupPlace(draft.organizeDir, g)}
+                      {g.dir.trim() ? "" : "（跟整理根目录走，换电脑也有效）"}
+                    </span>
+                  ) : null}
+                </span>
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={() => {
+                    patch({
+                      organizeGroups: draft.organizeGroups.filter(
+                        (_, j) => j !== i,
+                      ),
+                    });
+                  }}
+                >
+                  删除
+                </button>
+              </div>
+            ))}
+            <div className="setting">
+              <span className="setting__text">
+                <span className="setting__hint">
+                  文件夹在该组第一个文件完成后才创建；分组按顺序匹配，命中的第一个生效。
+                </span>
+              </span>
+              <span className="field__row" style={{ flex: "0 0 auto" }}>
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={() => {
+                    patch({
+                      organizeGroups: [
+                        ...draft.organizeGroups,
+                        { name: "", exts: [], dir: "" } as OrganizeGroup,
+                      ],
+                    });
+                  }}
+                >
+                  添加分组
+                </button>
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={() => {
+                    void api
+                      .defaultOrganizeGroups()
+                      .then((groups) => patch({ organizeGroups: groups }))
+                      .catch(() => undefined);
+                  }}
+                >
+                  恢复默认
+                </button>
+              </span>
+            </div>
+          </>
+        ) : null}
 
         <label className="setting">
           <span className="setting__text">

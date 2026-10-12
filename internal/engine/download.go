@@ -49,6 +49,11 @@ type Progress struct {
 	Connections  int
 	Segments     int
 	SegmentsDone int
+	// Suggested is the filename the server proposed (Content-Disposition
+	// first, URL path second). It is known as soon as probing finishes, long
+	// before the download completes, so the UI can show a real name instead
+	// of a URL while transferring.
+	Suggested string
 }
 
 // Options configures a Downloader. The zero value is usable; Normalize fills in
@@ -436,6 +441,7 @@ func (s *session) newTracker(initial, total int64) {
 		interval: s.d.opt.ProgressInterval,
 		step:     s.d.opt.ProgressBytes,
 		conns:    s.d.opt.Connections,
+		suggest:  s.probe.SuggestedName,
 	}
 	s.track.save = s.saveState
 	if s.req.Progress != nil {
@@ -1283,6 +1289,7 @@ type progressTracker struct {
 	interval time.Duration
 	step     int64
 	conns    int
+	suggest  string
 
 	report   func(Progress)
 	save     func() error
@@ -1364,6 +1371,7 @@ func (p *progressTracker) emit(bytes, total int64, speed float64) {
 		Downloaded:  bytes,
 		Speed:       speed,
 		Connections: p.conns,
+		Suggested:   p.suggest,
 	}
 	if p.segments != nil {
 		prog.Segments, prog.SegmentsDone = p.segments()

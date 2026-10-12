@@ -27,6 +27,10 @@ type App struct {
 	// keeps the download logic testable end to end.
 	emit func(name string, data ...any)
 
+	// hide conceals the window. Same reason as emit: runtime.WindowHide aborts
+	// the process on a foreign context (log.Fatalf), so tests inject a spy.
+	hide func(ctx context.Context)
+
 	mu  sync.Mutex
 	cfg Config
 
@@ -70,6 +74,9 @@ func NewApp() *App {
 		}
 		runtime.EventsEmit(a.ctx, name, data...)
 	}
+	a.hide = func(ctx context.Context) {
+		runtime.WindowHide(ctx)
+	}
 	a.mgr = NewManager(a)
 	return a
 }
@@ -102,6 +109,10 @@ func (a *App) startup(ctx context.Context) {
 	a.mgr.loadTasks()
 	go a.mgr.Run(ctx)
 
+	// System-tray icon. Without it "minimise to tray" hides the window with
+	// nothing to bring it back from, which reads as a broken close button.
+	go a.startTray()
+
 	// The browser extension's endpoint. It lives and dies with the app's
 	// context rather than the window's, so closing the window to the tray does
 	// not cut the extension off.
@@ -128,6 +139,7 @@ func (a *App) domReady(ctx context.Context) {
 
 // shutdown releases resources as the application exits.
 func (a *App) shutdown(ctx context.Context) {
+	a.stopTray()
 	_ = a.mgr.saveTasks()
 	_ = ctx
 }
@@ -138,20 +150,16 @@ func (a *App) shutdown(ctx context.Context) {
 // made the window impossible to close at all, since both of the early exits
 // returned true.)
 //
-// When "minimise to tray" is on and something is still transferring, refusing is
-// the right answer: silently killing a download because the window was closed is
-// exactly the behaviour a download manager must not have. With nothing running
-// the close goes through, because there is no tray icon to bring the window
-// back from.
+// When "minimise to tray" is on the close always becomes a hide: silently
+// killing a download because the window was closed is exactly the behaviour a
+// download manager must not have, and the tray icon (with 显示窗口/退出) is
+// what brings the window back. Real exits go through the tray's 退出 item.
 func (a *App) beforeClose(ctx context.Context) (prevent bool) {
 	cfg := a.Config()
 	if !cfg.MinimizeToTray {
 		return false
 	}
-	if a.mgr.Stats()["active"] == 0 {
-		return false
-	}
-	runtime.WindowHide(ctx)
+	a.hide(ctx)
 	return true
 }
 
@@ -219,6 +227,10 @@ func (a *App) PickDirectory() (string, error) {
 // NewTask creates a task. When req.Start is set the transfer begins at once;
 // otherwise it is only added to the list.
 func (a *App) NewTask(req StartRequest) (TaskView, error) {
+	// The dialog is an explicit placement either way: even "add to list" means
+	// the user saw and confirmed the destination, so the organize step must
+	// not re-sort it on completion.
+	req.Manual = true
 	return a.mgr.Start(req)
 }
 
@@ -394,6 +406,12 @@ func (a *App) clipboardLoop(intervalMs int, gen int64) {
 // offerClipboardURL acts on a URL found on the clipboard.
 func (a *App) offerClipboardURL(url string) {
 	cfg := a.Config()
+	if cfg.AskLocation {
+		// The front-end opens the new-task dialog prefilled; closing it
+		// abandons the download, so nothing is created here.
+		a.emit("location:ask", map[string]string{"url": url})
+		return
+	}
 	a.emit("clipboard:url", url)
 
 	if cfg.ClipboardConfirm {

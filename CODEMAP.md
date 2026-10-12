@@ -40,6 +40,8 @@
 |---|---|---|
 | `manager.go` | `Manager` 状态机：Start/Pause/Resume/Cancel/Remove、批量操作、计划下载、`Stats`、`loadTasks/saveTasks` | 任务卡住、暂停变取消、批量卡死、计数对不上 |
 | `update.go` | 更新检查：`CheckUpdate` binding、`isNewerVersion` 对比、`checkUpdateOnce` 启动通知、`OpenReleasePage` | 更新横幅不出现、版本号比错 |
+| `tray.go` | 托盘图标（fyne.io/systray，自带消息循环）：显示窗口/退出，左键恢复 | 关窗口窗口丢失、托盘无图标 |
+| `config.go` | 设置结构（含 `AskLocation`、`Organize*`、`UpdateStatus` 相关）+ `organizeTarget` 落点计算 | 设置不生效、整理落点不对 |
 | `app.go` | Wails 生命周期、binding、剪贴板轮询、托盘关闭语义 | 启动崩溃、关不掉窗口、剪贴板重复建任务 |
 | `api.go` | 回环端点 `/ping` `/settings` `/add`、`apiGuard`、`sanitizeSuggestedName` | 扩展连不上、文件名越界 |
 | `config.go` | 设置结构、默认值、`normalize`（含 `MaxConcurrent` 校验） | 设置不生效、默认值异常 |

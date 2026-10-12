@@ -12,6 +12,7 @@ export type Config = main.Config;
 export type StartRequest = main.StartRequest;
 export type UpdateInfo = main.UpdateInfo;
 export type UpdateStatus = main.UpdateStatus;
+export type OrganizeGroup = main.OrganizeGroup;
 
 /** Task lifecycle, matching the TaskStatus constants in manager.go. */
 export type TaskStatus =
@@ -190,6 +191,26 @@ export function groupOf(name: string): string {
  */
 export function taskLabel(task: { name: string; url: string }): string {
   return task.name || task.url;
+}
+
+/**
+ * A display name for a URL whose filename is not known yet: the last path
+ * segment without query or fragment, decoded when possible. Falls back to the
+ * whole URL when there is no usable tail.
+ */
+export function urlTail(raw: string): string {
+  let s = raw;
+  const cut = s.search(/[?#]/);
+  if (cut >= 0) s = s.slice(0, cut);
+  const slash = s.lastIndexOf("/");
+  if (slash >= 0) s = s.slice(slash + 1);
+  if (!s) return raw;
+  try {
+    s = decodeURIComponent(s);
+  } catch {
+    // Keep the raw tail: a malformed escape is still more readable whole.
+  }
+  return s || raw;
 }
 
 /** Human-readable status labels, used by the status badge and the sort. */

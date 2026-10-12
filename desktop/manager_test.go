@@ -450,11 +450,18 @@ func TestBeforeCloseAllowsClosing(t *testing.T) {
 		app.mu.Unlock()
 	}
 
-	// Minimise-to-tray on, nothing transferring: the close must go through,
-	// because there is no tray icon to bring the window back from.
+	// Minimise-to-tray on: the close always becomes a hide, because the tray
+	// icon (with 显示窗口/退出) brings the window back. Real exits go through
+	// the tray's 退出 item. The hide call is spied (not executed): the real
+	// runtime.WindowHide aborts the process on a foreign context.
+	hidden := false
+	app.hide = func(context.Context) { hidden = true }
 	setTray(true)
-	if app.beforeClose(context.Background()) {
-		t.Error("close refused with no active transfers; the window would be impossible to shut")
+	if !app.beforeClose(context.Background()) {
+		t.Error("close went through with minimise-to-tray on; there would be no way back except the tray")
+	}
+	if !hidden {
+		t.Error("minimise-to-tray on but the window was never hidden")
 	}
 
 	// Minimise-to-tray off: never refuse.
@@ -856,6 +863,138 @@ func TestRemoveLeavesEveryFileAlone(t *testing.T) {
 	// Nothing may remain in the index either.
 	if _, ok := find(app.mgr, task.ID); ok {
 		t.Error("the task is still listed")
+	}
+}
+
+// TestOrganizeTarget maps finished filenames to group folders.
+func TestOrganizeTarget(t *testing.T) {
+	groups := []OrganizeGroup{
+		{Name: "Programs", Exts: []string{"exe", "msi"}},
+		{Name: "Archives", Exts: []string{"zip"}},
+	}
+	cases := []struct {
+		name, want string
+	}{
+		{"setup.exe", filepath.Join("dl", "Programs", "setup.exe")},
+		{"SETUP.EXE", filepath.Join("dl", "Programs", "SETUP.EXE")},
+		{"a.zip", filepath.Join("dl", "Archives", "a.zip")},
+		{"notes.txt", ""},
+		{"noext", ""},
+		{"trailing.", ""},
+	}
+	for _, c := range cases {
+		if got := organizeTarget(groups, "dl", c.name); got != c.want {
+			t.Errorf("organizeTarget(%q) = %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
+// TestNormalizeOrganizeGroups drops what cannot be a folder or an extension.
+func TestNormalizeOrganizeGroups(t *testing.T) {
+	in := []OrganizeGroup{
+		{Name: "  Programs  ", Exts: []string{".EXE", " msi ", "", ".."}},
+		{Name: "..", Exts: []string{"bin"}},
+		{Name: "Empty", Exts: []string{}},
+		{Name: "Bad/Name", Exts: []string{"bin"}},
+	}
+	got := normalizeOrganizeGroups(in)
+	if len(got) != 2 {
+		t.Fatalf("got %d groups, want 2 (%v)", len(got), got)
+	}
+	if got[0].Name != "Programs" {
+		t.Errorf("name = %q, want trimmed Programs", got[0].Name)
+	}
+	if len(got[0].Exts) != 2 || got[0].Exts[0] != "exe" || got[0].Exts[1] != "msi" {
+		t.Errorf("exts = %v, want [exe msi]", got[0].Exts)
+	}
+	if got[1].Name != "Name" || len(got[1].Exts) != 1 {
+		t.Errorf("second = %+v, want Name/[bin]", got[1])
+	}
+}
+
+// TestOrganizeTarget HonorsAbsoluteDir covers a group pointed elsewhere.
+func TestOrganizeTargetHonorsAbsoluteDir(t *testing.T) {
+	groups := []OrganizeGroup{
+		{Name: "Programs", Exts: []string{"exe"}},
+		{Name: "Elsewhere", Exts: []string{"zip"}, Dir: `D:\Vault`},
+	}
+	if got := organizeTarget(groups, `C:\Dl`, "a.zip"); got != filepath.Join(`D:\Vault`, "a.zip") {
+		t.Errorf("absolute dir = %q", got)
+	}
+	if got := organizeTarget(groups, `C:\Dl`, "a.exe"); got != filepath.Join(`C:\Dl`, "Programs", "a.exe") {
+		t.Errorf("relative dir = %q", got)
+	}
+}
+
+// TestOrganizeMovesAutomaticTaskIntoGroup downloads end to end and checks the
+// finished file lands in its group folder, not the download root.
+func TestOrganizeMovesAutomaticTaskIntoGroup(t *testing.T) {
+	want := payload(256 << 10)
+	srv := rangedServer(t, want, 5*time.Millisecond)
+
+	app := newTestApp(t)
+	cfg := app.Config()
+	cfg.OrganizeEnabled = true
+	cfg.OrganizeGroups = []OrganizeGroup{{Name: "Bins", Exts: []string{"bin"}}}
+	dir := t.TempDir()
+	cfg.OrganizeDir = dir
+	if err := app.SetConfig(cfg); err != nil {
+		t.Fatalf("SetConfig: %v", err)
+	}
+
+	task, err := app.mgr.Start(StartRequest{
+		URL: srv.URL + "/tool.bin", Dest: dir, Conns: 2, Start: true,
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	waitFor(t, "the task to complete", 60*time.Second, func() bool {
+		v, ok := find(app.mgr, task.ID)
+		return ok && v.Status == StatusCompleted
+	})
+
+	v, _ := find(app.mgr, task.ID)
+	wantDest := filepath.Join(dir, "Bins", "tool.bin")
+	if v.Dest != wantDest {
+		t.Errorf("dest = %q, want %q", v.Dest, wantDest)
+	}
+	if _, err := os.Stat(wantDest); err != nil {
+		t.Errorf("organized file missing: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "tool.bin")); !os.IsNotExist(err) {
+		t.Error("a copy was left in the download root")
+	}
+}
+
+// TestOrganizeLeavesManualTasksAlone covers the dialog path: a task the user
+// placed explicitly is never re-sorted on completion.
+func TestOrganizeLeavesManualTasksAlone(t *testing.T) {
+	want := payload(256 << 10)
+	srv := rangedServer(t, want, 5*time.Millisecond)
+
+	app := newTestApp(t)
+	cfg := app.Config()
+	cfg.OrganizeEnabled = true
+	cfg.OrganizeGroups = []OrganizeGroup{{Name: "Bins", Exts: []string{"bin"}}}
+	if err := app.SetConfig(cfg); err != nil {
+		t.Fatalf("SetConfig: %v", err)
+	}
+	dir := t.TempDir()
+
+	task, err := app.mgr.Start(StartRequest{
+		URL: srv.URL + "/tool.bin", Dest: dir, Conns: 2, Start: true, Manual: true,
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	waitFor(t, "the task to complete", 60*time.Second, func() bool {
+		v, ok := find(app.mgr, task.ID)
+		return ok && v.Status == StatusCompleted
+	})
+
+	v, _ := find(app.mgr, task.ID)
+	if v.Dest != filepath.Join(dir, "tool.bin") {
+		t.Errorf("manual task moved to %q, want it left alone", v.Dest)
 	}
 }
 
