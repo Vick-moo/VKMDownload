@@ -16,7 +16,7 @@
 
 - **多连接分片下载** —— 每段一个独立 HTTP 请求，各自写入文件的不同偏移
 - **动态分段** —— 某个 worker 空闲时，把最长的剩余段对半切开交给它，不让慢连接拖住整体
-- **断点续传** —— 进度写进 sidecar（`.vkmdownload.json`），取消 / 崩溃后可继续
+- **断点续传** —— 进度写进 sidecar（`.vkmdownload.json`），暂停 / 崩溃后可继续（取消会丢弃断点）
 - **一致性校验** —— 用 ETag / Last-Modified 判断服务器端文件是否变过；变了就重下，不拼接
 - **自适应降级** —— 服务器不支持 Range 时自动退回单连接流式下载
 - **重试与退避** —— 网络中断、5xx、429 按指数退避重试；4xx 直接失败不做无用功
@@ -73,7 +73,7 @@
    | Opera | `opera://extensions` |
 
 3. 打开右上角的**「开发者模式」**
-4. 点**「加载已解压的扩展程序」**，选择解压出来的 **`extension` 目录本身**
+4. 点**「加载已解压的扩展程序」**，选择解压出来的目录本身（能看到 `manifest.json` 的那层）
 
 > **⚠️ 如果装过 IDM 或其它下载器的扩展，先把它关掉。** 两个扩展都监听同一个下载事件，
 > 会互相抢，结果是下载失败或下载两遍。
@@ -117,8 +117,12 @@ vdl get https://example.com/big.zip -resume                    # 断点续传
 | `-o` | 服务器建议的文件名 | 输出文件或目录 |
 | `-min-segment` | 1 MiB | 最小分片大小，小文件不会被切碎 |
 | `-reserve` | 512 KiB | worker 一次认领多少字节 |
+| `-chunk-size` | 128 KiB | 读写缓冲，超 256 KiB 会被钳住 |
 | `-H` | | 附加请求头，可重复，如 `-H 'Cookie: a=b'` |
 | `-proxy` | | 代理地址，留空则读环境变量 |
+| `-insecure` | 关 | 跳过 TLS 证书校验（仅排障用） |
+| `-timeout` | 无 | 整次下载超时，0 表示不限 |
+| `-resume` | 开 | 断点续传，默认即开 |
 | `-json` | | 以 JSON 输出结果 |
 
 ---
@@ -160,7 +164,7 @@ big.zip.vkmdownload.json     分段进度 + ETag + 总大小
 ```
 
 全部下载完成后，`.part` 被重命名为成品名，`.json` 被删除。
-续传前会校验 ETag / Last-Modified / 总大小，任何一项不一致就丢弃重来——
+续传前会校验链接地址、ETag / Last-Modified / 总大小，任何一项不一致就丢弃重来——
 把两次不同版本的数据拼在一起，会得到一个长度完全正确、内容却是坏的的文件。
 
 ### 分片进度用两个计数器，不是一个
@@ -188,8 +192,9 @@ big.zip.vkmdownload.json     分段进度 + ETag + 总大小
 ### 测试服务器比真服务器更"坏"
 
 `testsrv/` 是一个可编程的恶劣服务器：`-fake-range` 会自称支持 Range 却总是返回 200；
-`-drop-after` 在指定字节后硬断连接；`-lie-content-length` 谎报长度；
-`-no-head` 对 HEAD 返回 405；`-require-cookie` 不给 cookie 就 403。
+`-ignore-if-range` 无视 `If-Range` 照样返回 200；`-drop-after` 在指定字节后硬断连接；
+`-drop-prob` 按概率随机断流；`-lie-content-length` 谎报长度；
+`-no-range` 完全不提供 Range；`-require-cookie` 不给 cookie 就 403。
 引擎的探测逻辑之所以**不信** `Accept-Ranges` 头、只信实测的 206 响应，就是被它逼出来的。
 
 ### 扩展为什么不用 native messaging
@@ -234,6 +239,7 @@ desktop/             Wails 桌面应用（Go 后端 + React 前端）
 extension/           浏览器扩展（Chromium 系）
 design/DESIGN.md     设计文档
 PLAN.md              实施计划与已知取舍
+CODEMAP.md           给 AI 看的维修地图：改某功能先看哪
 ```
 
 ---
