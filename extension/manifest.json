@@ -1,13 +1,17 @@
 {
   "manifest_version": 3,
   "name": "VKMDownload",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "把浏览器里的下载交给 VKMDownload，不再让浏览器自己下。",
   "minimum_chrome_version": "103",
 
-  "permissions": ["downloads", "contextMenus", "storage", "notifications"],
+  "permissions": ["downloads", "contextMenus", "storage", "notifications", "cookies"],
 
-  "host_permissions": ["http://127.0.0.1/*"],
+  "host_permissions": [
+    "http://127.0.0.1/*",
+    "https://*.google.com/*",
+    "https://*.googleusercontent.com/*"
+  ],
 
   "background": {
     "service_worker": "background.js"

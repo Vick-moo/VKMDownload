@@ -12,6 +12,10 @@ interface Props {
   initialFilename?: string;
   /** Carried through to the created task; some hosts require it. */
   initialReferer?: string;
+  /** Browser cookies for the URL, replayed by the engine; never shown. */
+  initialCookie?: string;
+  /** Browser UA, replayed when the engine's default is refused. */
+  initialUserAgent?: string;
   /** True when opened to place an intercepted download: closing abandons it,
       and the browser-hint below applies. */
   fromAsk?: boolean;
@@ -33,6 +37,8 @@ export function NewTaskDialog({
   initialURL,
   initialFilename,
   initialReferer,
+  initialCookie,
+  initialUserAgent,
   fromAsk,
   config,
   onClose,
@@ -42,6 +48,8 @@ export function NewTaskDialog({
   const [dest, setDest] = useState("");
   const [filename, setFilename] = useState("");
   const [referer, setReferer] = useState("");
+  const [cookie, setCookie] = useState("");
+  const [userAgent, setUserAgent] = useState("");
   const [conns, setConns] = useState(8);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -55,6 +63,8 @@ export function NewTaskDialog({
     setError("");
     setFilename(initialFilename ?? "");
     setReferer(initialReferer ?? "");
+    setCookie(initialCookie ?? "");
+    setUserAgent(initialUserAgent ?? "");
     setBusy(false);
     setDest(config?.downloadDir ?? "");
     setConns(config?.connections ?? 8);
@@ -94,6 +104,8 @@ export function NewTaskDialog({
         filename: filename.trim(),
         connections: conns,
         referer,
+        cookie,
+        userAgent,
         start,
       } as never);
       onCreated();

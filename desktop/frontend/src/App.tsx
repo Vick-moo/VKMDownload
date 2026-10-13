@@ -51,6 +51,9 @@ function App(): JSX.Element {
   /** Prefill for the ask-location flow; empty for a manual dialog. */
   const [dialogFilename, setDialogFilename] = useState("");
   const [dialogReferer, setDialogReferer] = useState("");
+  /** Browser credentials carried through the ask-location flow; never shown. */
+  const [dialogCookie, setDialogCookie] = useState("");
+  const [dialogUserAgent, setDialogUserAgent] = useState("");
   const [dialogAsk, setDialogAsk] = useState(false);
   /** From the binding; shown at the foot of the sidebar. */
   const [version, setVersion] = useState("");
@@ -140,19 +143,23 @@ function App(): JSX.Element {
         setDialogURL(url);
         setDialogFilename("");
         setDialogReferer("");
+        setDialogCookie("");
+        setDialogUserAgent("");
         setDialogAsk(false);
         setDialogOpen(true);
       }),
       // Ask-location arrivals (extension or clipboard): nothing is created
       // yet. The dialog collects the placement; closing it abandons the
       // download, which is what the user chose.
-      on<{ url: string; filename: string; referer: string }>(
+      on<{ url: string; filename: string; referer: string; cookie: string; userAgent: string }>(
         EVENTS.locationAsk,
         (req) => {
           setPendingURL(req.url);
           setDialogURL(req.url);
           setDialogFilename(req.filename ?? "");
           setDialogReferer(req.referer ?? "");
+          setDialogCookie(req.cookie ?? "");
+          setDialogUserAgent(req.userAgent ?? "");
           setDialogAsk(true);
           setDialogOpen(true);
         },
@@ -573,6 +580,8 @@ function App(): JSX.Element {
         initialURL={dialogURL}
         initialFilename={dialogFilename}
         initialReferer={dialogReferer}
+        initialCookie={dialogCookie}
+        initialUserAgent={dialogUserAgent}
         fromAsk={dialogAsk}
         config={config}
         onClose={() => {

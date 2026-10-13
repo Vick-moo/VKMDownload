@@ -46,6 +46,14 @@ func main() {
 		OnShutdown:    app.shutdown,
 		OnBeforeClose: app.beforeClose,
 
+		// A second launch wakes the running instance instead of starting a
+		// new one: without this every double-click is a fully independent
+		// process with its own tray icon, loopback port and task list.
+		SingleInstanceLock: &options.SingleInstanceLock{
+			UniqueId:               "vkmdownload-single-instance",
+			OnSecondInstanceLaunch: app.onSecondInstance,
+		},
+
 		Windows: &windows.Options{
 			// The dark title bar matches the app shell; otherwise a bright bar
 			// sits on top of a dark window.

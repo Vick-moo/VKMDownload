@@ -31,7 +31,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
-$repo = 'vickmoololl-ui/VKMDownload'
+$repo = 'Vick-moo/VKMDownload'
 
 # --------------------------------------------------------------- 版本号 ---
 

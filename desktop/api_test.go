@@ -6,10 +6,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"vkmdownload/testsrv"
 )
 
 // startAPI launches the loopback endpoint and waits for it to accept requests.
@@ -174,6 +177,87 @@ func TestLocalAPIAddAsksForLocation(t *testing.T) {
 	if !found {
 		t.Errorf("events = %v, want a location:ask", events)
 	}
+}
+
+// TestLocalAPIAddForwardsBrowserCookies covers the login-session handover end
+// to end: the extension posts the browser's Cookie value with /add, and the
+// task replays it on every engine request. A cookie-gated testsrv stands in
+// for a Google Classroom private file — without the cookie it answers 403,
+// with it the download completes byte-complete.
+func TestLocalAPIAddForwardsBrowserCookies(t *testing.T) {
+	const size = 256 << 10
+
+	cfg := testsrv.DefaultConfig(size)
+	cfg.RequireCookie = "s3cret"
+	srv := testsrv.New(cfg)
+	srvBase, err := srv.Start("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("start testsrv: %v", err)
+	}
+	t.Cleanup(func() { _ = srv.Close() })
+	fileURL := srvBase + "/file"
+
+	// add hands the URL to the app the way the extension does and waits for
+	// the task to settle, returning its final status and destination.
+	add := func(t *testing.T, cookie string) (TaskStatus, string) {
+		t.Helper()
+		app := newTestApp(t)
+		// Ask-location would hold the arrival for placement instead: that
+		// path is covered by TestLocalAPIAddAsksForLocation.
+		disableAskLocation(t, app)
+		c := app.Config()
+		c.DownloadDir = t.TempDir()
+		if err := app.SetConfig(c); err != nil {
+			t.Fatalf("SetConfig: %v", err)
+		}
+		base := startAPI(t, app)
+
+		body, _ := json.Marshal(map[string]string{
+			"url":      fileURL,
+			"filename": "cookie.bin",
+			"cookie":   cookie,
+		})
+		resp := postJSON(t, base+"/add", "chrome-extension://abcdefghijklmnop", string(body))
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d, want 200", resp.StatusCode)
+		}
+		var got struct {
+			ID string `json:"id"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if got.ID == "" {
+			t.Fatal("no task id returned")
+		}
+		waitFor(t, "task to settle", 60*time.Second, func() bool {
+			v, ok := find(app.mgr, got.ID)
+			return ok && (v.Status == StatusCompleted || v.Status == StatusFailed)
+		})
+		v, _ := find(app.mgr, got.ID)
+		return v.Status, v.Dest
+	}
+
+	t.Run("with cookie completes", func(t *testing.T) {
+		status, dest := add(t, "session=s3cret")
+		if status != StatusCompleted {
+			t.Fatalf("status = %s, want completed", status)
+		}
+		st, err := os.Stat(dest)
+		if err != nil {
+			t.Fatalf("stat downloaded file: %v", err)
+		}
+		if st.Size() != size {
+			t.Errorf("size = %d, want %d", st.Size(), size)
+		}
+	})
+
+	t.Run("without cookie fails", func(t *testing.T) {
+		if status, _ := add(t, ""); status != StatusFailed {
+			t.Fatalf("status = %s, want failed without the cookie", status)
+		}
+	})
 }
 
 // TestLocalAPIRejectsAPage is the security boundary. A cross-origin POST from a

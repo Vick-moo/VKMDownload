@@ -124,6 +124,25 @@ function report(result, fallbackName) {
   });
 }
 
+/**
+ * The browser's cookies for a URL, serialised as a Cookie header value.
+ *
+ * The app downloads with its own HTTP client, so without this it looks like a
+ * stranger to any host that requires a login (Google Classroom / Drive
+ * private files redirect it to accounts.google.com). Returns "" when the
+ * cookies cannot be read — missing host permission or an unparsable URL —
+ * and the handover still proceeds without them.
+ */
+async function cookiesFor(raw) {
+  try {
+    const list = await chrome.cookies.getAll({ url: raw });
+    if (!Array.isArray(list) || list.length === 0) return "";
+    return list.map((c) => `${c.name}=${c.value}`).join("; ");
+  } catch {
+    return "";
+  }
+}
+
 /** The last path segment of a URL, decoded, for display only. */
 function nameFromUrl(raw) {
   try {
@@ -259,6 +278,8 @@ chrome.downloads.onCreated.addListener(async (item) => {
     url,
     filename: item.filename ? item.filename.split(/[\\/]/).pop() : "",
     referer: item.referrer || "",
+    cookie: await cookiesFor(url),
+    userAgent: navigator.userAgent || "",
   });
 
   // The app answered the policy question but refused the task itself. Put the
@@ -303,6 +324,8 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
     url,
     filename: nameFromUrl(url),
     referer: tab && tab.url ? tab.url : "",
+    cookie: await cookiesFor(url),
+    userAgent: navigator.userAgent || "",
   });
   report(result, nameFromUrl(url));
 });

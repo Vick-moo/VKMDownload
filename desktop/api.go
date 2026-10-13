@@ -209,6 +209,14 @@ type apiAddRequest struct {
 	URL      string `json:"url"`
 	Filename string `json:"filename"`
 	Referer  string `json:"referer"`
+	// Cookie is the browser's cookies for the URL, serialised as a Cookie
+	// header value. Hosts that require a login (Google Classroom / Drive
+	// private files) reject a client that arrives without them; the engine
+	// sends this back verbatim with every request for the task.
+	Cookie string `json:"cookie"`
+	// UserAgent is the browser's UA. Some hosts/WAFs refuse the engine's
+	// default non-browser UA, so the browser's own string is replayed.
+	UserAgent string `json:"userAgent"`
 }
 
 // apiAdd creates a task from a download the extension intercepted.
@@ -229,6 +237,17 @@ func (a *App) apiAdd(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "url is required"})
 		return
 	}
+	// Bounds on the replayed credentials: a normal browser Cookie header is a
+	// few KB. Without a cap a caller could stuff megabytes into task memory
+	// (the /add body limit alone would allow 1 MiB of it).
+	if len(req.Cookie) > 32<<10 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "cookie is too large"})
+		return
+	}
+	if len(req.UserAgent) > 4<<10 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "user agent is too large"})
+		return
+	}
 
 	cfg := a.Config()
 	if cfg.AskLocation {
@@ -237,23 +256,27 @@ func (a *App) apiAdd(w http.ResponseWriter, r *http.Request) {
 		// The reply stays 200 with no id so the extension does not fall back
 		// to a browser download of something the user is about to place.
 		fn := sanitizeSuggestedName(req.Filename)
-		a.debugLog("extension asked %s (origin=%q ua=%q)",
-			req.URL, r.Header.Get("Origin"), r.Header.Get("User-Agent"))
+		a.debugLog("extension asked %s (origin=%q ua=%q cookie=%dB)",
+			req.URL, r.Header.Get("Origin"), r.Header.Get("User-Agent"), len(req.Cookie))
 		a.emit("location:ask", map[string]string{
-			"url":      req.URL,
-			"filename": fn,
-			"referer":  req.Referer,
+			"url":       req.URL,
+			"filename":  fn,
+			"referer":   req.Referer,
+			"cookie":    req.Cookie,
+			"userAgent": req.UserAgent,
 		})
 		writeJSON(w, http.StatusOK, map[string]any{"pending": true, "name": fn})
 		return
 	}
 	task, err := a.mgr.Start(StartRequest{
-		URL:      req.URL,
-		Filename: sanitizeSuggestedName(req.Filename),
-		Dest:     cfg.DownloadDir,
-		Conns:    cfg.Connections,
-		Start:    cfg.AutoStart,
-		Referer:  req.Referer,
+		URL:       req.URL,
+		Filename:  sanitizeSuggestedName(req.Filename),
+		Dest:      cfg.DownloadDir,
+		Conns:     cfg.Connections,
+		Start:     cfg.AutoStart,
+		Referer:   req.Referer,
+		Cookie:    req.Cookie,
+		UserAgent: req.UserAgent,
 	})
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
@@ -264,8 +287,8 @@ func (a *App) apiAdd(w http.ResponseWriter, r *http.Request) {
 	// with no extension installed in any browser, and nothing in the log could
 	// say where they came from — which made it impossible to tell a bug from
 	// something else on the machine calling the endpoint.
-	a.debugLog("extension added %s (origin=%q ua=%q)",
-		req.URL, r.Header.Get("Origin"), r.Header.Get("User-Agent"))
+	a.debugLog("extension added %s (origin=%q ua=%q cookie=%dB)",
+		req.URL, r.Header.Get("Origin"), r.Header.Get("User-Agent"), len(req.Cookie))
 	writeJSON(w, http.StatusOK, map[string]any{"id": task.ID, "name": task.Name})
 }
 

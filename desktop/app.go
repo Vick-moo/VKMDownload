@@ -10,11 +10,12 @@ import (
 	"sync"
 	"time"
 
+	"github.com/wailsapp/wails/v2/pkg/options"
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
 // appVersion is what Version() reports and the browser extension displays.
-const appVersion = "0.2.3"
+const appVersion = "0.2.4"
 
 // App is the object exposed to the front-end. Every exported method becomes a
 // callable binding, so internal state is kept unexported.
@@ -161,6 +162,19 @@ func (a *App) beforeClose(ctx context.Context) (prevent bool) {
 	}
 	a.hide(ctx)
 	return true
+}
+
+// onSecondInstance runs in the first instance when the user launches the app
+// again. The second process exits on its own; this only brings the existing
+// window back. Both calls matter: Unminimise covers a taskbar-minimised
+// window, Show covers a tray-hidden one — the same pair the tray's 显示窗口
+// item relies on.
+func (a *App) onSecondInstance(_ options.SecondInstanceData) {
+	if a.ctx == nil {
+		return
+	}
+	runtime.WindowUnminimise(a.ctx)
+	runtime.WindowShow(a.ctx)
 }
 
 // ------------------------------------------------------------------ paths

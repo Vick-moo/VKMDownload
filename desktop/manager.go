@@ -117,6 +117,10 @@ type task struct {
 	// referer is sent with every request for this task. Set once at creation and
 	// never changed, so it needs no lock.
 	referer string
+	// cookie and userAgent are the browser's credentials replayed for this
+	// task, like referer above. Set once at creation, never changed.
+	cookie    string
+	userAgent string
 }
 
 // waitStopped blocks until the transfer goroutine has exited, or the timeout
@@ -145,6 +149,16 @@ type StartRequest struct {
 	// supplies it, because some hosts refuse a download whose request does not
 	// appear to come from their own page.
 	Referer string `json:"referer"`
+	// Cookie is the browser's cookies for the URL, replayed verbatim. Without
+	// it the engine looks like a stranger to hosts that require a login
+	// (Google Classroom / Drive private files) and is bounced to a sign-in
+	// page. Empty for manual and clipboard tasks, which have no browser
+	// session to borrow.
+	Cookie string `json:"cookie"`
+	// UserAgent overrides the engine's default non-browser UA. Some
+	// hosts/WAFs refuse unknown agents, so the browser's own string is
+	// replayed when the extension supplied one.
+	UserAgent string `json:"userAgent"`
 	// Manual marks a task the user placed explicitly (the dialog). Automatic
 	// arrivals leave it false, which is what the organize step keys on: only
 	// unplaced tasks are sorted into group folders on completion.
@@ -306,7 +320,13 @@ func (m *Manager) Start(req StartRequest) (TaskView, error) {
 		conns = cfg.Connections
 	}
 
-	t := &task{referer: strings.ReplaceAll(strings.ReplaceAll(strings.TrimSpace(req.Referer), "\r", ""), "\n", ""), manual: req.Manual}
+	t := &task{
+		// Strip CR/LF so a crafted value cannot smuggle an extra header line.
+		referer:   strings.ReplaceAll(strings.ReplaceAll(strings.TrimSpace(req.Referer), "\r", ""), "\n", ""),
+		cookie:    strings.ReplaceAll(strings.ReplaceAll(strings.TrimSpace(req.Cookie), "\r", ""), "\n", ""),
+		userAgent: strings.ReplaceAll(strings.ReplaceAll(strings.TrimSpace(req.UserAgent), "\r", ""), "\n", ""),
+		manual:    req.Manual,
+	}
 	t.view = TaskView{
 		ID:      id,
 		URL:     url,
@@ -864,10 +884,18 @@ func (m *Manager) run(t *task, ctx context.Context, cancel context.CancelFunc, d
 		opt.Transport.ProxyURL = cfg.Proxy
 	}
 	// Sent when the task came from the browser extension. Some hosts refuse a
-	// download whose request does not appear to come from their own page.
+	// download whose request does not appear to come from their own page, and
+	// hosts that require a login reject a client that arrives without the
+	// browser's cookies at all.
+	opt.Headers = http.Header{}
 	if t.referer != "" {
-		opt.Headers = http.Header{}
 		opt.Headers.Set("Referer", t.referer)
+	}
+	if t.cookie != "" {
+		opt.Headers.Set("Cookie", t.cookie)
+	}
+	if t.userAgent != "" {
+		opt.Headers.Set("User-Agent", t.userAgent)
 	}
 
 	dl, err := engine.New(opt)
