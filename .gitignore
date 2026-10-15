@@ -27,6 +27,11 @@ wailsjs/
 Thumbs.db
 desktop.ini
 
+# Agent-to-agent private notes: locations of out-of-repo secrets. The rules
+# themselves live in CODEMAP (public notes section), so ignoring this file
+# loses nothing for a fresh clone.
+PRIVATE.md
+
 # Local debug traces
 *.trace.log
 *.corrupt
