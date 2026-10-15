@@ -64,6 +64,37 @@ func (l *Limiter) Rate() int64 {
 	return l.rate
 }
 
+// SetRate changes the ceiling live, without replacing the limiter. Running
+// transfers share the instance, so they pick the new rate up on their next
+// Wait instead of needing a stop/start cycle. A non-positive rate means
+// unlimited. The token balance is kept (clamped to the new capacity) rather
+// than refilled, so flipping the setting cannot bank a burst.
+func (l *Limiter) SetRate(bytesPerSecond int64) {
+	if l == nil {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	l.rate = bytesPerSecond
+	capacity := float64(bytesPerSecond) / 2 // allow a half-second burst
+	if capacity < minimumBurst {
+		capacity = minimumBurst
+	}
+	l.capacity = capacity
+	if l.tokens > l.capacity {
+		l.tokens = l.capacity
+	}
+}
+
+// cap returns the bucket size under lock: Wait reads it on every block, so a
+// SetRate racing a transfer must not tear it.
+func (l *Limiter) cap() float64 {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.capacity
+}
+
 // Wait blocks until n bytes may be transferred, or ctx is cancelled.
 //
 // It returns ctx.Err() in that case so a paused transfer stops promptly rather
@@ -78,8 +109,8 @@ func (l *Limiter) Wait(ctx context.Context, n int) error {
 		// Never ask for more than the bucket can hold, or a request larger than
 		// the capacity could never be satisfied.
 		take := remaining
-		if take > l.capacity {
-			take = l.capacity
+		if c := l.cap(); take > c {
+			take = c
 		}
 
 		wait, ok := l.reserve(take)
@@ -110,6 +141,11 @@ func (l *Limiter) Wait(ctx context.Context, n int) error {
 func (l *Limiter) reserve(n float64) (time.Duration, bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+
+	// A non-positive rate (see SetRate) means unlimited: grant everything.
+	if l.rate <= 0 {
+		return 0, true
+	}
 
 	now := time.Now()
 	l.tokens += now.Sub(l.last).Seconds() * float64(l.rate)

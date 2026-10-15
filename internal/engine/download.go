@@ -202,6 +202,11 @@ type Downloader struct {
 	client *http.Client
 	opt    Options
 
+	// progressIntervalNs is the live progress-report cadence in nanoseconds.
+	// Trackers read it on every block, so the UI refresh setting retunes
+	// running transfers without restarting them.
+	progressIntervalNs atomic.Int64
+
 	userAgent string
 	retries   atomic.Int64
 }
@@ -213,7 +218,7 @@ func New(opt Options) (*Downloader, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Downloader{
+	d := &Downloader{
 		tr: tr,
 		client: &http.Client{
 			Transport: tr,
@@ -223,7 +228,23 @@ func New(opt Options) (*Downloader, error) {
 		},
 		opt:       opt,
 		userAgent: defaultUserAgent,
-	}, nil
+	}
+	d.progressIntervalNs.Store(int64(opt.ProgressInterval))
+	return d, nil
+}
+
+// SetProgressInterval retunes progress reporting live; running trackers pick
+// it up on their next block. Non-positive values restore the default.
+func (d *Downloader) SetProgressInterval(iv time.Duration) {
+	if iv <= 0 {
+		iv = 250 * time.Millisecond
+	}
+	d.progressIntervalNs.Store(int64(iv))
+}
+
+// ProgressInterval reports the live cadence.
+func (d *Downloader) ProgressInterval() time.Duration {
+	return time.Duration(d.progressIntervalNs.Load())
 }
 
 // Options returns the normalized options in effect.
@@ -438,7 +459,7 @@ func (s *session) newTracker(initial, total int64) {
 		lastMark: initial,
 		start:    time.Now(),
 		lastEmit: time.Now(),
-		interval: s.d.opt.ProgressInterval,
+		interval: &s.d.progressIntervalNs,
 		step:     s.d.opt.ProgressBytes,
 		conns:    s.d.opt.Connections,
 		suggest:  s.probe.SuggestedName,
@@ -1302,7 +1323,13 @@ type progressTracker struct {
 	start    time.Time
 	lastEmit time.Time
 	lastMark int64
-	interval time.Duration
+	// delivered is the highest byte count handed to the callback so far.
+	// Snapshots are taken under mu but delivered outside it, so two workers
+	// can race: the one with the older snapshot must not rewind the UI.
+	delivered int64
+	// interval points at the downloader's live cadence: every block reads
+	// the current value, so retuning needs no restart.
+	interval *atomic.Int64
 	step     int64
 	conns    int
 	suggest  string
@@ -1319,8 +1346,9 @@ func (p *progressTracker) add(n int64) {
 	p.mu.Lock()
 	p.bytes += n
 	now := time.Now()
+	interval := time.Duration(p.interval.Load())
 	dt := now.Sub(p.lastEmit)
-	fire := dt >= p.interval || p.bytes-p.lastMark >= p.step
+	fire := dt >= interval || p.bytes-p.lastMark >= p.step
 
 	var speed float64
 	if fire {
@@ -1350,6 +1378,11 @@ func (p *progressTracker) reset() {
 	p.start = time.Now()
 	p.lastEmit = time.Now()
 	p.mu.Unlock()
+	// The delivery watermark belongs to the abandoned run: without this a
+	// fresh run's early reports would all clamp to the old total.
+	p.emitMu.Lock()
+	p.delivered = 0
+	p.emitMu.Unlock()
 }
 
 // finish forces a final 100% event.
@@ -1380,6 +1413,15 @@ func (p *progressTracker) emit(bytes, total int64, speed float64) {
 
 	if p.report == nil {
 		return
+	}
+
+	// Snapshots are taken outside the counter lock, so a worker holding an
+	// older snapshot can arrive here after a newer one. Clamp it: callbacks
+	// must never see the count go backwards.
+	if bytes < p.delivered {
+		bytes = p.delivered
+	} else {
+		p.delivered = bytes
 	}
 
 	prog := Progress{

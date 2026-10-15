@@ -171,6 +171,99 @@
   (never hold a lock across StopAll: its paths emit too). Full suite green,
   exe rebuilt + restarted.
 
+### 17. UI refresh rate setting (fast/medium/slow)
+- New setting in Settings: fast 250ms (today's behaviour, default),
+  medium 650ms, slow 1000ms. Controls engine progress-report interval only;
+  transfer speed untouched; applies to newly started runs.
+- Wiring: Config.RefreshRate + normalize + refreshInterval() in run();
+  select dropdown in SettingsPage. Old configs without the key fall back
+  to fast (no visible change on upgrade).
+- Test: TestRefreshIntervalMapping. vet/tsc/build/tests green, app restarted.
+
+### 18. Queued rows can now pause + speed-limit self-check documented
+- Queued rows showed only resume; backend Pause always accepted queued.
+  Frontend now shows pause on queued rows too (stops auto-queue), plus
+  space-shortcut support. No backend change.
+- User speed report diagnosed as self-imposed: speedLimitKb=1000 caps the
+  total at ~1MB/s (matches the 1.1MiB/s screenshot exactly). Fix is settings
+  change to 0, not code. part01 0B row has a dead (expired) link: re-click
+  from the site for a fresh token.
+- Verified: build + tsc clean, app restarted.
+
+### 19. Settings apply live: concurrency + speed (no restart needed)
+- Raising MaxConcurrent pulls queued tasks in at once (SetConfig pumps only
+  on increase). Lowering never kills running transfers; the queue gate
+  honours the new value by itself.
+- Speed limit retunes the shared limiter in place (new Limiter.SetRate):
+  running transfers feel it on their next block. Unlimited included.
+- Fixed a latent race found on the way: progress snapshots taken outside
+  the lock could be delivered out of order (TestProgressIsMonotonic failed
+  on a clean tree too). Emission now clamps to a delivery watermark.
+- Tests: TestLimiterSetRateAppliesLive, TestApplySpeedLimitRetunesLive.
+  Engine + desktop suites green incl. -race on progress/limiter. Exe rebuilt
+  and app restarted.
+
+### 20. Refresh rate applies live too
+- SetConfig now pushes the cadence to every running transfer
+  (livedl registry in Manager + Downloader.SetProgressInterval; trackers
+  read the atomic value per block). No restart, no re-probe.
+- Tests: TestDownloaderProgressIntervalLive,
+  TestApplyRefreshIntervalReachesLive. Engine + desktop green incl. race.
+  Exe rebuilt and app restarted.
+
+### 21. Column drag ripples to other dividers (bug, fixed)
+- Symptom: dragging one header divider moved other columns too.
+- Root cause: the borrow loop spilled to further neighbours once the
+  adjacent one hit its minimum, changing the total and triggering the
+  proportional rebalancer across all columns.
+- Fix: a divider moves only its two sharing columns by equal and opposite
+  amounts (growth bounded by what the neighbour can surrender); total stays
+  constant so layoutWidths is a no-op and every other divider is untouched.
+- Verified: build + tsc clean, app restarted. Needs human drag check.
+
+### 22. Column drag blinks past the stop (fixed)
+- Symptom: holding the drag past a column's limit flickered the list.
+- Root cause: every mousemove issued setPrefs (new array identity) even
+  with zero change, repainting the list and rewriting localStorage at
+  pointer rate.
+- Fix: early return when the clamped width equals the current one.
+- Verified: build + tsc clean, app restarted. Needs human drag check.
+
+### 23. Size column too narrow
+- Widened size/added-time column default 104->124, minimum 84->104.
+  Note: widths persist in localStorage, so existing installs keep old
+  widths until a divider is double-clicked to reset. Exe rebuilt+restarted.
+
+### 24. Column drag snaps back at the limit (bug, fixed)
+- Symptom: pulling past a column's stop made the edge jump back and blink.
+- Root cause: the growth cap mixed the drag-start base with the LIVE
+  neighbour room, so the cap collapsed to the start value the instant the
+  neighbour ran out - one frame snaps the column back, the next fights
+  forward again.
+- Fix: clamp the absolute pointer target against current-value bounds only.
+  At the stop the target equals the current width and the early return
+  holds it still.
+- Verified: build + tsc clean, app restarted. Needs human drag check.
+
+### 25. Column drag cascades through pinned neighbours
+- Request: dragging the divider left of a column that needs space should
+  automatically push pinned columns further along, no manual pre-moving.
+- Behaviour: dragging a boundary moves it; the growing side takes, the
+  shrinking side gives nearest-first down to minimums; the far side is
+  never touched and the total stays constant (rebalancer stays out).
+  Exhausted side means the edge stops; same-array return skips renders.
+- Verified: build (incl. tsc via vite) + tsc clean, app restarted. Human
+  drag check needed.
+
+### 26. Column drag runaway (bug, fixed)
+- Symptom: a small drag flew the divider to the screen end.
+- Root cause: the clamped delta (absolute from drag start) was ADDED onto
+  live state every move instead of recomputed from the drag-start base -
+  quadratic accumulation.
+- Fix: snapshot prefs at mousedown; every move rebuilds from that base.
+  1:1 tracking restored.
+- Verified: build + tsc clean, app restarted. Human drag check needed.
+
 ## TODO (user requested, work later)
 
 - Detached ask-location dialog in its own small window (no main window).

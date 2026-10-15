@@ -107,3 +107,46 @@ func TestNilLimiterIsUnlimited(t *testing.T) {
 		t.Error("NewLimiter(-1) should mean unlimited, so it must return nil")
 	}
 }
+
+// TestLimiterSetRateAppliesLive pins in-place retuning: running transfers
+// share the instance, so a new ceiling must reach them without a restart.
+func TestLimiterSetRateAppliesLive(t *testing.T) {
+	lim := NewLimiter(1 << 10) // 1 KiB/s: anything real takes ages
+	if lim == nil {
+		t.Fatal("NewLimiter returned nil for a positive rate")
+	}
+	ctx := context.Background()
+
+	if err := lim.Wait(ctx, int(minimumBurst)); err != nil {
+		t.Fatalf("draining the burst: %v", err)
+	}
+
+	// Open the tap wide: the same Wait that would have taken minutes must
+	// now finish at once, on the same instance.
+	lim.SetRate(100 << 20)
+	if got := lim.Rate(); got != 100<<20 {
+		t.Errorf("Rate = %d, want %d", got, 100<<20)
+	}
+	start := time.Now()
+	if err := lim.Wait(ctx, 1<<20); err != nil {
+		t.Fatalf("Wait: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Errorf("Wait after SetRate took %v; the new rate did not apply", elapsed)
+	}
+
+	// Zero means unlimited, also live and on the same instance.
+	lim.SetRate(0)
+	if got := lim.Rate(); got != 0 {
+		t.Errorf("Rate = %d, want 0", got)
+	}
+	if err := lim.Wait(ctx, 10<<20); err != nil {
+		t.Fatalf("unlimited Wait: %v", err)
+	}
+
+	var nilLim *Limiter
+	nilLim.SetRate(1 << 10) // must not panic
+	if err := nilLim.Wait(ctx, 1); err != nil {
+		t.Errorf("nil limiter Wait: %v", err)
+	}
+}

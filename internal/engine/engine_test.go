@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -622,9 +623,11 @@ func TestProgressTrackerThrottles(t *testing.T) {
 		reports int
 		saves   int
 	)
+	iv := atomic.Int64{}
+	iv.Store(int64(time.Hour)) // only the byte threshold can fire
 	p := &progressTracker{
 		total:    1 << 30,
-		interval: time.Hour, // only the byte threshold can fire
+		interval: &iv,
 		step:     100,
 		start:    time.Now(),
 		lastEmit: time.Now(),
@@ -650,9 +653,11 @@ func TestProgressTrackerETAUsesSeconds(t *testing.T) {
 	// it to a Duration without scaling by time.Second inflates the estimate by
 	// a factor of 1e9, which previously produced absurd ETAs.
 	var got Progress
+	iv := atomic.Int64{}
+	iv.Store(int64(time.Nanosecond))
 	p := &progressTracker{
 		total:    1000,
-		interval: time.Nanosecond,
+		interval: &iv,
 		step:     1,
 		start:    time.Now().Add(-time.Second),
 		lastEmit: time.Now().Add(-time.Second),
@@ -713,6 +718,28 @@ func TestMoveFileCreatesParentDirectory(t *testing.T) {
 // ---------------------------------------------------------------------------
 // Probe against a hand-written handler
 // ---------------------------------------------------------------------------
+
+// TestDownloaderProgressIntervalLive pins the live cadence: trackers read it
+// per block, so the default lands on construction and Set retunes after.
+func TestDownloaderProgressIntervalLive(t *testing.T) {
+	d, err := New(Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+
+	if got := d.ProgressInterval(); got != 250*time.Millisecond {
+		t.Errorf("default interval = %v, want 250ms", got)
+	}
+	d.SetProgressInterval(650 * time.Millisecond)
+	if got := d.ProgressInterval(); got != 650*time.Millisecond {
+		t.Errorf("interval = %v, want 650ms", got)
+	}
+	d.SetProgressInterval(0)
+	if got := d.ProgressInterval(); got != 250*time.Millisecond {
+		t.Errorf("interval after reset = %v, want 250ms", got)
+	}
+}
 
 func TestProbeReportsRangeSupportFromBehaviour(t *testing.T) {
 	body := make([]byte, 4096)

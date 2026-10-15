@@ -166,12 +166,12 @@ export function TaskRow({
       </div>
 
       <div className="task__actions" onClick={(e) => e.stopPropagation()}>
-        {task.status === "downloading" ? (
+        {task.status === "downloading" || task.status === "queued" ? (
           <button
             type="button"
             className="icon-btn"
             aria-label="暂停"
-            title="暂停"
+            title={task.status === "queued" ? "暂停（不再自动排队等待）" : "暂停"}
             onClick={() => void run(() => api.pauseTask(task.id))}
           >
             <IconPause size={16} />

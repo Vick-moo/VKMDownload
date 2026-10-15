@@ -421,7 +421,8 @@ function App(): JSX.Element {
         const id = [...selected][0];
         const t = tasks.find((x) => x.id === id);
         if (!t) return;
-        if (t.status === "downloading") void api.pauseTask(id).then(reload);
+        if (t.status === "downloading" || t.status === "queued")
+          void api.pauseTask(id).then(reload);
         else if (t.status === "paused") void api.resumeTask(id).then(reload);
       }
       // Delete removes the selected tasks.

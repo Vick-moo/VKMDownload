@@ -236,6 +236,7 @@ func (a *App) Config() Config {
 func (a *App) SetConfig(cfg Config) error {
 	cfg.normalize()
 	a.mu.Lock()
+	oldMax := a.cfg.MaxConcurrent
 	a.cfg = cfg
 	a.mu.Unlock()
 
@@ -243,6 +244,15 @@ func (a *App) SetConfig(cfg Config) error {
 		return err
 	}
 	a.RestartClipboardWatch()
+	// Live-apply without restarting transfers: the shared limiter retunes in
+	// place, and a raised task budget pulls queued work in at once. A lowered
+	// budget needs no action — running transfers finish, and the queue gate
+	// already honours the new value.
+	a.mgr.applySpeedLimit(cfg.SpeedLimitKB)
+	a.mgr.applyRefreshInterval(refreshInterval(cfg.RefreshRate))
+	if cfg.MaxConcurrent > oldMax {
+		a.mgr.pumpQueue()
+	}
 	return nil
 }
 

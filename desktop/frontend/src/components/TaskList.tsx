@@ -54,14 +54,14 @@ const COLUMNS: Column[] = [
  * room to spare the name column takes it. That is what keeps the list free of a
  * horizontal scrollbar at any window size.
  */
-const DEFAULT_WIDTHS = [280, 76, 104, 96, 120, 140];
+const DEFAULT_WIDTHS = [280, 76, 124, 96, 120, 140];
 
 /**
  * Smallest a column may be. Their total plus the padding and gaps is the
  * narrowest the list can render; below that the columns would overlap, so the
  * window's own minimum width is what actually guarantees this fits.
  */
-const MIN_WIDTHS = [140, 62, 84, 78, 96, 112];
+const MIN_WIDTHS = [140, 62, 104, 78, 96, 112];
 
 /** Where the column widths are remembered between sessions. */
 const WIDTHS_KEY = "vkmdownload.column-widths";
@@ -278,7 +278,10 @@ export function TaskList({
     e.preventDefault();
     e.stopPropagation();
     const startX = e.clientX;
-    const startPref = prefsRef.current[index];
+    // Absolute base for the whole gesture: every move recomputes from here,
+    // so applying per-move deltas on top of live state can never accumulate
+    // into a runaway (a small drag flying to the end of the screen).
+    const startPrefs = [...prefsRef.current];
     let moved = false;
 
     const onMove = (ev: MouseEvent) => {
@@ -292,35 +295,49 @@ export function TaskList({
         moved = true;
       }
 
-      // Driven by the pointer position rather than an accumulated delta, so the
-      // edge follows the cursor exactly.
-      const wanted = Math.max(
-        MIN_WIDTHS[index],
-        Math.min(560, startPref + delta),
-      );
-
-      setPrefs(() => {
-        const next = [...prefsRef.current];
-        let change = wanted - next[index];
-        if (change === 0) return next;
-        next[index] = wanted;
-
-        // The neighbours take up the difference, nearest first, so the total —
-        // and therefore every other divider — stays exactly where it was.
-        // Growing borrows from them; shrinking hands the width back.
-        for (let step = 1; step < next.length && change !== 0; step += 1) {
-          for (const i of [index + step, index - step]) {
-            if (i < 0 || i >= next.length || change === 0) continue;
-            if (change > 0) {
-              const room = next[i] - MIN_WIDTHS[i];
-              const take = Math.min(room, change);
-              next[i] -= take;
-              change -= take;
-            } else {
-              // `change` is negative, so subtracting it adds.
-              next[i] -= change;
-              change = 0;
-            }
+      // Directional cascade. Divider index sits between column index (left)
+      // and index+1 (right); dragging it moves that boundary, so one side
+      // grows exactly as much as the other side shrinks:
+      // - right: column index grows, the right group (index+1, +2, …) gives,
+      //   nearest first;
+      // - left: column index+1 grows, the left group (index, -1, …) gives.
+      // Columns on the other side are never touched, the total never changes
+      // (so the rebalancer stays out of it), and a pinned column simply
+      // passes the push further along — no manual pre-moving needed. When
+      // nothing can give, the edge stops; returning the previous array skips
+      // the render, the persist and the blink with it.
+      setPrefs((prev) => {
+        let d = delta;
+        if (d > 0) {
+          let room = 0;
+          for (let k = index + 1; k < startPrefs.length; k += 1) {
+            room += Math.max(startPrefs[k] - MIN_WIDTHS[k], 0);
+          }
+          d = Math.min(d, room, Math.max(560 - startPrefs[index], 0));
+        } else {
+          let room = 0;
+          for (let k = index; k >= 0; k -= 1) {
+            room += Math.max(startPrefs[k] - MIN_WIDTHS[k], 0);
+          }
+          d = -Math.min(-d, room, Math.max(560 - startPrefs[index + 1], 0));
+        }
+        if (d === 0) return prev;
+        const next = [...startPrefs];
+        if (d > 0) {
+          next[index] += d;
+          let rem = d;
+          for (let k = index + 1; k < next.length && rem > 0; k += 1) {
+            const give = Math.max(0, Math.min(next[k] - MIN_WIDTHS[k], rem));
+            next[k] -= give;
+            rem -= give;
+          }
+        } else {
+          next[index + 1] -= d;
+          let rem = -d;
+          for (let k = index; k >= 0 && rem > 0; k -= 1) {
+            const give = Math.max(0, Math.min(next[k] - MIN_WIDTHS[k], rem));
+            next[k] -= give;
+            rem -= give;
           }
         }
         return next;

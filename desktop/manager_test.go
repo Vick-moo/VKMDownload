@@ -1566,6 +1566,98 @@ func TestStartEmitsProgressImmediately(t *testing.T) {
 	app.mgr.StopAll()
 }
 
+// TestRefreshIntervalMapping pins the UI refresh tiers: fast is today's
+// 250ms behaviour, and unknown values (including pre-upgrade configs that
+// never had the setting) fall back to fast rather than stalling updates.
+func TestRefreshIntervalMapping(t *testing.T) {
+	cases := map[string]time.Duration{
+		"fast":   250 * time.Millisecond,
+		"medium": 650 * time.Millisecond,
+		"slow":   1000 * time.Millisecond,
+		"":       250 * time.Millisecond,
+		"turbo":  250 * time.Millisecond,
+	}
+	for in, want := range cases {
+		if got := refreshInterval(in); got != want {
+			t.Errorf("refreshInterval(%q) = %v, want %v", in, got, want)
+		}
+	}
+
+	cfg := DefaultConfig()
+	if cfg.RefreshRate != "fast" {
+		t.Errorf("default RefreshRate = %q, want fast", cfg.RefreshRate)
+	}
+	cfg.RefreshRate = "bogus"
+	cfg.normalize()
+	if cfg.RefreshRate != "fast" {
+		t.Errorf("normalized RefreshRate = %q, want fast", cfg.RefreshRate)
+	}
+}
+
+// TestApplySpeedLimitRetunesLive pins the no-restart rule for the speed
+// setting: unlimited -> limited -> unlimited keeps one shared instance whose
+// rate follows the setting, so running transfers feel it at once.
+func TestApplySpeedLimitRetunesLive(t *testing.T) {
+	app := newTestApp(t)
+
+	app.mgr.applySpeedLimit(0)
+	if app.mgr.limiter != nil {
+		t.Error("unlimited created a limiter")
+	}
+
+	app.mgr.applySpeedLimit(1024)
+	first := app.mgr.limiter
+	if first == nil {
+		t.Fatal("no limiter after enabling the cap")
+	}
+	if got := first.Rate(); got != 1024<<10 {
+		t.Errorf("Rate = %d, want %d", got, 1024<<10)
+	}
+
+	app.mgr.applySpeedLimit(2048)
+	if app.mgr.limiter != first {
+		t.Error("rate change replaced the shared limiter; runners hold the old one")
+	}
+	if got := first.Rate(); got != 2048<<10 {
+		t.Errorf("Rate = %d, want %d", got, 2048<<10)
+	}
+
+	app.mgr.applySpeedLimit(0)
+	if app.mgr.limiter != first {
+		t.Error("disabling the cap replaced the shared limiter")
+	}
+	if got := first.Rate(); got != 0 {
+		t.Errorf("Rate = %d, want 0 (unlimited)", got)
+	}
+}
+
+// TestApplyRefreshIntervalReachesLive pins the registry push: downloaders
+// registered as running get the new cadence, and unregistered ones are
+// simply not visited.
+func TestApplyRefreshIntervalReachesLive(t *testing.T) {
+	app := newTestApp(t)
+
+	dl, err := engine.New(engine.Options{}.Normalize())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dl.Close()
+
+	untrack := app.mgr.trackLive("t-live", dl)
+	app.mgr.applyRefreshInterval(650 * time.Millisecond)
+	if got := dl.ProgressInterval(); got != 650*time.Millisecond {
+		t.Errorf("live interval = %v, want 650ms", got)
+	}
+	untrack()
+	app.mgr.applyRefreshInterval(1000 * time.Millisecond)
+	if got := dl.ProgressInterval(); got != 650*time.Millisecond {
+		t.Errorf("interval after unregister = %v, want it untouched at 650ms", got)
+	}
+
+	// Empty registry never panics.
+	app.mgr.applyRefreshInterval(250 * time.Millisecond)
+}
+
 // TestStatsAggregatesActiveTasks covers the sidebar totals.
 func TestStatsAggregatesActiveTasks(t *testing.T) {
 	want := payload(256 << 10)

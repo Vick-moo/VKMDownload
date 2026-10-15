@@ -509,6 +509,26 @@ export function SettingsPage({
             onChange={(e) => patch({ proxy: e.target.value })}
           />
         </label>
+
+        <label className="setting">
+          <span className="setting__text">
+            <span className="setting__title">界面刷新速度</span>
+            <span className="setting__hint">
+              进度数字多久跳一次。只影响显示，不影响真实下载速度；改完下个任务生效。
+            </span>
+          </span>
+          <select
+            style={{ width: 150 }}
+            value={draft.refreshRate || "fast"}
+            onChange={(e) =>
+              patch({ refreshRate: e.target.value as "fast" | "medium" | "slow" })
+            }
+          >
+            <option value="fast">快（250ms）</option>
+            <option value="medium">中（650ms）</option>
+            <option value="slow">慢（1s）</option>
+          </select>
+        </label>
       </section>
 
       <section className="settings-section">

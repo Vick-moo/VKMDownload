@@ -98,6 +98,11 @@ type Config struct {
 	ClipboardConfirm bool `json:"clipboardConfirm"`
 	// ClipboardIntervalMs is the polling period.
 	ClipboardIntervalMs int `json:"clipboardIntervalMs"`
+
+	// RefreshRate controls how often progress numbers update: fast (250ms),
+	// medium (650ms) or slow (1000ms). It only changes the UI refresh
+	// cadence, never the transfer speed. Applies to newly started runs.
+	RefreshRate string `json:"refreshRate"`
 }
 
 // OrganizeGroup maps filename extensions (without the dot, any case) to one
@@ -133,6 +138,7 @@ func DefaultConfig() Config {
 		ClipboardAutoStart:  false,
 		ClipboardConfirm:    true,
 		ClipboardIntervalMs: 800,
+		RefreshRate:         "fast",
 
 		// On by default, but only for downloads big enough to be worth a
 		// separate program. Taking over everything — including the browser's own
@@ -216,6 +222,14 @@ func (c *Config) normalize() {
 	c.OrganizeGroups = normalizeOrganizeGroups(c.OrganizeGroups)
 	if strings.TrimSpace(c.OrganizeDir) == "" {
 		c.OrganizeDir = d.OrganizeDir
+	}
+	switch strings.ToLower(strings.TrimSpace(c.RefreshRate)) {
+	case "medium", "slow":
+		c.RefreshRate = strings.ToLower(strings.TrimSpace(c.RefreshRate))
+	default:
+		// Unknown (including empty from older configs) means today's
+		// behaviour: no visible change on upgrade.
+		c.RefreshRate = "fast"
 	}
 }
 

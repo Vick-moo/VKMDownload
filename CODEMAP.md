@@ -132,6 +132,15 @@ cd desktop && wails build            # 产出 build/bin/VKMDownload.exe
 24. Scoped plan: StartPlanSelected + watchPlanSelected + finishPlanScoped/End (manager.go), App/plan-button scope switch. Checkbox left of name.
 25. Delete path bug: partialPaths() (manager.go) resolves dir+Name like the engine; Remove/Cancel use it. Test: TestRemoveFindsPartialsByServerName.
 26. Instant start feedback: startRun emits task:progress on all paths (manager.go). Test: TestStartEmitsProgressImmediately.
+27. RefreshRate setting: config.go field + refreshInterval() mapping, run() wires ProgressInterval, SettingsPage select. Test: TestRefreshIntervalMapping.
+28. Queued pause button: TaskRow shows pause for queued rows (backend always allowed it); space shortcut too.
+29. Live settings: Limiter.SetRate (limiter.go), applySpeedLimit + pump-on-increase in SetConfig, progress delivery watermark (download.go). Tests: TestLimiterSetRateAppliesLive, TestApplySpeedLimitRetunesLive.
+30. Live refresh: progressIntervalNs atomic on Downloader, livedl registry + applyRefreshInterval, SetConfig push. Tests: TestDownloaderProgressIntervalLive, TestApplyRefreshIntervalReachesLive.
+31. Column drag ripple: divider moves only its two sharing columns (TaskList.tsx startColResize).
+32. Drag blink: early return on no-change in startColResize onMove.
+33. Drag snap-back: clamp against current widths only, never drag-start base (TaskList.tsx).
+34. Directional cascade drag: boundary moves, one side grows, other side gives nearest-first (TaskList.tsx).
+35. Drag runaway: always recompute from mousedown snapshot, never accumulate onto live state.
 ## 8. 剩下未动的（有意延后）
 
 - ~~`Remove`/`Cancel` 在 binding 线程同步 `waitStopped(3s)`~~：已修——等删改走后台 goroutine，`Cancel` 用代际 guard 防误删（`manager.go:Cancel/Remove`）。

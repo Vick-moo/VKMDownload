@@ -187,6 +187,11 @@ type Manager struct {
 	limiter *engine.Limiter
 	limRate int64
 
+	// livedl tracks running engine instances by task id, so settings that
+	// retune live (refresh cadence) can reach transfers already in flight.
+	livedlMu sync.Mutex
+	livedl   map[string]*engine.Downloader
+
 	// planRunning is set while a plan is working through its tasks.
 	planRunning bool
 
@@ -198,31 +203,78 @@ type Manager struct {
 
 func NewManager(app *App) *Manager {
 	return &Manager{
-		app:   app,
-		tasks: make(map[string]*task),
-		pump:  make(chan TaskView, 512),
+		app:    app,
+		tasks:  make(map[string]*task),
+		pump:   make(chan TaskView, 512),
+		livedl: make(map[string]*engine.Downloader),
+	}
+}
+
+// trackLive registers a running engine so live settings can reach it, and
+// returns an unregister func for when the run settles.
+func (m *Manager) trackLive(id string, dl *engine.Downloader) func() {
+	m.livedlMu.Lock()
+	m.livedl[id] = dl
+	m.livedlMu.Unlock()
+	return func() {
+		m.livedlMu.Lock()
+		delete(m.livedl, id)
+		m.livedlMu.Unlock()
+	}
+}
+
+// applyRefreshInterval pushes the UI refresh cadence to every running
+// transfer at once.
+func (m *Manager) applyRefreshInterval(iv time.Duration) {
+	m.livedlMu.Lock()
+	dls := make([]*engine.Downloader, 0, len(m.livedl))
+	for _, dl := range m.livedl {
+		dls = append(dls, dl)
+	}
+	m.livedlMu.Unlock()
+	for _, dl := range dls {
+		dl.SetProgressInterval(iv)
 	}
 }
 
 // limiterFor returns the limiter shared by every transfer for the given rate.
 //
 // One limiter for all tasks is the point: a "2 MB/s" setting that each of five
-// concurrent downloads obeyed separately would allow 10. The instance is only
-// replaced when the setting actually changes, because a new limiter starts with
-// a full bucket and would briefly let the speed spike.
+// concurrent downloads obeyed separately would allow 10. The instance is
+// created on first use and then mutated in place by applySpeedLimit, never
+// replaced: running transfers hold the pointer, so only an in-place rate
+// change reaches them without a stop/start cycle.
 func (m *Manager) limiterFor(kilobytesPerSecond int) *engine.Limiter {
 	rate := int64(kilobytesPerSecond) * 1024
 
 	m.limMu.Lock()
 	defer m.limMu.Unlock()
 
-	// Rebuild when the rate changed, or when switching from "unlimited" (a nil
-	// limiter) to a real one.
-	if m.limRate != rate || (rate > 0 && m.limiter == nil) {
+	if m.limiter == nil && rate > 0 {
 		m.limiter = engine.NewLimiter(rate)
 		m.limRate = rate
 	}
 	return m.limiter
+}
+
+// applySpeedLimit moves the shared limiter to the configured rate right now,
+// so the setting takes effect on running transfers instead of waiting for a
+// restart. It is a no-op when nothing changed.
+func (m *Manager) applySpeedLimit(kilobytesPerSecond int) {
+	rate := int64(kilobytesPerSecond) * 1024
+
+	m.limMu.Lock()
+	defer m.limMu.Unlock()
+
+	if m.limRate == rate && (rate <= 0 || m.limiter != nil) {
+		return
+	}
+	if m.limiter == nil {
+		m.limiter = engine.NewLimiter(rate)
+	} else {
+		m.limiter.SetRate(rate)
+	}
+	m.limRate = rate
 }
 
 // Run drains the event pump until ctx is cancelled.
@@ -635,6 +687,19 @@ func (m *Manager) startRun(t *task) {
 	m.app.emit("task:progress", snapshot(t))
 
 	go m.run(t, ctx, cancel, done)
+}
+
+// refreshInterval maps the UI refresh setting to an engine reporting
+// interval. Unknown values fall back to fast (today's behaviour).
+func refreshInterval(rate string) time.Duration {
+	switch strings.ToLower(strings.TrimSpace(rate)) {
+	case "medium":
+		return 650 * time.Millisecond
+	case "slow":
+		return 1000 * time.Millisecond
+	default:
+		return 250 * time.Millisecond
+	}
 }
 
 // maxConcurrent bounds how many tasks transfer at once; the rest queue.
@@ -1247,6 +1312,7 @@ func (m *Manager) run(t *task, ctx context.Context, cancel context.CancelFunc, d
 	opt.Connections = conns
 	opt.MinSegmentSize = cfg.MinSegmentSize
 	opt.Limiter = m.limiterFor(cfg.SpeedLimitKB)
+	opt.ProgressInterval = refreshInterval(cfg.RefreshRate)
 	if cfg.Proxy != "" {
 		opt.Transport.ProxyURL = cfg.Proxy
 	}
@@ -1271,6 +1337,8 @@ func (m *Manager) run(t *task, ctx context.Context, cancel context.CancelFunc, d
 		return
 	}
 	defer dl.Close()
+	untrack := m.trackLive(snapshot(t).ID, dl)
+	defer untrack()
 
 	res, err := dl.Download(ctx, engine.Request{
 		URL:    url,
