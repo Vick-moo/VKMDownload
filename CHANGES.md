@@ -273,6 +273,18 @@
 - Test: TestHelperFilesHideAndPublishUnhides. Engine suite green,
   linux/darwin builds verified. Exe rebuilt + app restarted.
 
+### 28. Finished rows flipped back to downloading (bug, fixed)
+- Symptom: tasks complete on disk and in tasks.json, UI stuck at 100%
+  downloading until clicked. Backend exonerated by evidence twice.
+- Root causes, both event ordering: (1) overlapping full-list reloads with
+  no generation guard let a stale fetch paint over task:done; (2) progress
+  travels a queue while done jumps it directly, so late stale progress
+  resurrected finished rows.
+- Fix: reload applies only the latest call; progress handler ignores
+  non-completed updates for completed rows (failed excluded: resume
+  legitimately returns them to downloading).
+- Verified: build + tsc clean, app restarted.
+
 ## TODO (user requested, work later)
 
 - Detached ask-location popup WITHOUT v3 migration (backup plan).

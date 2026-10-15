@@ -69,6 +69,8 @@ function App(): JSX.Element {
   const updateCancelled = useRef(false);
   /** The bulk-delete confirmation; the count in it comes from the live list. */
   const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
+  /** Generation counter for list reloads; see reload below. */
+  const reloadGen = useRef(0);
   const [deleting, setDeleting] = useState(false);
   const [pendingURL, setPendingURL] = useState("");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -82,8 +84,15 @@ function App(): JSX.Element {
   const extActive = filterExt(filter);
 
   const reload = useCallback(async () => {
+    // Overlapping reloads race: a slow earlier call resolving after a later
+    // one (or after a task:done event) would paint stale rows back over the
+    // truth — e.g. a finished row flipped to downloading forever, since no
+    // further event for it will ever arrive. Only the latest call applies.
+    const gen = ++reloadGen.current;
     try {
-      setTasks(await api.listTasks());
+      const list = await api.listTasks();
+      if (gen !== reloadGen.current) return;
+      setTasks(list);
     } catch (e) {
       console.error(e);
     }
@@ -122,7 +131,18 @@ function App(): JSX.Element {
   useEffect(() => {
     const offs = [
       on<TaskView>(EVENTS.progress, (v) =>
-        setTasks((prev) => prev.map((t) => (t.id === v.id ? v : t))),
+        setTasks((prev) =>
+          prev.map((t) => {
+            if (t.id !== v.id) return t;
+            // A finished row never goes back to transferring: progress events
+            // travel through a queue while done jumps it directly, so a slow
+            // stale update arriving late must not resurrect it. (Failed rows
+            // are excluded on purpose: resume legitimately returns them to
+            // downloading, and completed never resumes.)
+            if (t.status === "completed" && v.status !== "completed") return t;
+            return v;
+          }),
+        ),
       ),
       on<TaskView>(EVENTS.done, (v) =>
         setTasks((prev) => prev.map((t) => (t.id === v.id ? v : t))),
