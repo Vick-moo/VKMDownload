@@ -143,10 +143,13 @@ func (o Options) Normalize() Options {
 	if o.ProgressBytes <= 0 {
 		o.ProgressBytes = 1 << 20
 	}
-	if o.SaveInterval <= 0 {
+	// Negative save thresholds mean disabled (the app exposes per-trigger
+	// switches); only exact zero falls back to the progress thresholds.
+	// Callers that never set them keep today's behaviour.
+	if o.SaveInterval == 0 {
 		o.SaveInterval = o.ProgressInterval
 	}
-	if o.SaveBytes <= 0 {
+	if o.SaveBytes == 0 {
 		o.SaveBytes = o.ProgressBytes
 	}
 	if o.SavePercent < 0 {
@@ -1395,12 +1398,13 @@ func (p *progressTracker) add(n int64) {
 	// needs a known total, otherwise it stays out of the way.
 	step := p.saveStep
 	if p.savePct > 0 && p.total > 0 {
-		if pct := p.total * p.savePct / 100; pct > 0 && pct < step {
+		if pct := p.total * p.savePct / 100; pct > 0 && (step < 0 || pct < step) {
 			step = pct
 		}
 	}
-	save := now.Sub(p.lastSave) >= p.saveInterval ||
-		p.bytes-p.lastSaveMark >= step
+	timeOK := p.saveInterval > 0 && now.Sub(p.lastSave) >= p.saveInterval
+	byteOK := step >= 0 && p.bytes-p.lastSaveMark >= step
+	save := timeOK || byteOK
 
 	var speed float64
 	if fire {

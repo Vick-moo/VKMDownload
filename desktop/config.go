@@ -115,6 +115,11 @@ type Config struct {
 	// ResumeFlushPct adds a size-relative trigger: flush at least every N% of
 	// the total (0 disables). Unknown total disables it too.
 	ResumeFlushPct int `json:"resumeFlushPct"`
+	// The three By* switches let the user run any subset of the triggers.
+	// At least one must stay on (enforced in normalize).
+	ResumeFlushBySize bool `json:"resumeFlushBySize"`
+	ResumeFlushByTime bool `json:"resumeFlushByTime"`
+	ResumeFlushByPct  bool `json:"resumeFlushByPct"`
 }
 
 // OrganizeGroup maps filename extensions (without the dot, any case) to one
@@ -154,6 +159,9 @@ func DefaultConfig() Config {
 		ResumeFlushKB:       1024,
 		ResumeFlushMs:       250,
 		ResumeFlushPct:      0,
+		ResumeFlushBySize:   true,
+		ResumeFlushByTime:   true,
+		ResumeFlushByPct:    false,
 
 		// On by default, but only for downloads big enough to be worth a
 		// separate program. Taking over everything — including the browser's own
@@ -265,6 +273,15 @@ func (c *Config) normalize() {
 	}
 	if c.ResumeFlushPct > 100 {
 		c.ResumeFlushPct = 100
+	}
+	// At least one save trigger must stay on: with everything off a crash
+	// would silently discard the whole transfer. Force the time trigger
+	// back on rather than inventing values for the others.
+	if !c.ResumeFlushBySize && !c.ResumeFlushByTime && !c.ResumeFlushByPct {
+		c.ResumeFlushByTime = true
+		if c.ResumeFlushMs < 100 {
+			c.ResumeFlushMs = 250
+		}
 	}
 }
 

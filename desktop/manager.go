@@ -1380,7 +1380,22 @@ func (m *Manager) run(t *task, ctx context.Context, cancel context.CancelFunc, d
 	opt.ProgressBytes = int64(cfg.ResumeFlushKB) << 10
 	opt.SaveInterval = time.Duration(cfg.ResumeFlushMs) * time.Millisecond
 	opt.SaveBytes = int64(cfg.ResumeFlushKB) << 10
-	opt.SavePercent = cfg.ResumeFlushPct
+	opt.SavePercent = 0
+	if cfg.ResumeFlushByPct {
+		opt.SavePercent = cfg.ResumeFlushPct
+	}
+	if !cfg.ResumeFlushBySize {
+		opt.SaveBytes = -1
+	}
+	if !cfg.ResumeFlushByTime {
+		opt.SaveInterval = -1
+	}
+	if !cfg.ResumeFlushBySize {
+		opt.SaveBytes = -1
+	}
+	if !cfg.ResumeFlushByTime {
+		opt.SaveInterval = -1
+	}
 	if cfg.Proxy != "" {
 		opt.Transport.ProxyURL = cfg.Proxy
 	}

@@ -63,6 +63,10 @@ export function SettingsPage({
 }: Props): JSX.Element {
   const [draft, setDraft] = useState<Config | null>(config);
   const [status, setStatus] = useState("");
+  // Tabbed categories, Chrome-tabs style: one concern per tab instead of a
+  // long scroll. Sections stay mounted (hidden) so draft edits and the
+  // update poller survive switching.
+  const [tab, setTab] = useState("下载");
   // Holds the outcome of the clipboard test button.
   const [probe, setProbe] = useState("");
   // Self-update state, polled while a download is in flight.
@@ -217,6 +221,8 @@ export function SettingsPage({
     );
   }
 
+  const TABS = ["下载", "浏览器扩展", "计划下载", "剪贴板", "完成后", "窗口", "软件更新"];
+
   /** Applies a partial change to the draft. */
   function patch(p: Partial<Config>) {
     // Object.assign onto a fresh instance rather than {...d, ...p}: spreading
@@ -264,7 +270,22 @@ export function SettingsPage({
 
   return (
     <div className="settings">
-      <section className="settings-section">
+      <div className="settings-tabs" role="tablist" aria-label="设置分类">
+        {TABS.map((t) => (
+          <button
+            key={t}
+            type="button"
+            role="tab"
+            aria-selected={tab === t}
+            className={`settings-tab${tab === t ? " settings-tab--active" : ""}`}
+            onClick={() => setTab(t)}
+          >
+            {t}
+          </button>
+        ))}
+      </div>
+
+      <section className="settings-section" hidden={tab !== "下载"}>
         <h3 className="settings-section__title">下载</h3>
 
         <Switch
@@ -274,6 +295,225 @@ export function SettingsPage({
           onChange={(v) => patch({ autoStart: v })}
         />
 
+
+
+
+
+        <label className="setting">
+          <span className="setting__text">
+            <span className="setting__title">默认保存目录</span>
+            <span className="setting__hint">{draft.downloadDir || "未设置"}</span>
+          </span>
+          <span className="field__row" style={{ flex: "0 0 auto" }}>
+            <button type="button" className="btn" onClick={browse}>
+              <IconFolder size={16} />
+              浏览
+            </button>
+          </span>
+        </label>
+
+        <h4 className="settings-subsection__title">并行</h4>
+
+        <label className="setting">
+          <span className="setting__text">
+            <span className="setting__title">默认连接数</span>
+            <span className="setting__hint">
+              单个文件的并行连接数。8 适合大多数服务器；遇到限速的站点可以调高。
+            </span>
+          </span>
+          <input
+            type="number"
+            min={1}
+            max={64}
+            style={{ width: 88 }}
+            value={draft.connections}
+            onChange={(e) => patch({ connections: Number(e.target.value) || 1 })}
+          />
+        </label>
+
+        <label className="setting">
+          <span className="setting__text">
+            <span className="setting__title">同时下载的任务数</span>
+            <span className="setting__hint">
+              超出的任务会排队。数值越大越容易占满带宽。
+            </span>
+          </span>
+          <input
+            type="number"
+            min={1}
+            max={16}
+            style={{ width: 88 }}
+            value={draft.maxConcurrent}
+            onChange={(e) =>
+              patch({ maxConcurrent: Number(e.target.value) || 1 })
+            }
+          />
+        </label>
+
+        <h4 className="settings-subsection__title">限速</h4>
+
+        <label className="setting">
+          <span className="setting__text">
+            <span className="setting__title">全局速度上限</span>
+            <span className="setting__hint">
+              所有任务加起来的下载速度上限，单位 KB/s。填 0 表示不限速。
+            </span>
+          </span>
+          <input
+            type="number"
+            min={0}
+            max={10485760}
+            step={64}
+            style={{ width: 110 }}
+            value={draft.speedLimitKb}
+            onChange={(e) =>
+              patch({ speedLimitKb: Math.max(0, Number(e.target.value) || 0) })
+            }
+          />
+        </label>
+
+        <label className="setting">
+          <span className="setting__text">
+            <span className="setting__title">代理</span>
+            <span className="setting__hint">
+              留空则跟随系统环境变量（HTTP_PROXY / HTTPS_PROXY）。
+            </span>
+          </span>
+          <input
+            type="text"
+            placeholder="http://127.0.0.1:7890"
+            spellCheck={false}
+            style={{ width: 200 }}
+            value={draft.proxy}
+            onChange={(e) => patch({ proxy: e.target.value })}
+          />
+        </label>
+
+        <h4 className="settings-subsection__title">显示</h4>
+
+        <label className="setting">
+          <span className="setting__text">
+            <span className="setting__title">界面刷新速度</span>
+            <span className="setting__hint">
+              进度数字多久跳一次。只影响显示，不影响真实下载速度；改完直播生效。
+            </span>
+          </span>
+          <select
+            style={{ width: 150 }}
+            value={draft.refreshRate || "fast"}
+            onChange={(e) =>
+              patch({ refreshRate: e.target.value as "fast" | "medium" | "slow" })
+            }
+          >
+            <option value="fast">快（250ms）</option>
+            <option value="medium">中（650ms）</option>
+            <option value="slow">慢（1s）</option>
+          </select>
+        </label>
+
+        <h4 className="settings-subsection__title">断点保存</h4>
+
+        <label className="setting">
+          <span className="setting__text">
+            <span className="setting__title">断点保存（按大小）</span>
+            <span className="setting__hint">
+              下了多少才写一次续传记录，单位 KB。越大写盘越少、崩溃重下越多。改完下个任务生效。
+            </span>
+          </span>
+          <span className="field__row" style={{ flex: "0 0 auto" }}>
+            <input
+              type="checkbox"
+              aria-label="启用按大小保存"
+              title="启用按大小保存（至少保留一种）"
+              checked={draft.resumeFlushBySize}
+              onChange={(e) => {
+                const v = e.target.checked;
+                if (!v && !draft.resumeFlushByTime && !draft.resumeFlushByPct) return;
+                patch({ resumeFlushBySize: v });
+              }}
+            />
+            <input
+              type="number"
+              min={64}
+              max={65536}
+              step={64}
+              style={{ width: 110 }}
+              value={draft.resumeFlushKb}
+              disabled={!draft.resumeFlushBySize}
+              onChange={(e) =>
+                patch({ resumeFlushKb: Math.max(64, Number(e.target.value) || 1024) })
+              }
+            />
+          </span>
+        </label>
+
+        <label className="setting">
+          <span className="setting__text">
+            <span className="setting__title">断点保存（按时间）</span>
+            <span className="setting__hint">
+              最多隔多久写一次续传记录，单位毫秒。越大写盘越少、崩溃重下越多。改完下个任务生效。
+            </span>
+          </span>
+          <span className="field__row" style={{ flex: "0 0 auto" }}>
+            <input
+              type="checkbox"
+              aria-label="启用按时间保存"
+              title="启用按时间保存（至少保留一种）"
+              checked={draft.resumeFlushByTime}
+              onChange={(e) => {
+                const v = e.target.checked;
+                if (!v && !draft.resumeFlushBySize && !draft.resumeFlushByPct) return;
+                patch({ resumeFlushByTime: v });
+              }}
+            />
+            <input
+              type="number"
+              min={100}
+              max={10000}
+              step={50}
+              style={{ width: 110 }}
+              value={draft.resumeFlushMs}
+              disabled={!draft.resumeFlushByTime}
+              onChange={(e) =>
+                patch({ resumeFlushMs: Math.min(10000, Math.max(100, Number(e.target.value) || 250)) })
+              }
+            />
+          </span>
+        </label>
+
+        <label className="setting">
+          <span className="setting__text">
+            <span className="setting__title">断点保存（按百分比）</span>
+            <span className="setting__hint">
+              每下完百分之几写一次。跟上面启用的项谁先到谁写。改完下个任务生效。
+            </span>
+          </span>
+          <span className="field__row" style={{ flex: "0 0 auto" }}>
+            <input
+              type="checkbox"
+              aria-label="启用按百分比保存"
+              title="启用按百分比保存（至少保留一种）"
+              checked={draft.resumeFlushByPct}
+              onChange={(e) => {
+                const v = e.target.checked;
+                if (!v && !draft.resumeFlushBySize && !draft.resumeFlushByTime) return;
+                patch({ resumeFlushByPct: v });
+              }}
+            />
+            <input
+              type="number"
+              min={0}
+              max={100}
+              step={1}
+              style={{ width: 110 }}
+              value={draft.resumeFlushPct}
+              disabled={!draft.resumeFlushByPct}
+              onChange={(e) =>
+                patch({ resumeFlushPct: Math.min(100, Math.max(0, Number(e.target.value) || 0)) })
+              }
+            />
+          </span>
+        </label>
         <Switch
           title="每次下载先问保存位置"
           hint="浏览器和剪贴板来的下载会先弹窗确认位置，关掉弹窗等于放弃这次下载。关闭后按上面的自动开始/剪贴板规则直接建任务。"
@@ -423,175 +663,71 @@ export function SettingsPage({
             </div>
           </>
         ) : null}
+      </section>
+
+
+
+      <section className="settings-section" hidden={tab !== "浏览器扩展"}>
+        <h3 className="settings-section__title">浏览器扩展</h3>
+
+        <p className="settings-section__note">
+          装好扩展后，浏览器里的下载会交给 VKMDownload。扩展每次都会先问这里该不该接管，
+          所以下面的改动立刻生效，不用重装扩展。
+        </p>
+
+        <Switch
+          title="接管浏览器下载"
+          hint="总开关。关闭后浏览器恢复自己下载，扩展仍然装着但不再拦截。"
+          checked={draft.extensionEnabled}
+          onChange={(v) => patch({ extensionEnabled: v })}
+        />
 
         <label className="setting">
           <span className="setting__text">
-            <span className="setting__title">默认保存目录</span>
-            <span className="setting__hint">{draft.downloadDir || "未设置"}</span>
+            <span className="setting__title">小于此大小交给浏览器</span>
+            <span className="setting__hint">
+              浏览器自己也会下载很多小东西（自动更新、网页图标、PDF 里的图片）。
+              设一个下限可以把这些挡在外面。填 0 表示全部接管。
+            </span>
           </span>
           <span className="field__row" style={{ flex: "0 0 auto" }}>
-            <button type="button" className="btn" onClick={browse}>
-              <IconFolder size={16} />
-              浏览
-            </button>
+            <input
+              type="number"
+              min={0}
+              max={1024}
+              step={1}
+              style={{ width: 88 }}
+              value={Math.round(draft.extensionMinSizeKb / 1024)}
+              onChange={(e) =>
+                patch({ extensionMinSizeKb: Math.max(0, Number(e.target.value) || 0) * 1024 })
+              }
+              disabled={!draft.extensionEnabled}
+            />
+            <span className="field__suffix">MB</span>
           </span>
         </label>
 
-        <label className="setting">
+        <label className="setting setting--stacked">
           <span className="setting__text">
-            <span className="setting__title">默认连接数</span>
+            <span className="setting__title">不接管的网站</span>
             <span className="setting__hint">
-              单个文件的并行连接数。8 适合大多数服务器；遇到限速的站点可以调高。
+              一行一个域名，子域名也算。例如填 <code>example.com</code> 会同时排除
+              <code>www.example.com</code> 和 <code>cdn.example.com</code>。
             </span>
           </span>
-          <input
-            type="number"
-            min={1}
-            max={64}
-            style={{ width: 88 }}
-            value={draft.connections}
-            onChange={(e) => patch({ connections: Number(e.target.value) || 1 })}
-          />
-        </label>
-
-        <label className="setting">
-          <span className="setting__text">
-            <span className="setting__title">同时下载的任务数</span>
-            <span className="setting__hint">
-              超出的任务会排队。数值越大越容易占满带宽。
-            </span>
-          </span>
-          <input
-            type="number"
-            min={1}
-            max={16}
-            style={{ width: 88 }}
-            value={draft.maxConcurrent}
-            onChange={(e) =>
-              patch({ maxConcurrent: Number(e.target.value) || 1 })
-            }
-          />
-        </label>
-
-        <label className="setting">
-          <span className="setting__text">
-            <span className="setting__title">全局速度上限</span>
-            <span className="setting__hint">
-              所有任务加起来的下载速度上限，单位 KB/s。填 0 表示不限速。
-            </span>
-          </span>
-          <input
-            type="number"
-            min={0}
-            max={10485760}
-            step={64}
-            style={{ width: 110 }}
-            value={draft.speedLimitKb}
-            onChange={(e) =>
-              patch({ speedLimitKb: Math.max(0, Number(e.target.value) || 0) })
-            }
-          />
-        </label>
-
-        <label className="setting">
-          <span className="setting__text">
-            <span className="setting__title">代理</span>
-            <span className="setting__hint">
-              留空则跟随系统环境变量（HTTP_PROXY / HTTPS_PROXY）。
-            </span>
-          </span>
-          <input
-            type="text"
-            placeholder="http://127.0.0.1:7890"
+          <textarea
+            className="field__textarea"
+            rows={3}
             spellCheck={false}
-            style={{ width: 200 }}
-            value={draft.proxy}
-            onChange={(e) => patch({ proxy: e.target.value })}
-          />
-        </label>
-
-        <label className="setting">
-          <span className="setting__text">
-            <span className="setting__title">界面刷新速度</span>
-            <span className="setting__hint">
-              进度数字多久跳一次。只影响显示，不影响真实下载速度；改完直播生效。
-            </span>
-          </span>
-          <select
-            style={{ width: 150 }}
-            value={draft.refreshRate || "fast"}
-            onChange={(e) =>
-              patch({ refreshRate: e.target.value as "fast" | "medium" | "slow" })
-            }
-          >
-            <option value="fast">快（250ms）</option>
-            <option value="medium">中（650ms）</option>
-            <option value="slow">慢（1s）</option>
-          </select>
-        </label>
-
-        <label className="setting">
-          <span className="setting__text">
-            <span className="setting__title">断点保存（按大小）</span>
-            <span className="setting__hint">
-              下了多少才写一次续传记录，单位 KB。越大写盘越少、崩溃重下越多。改完下个任务生效。
-            </span>
-          </span>
-          <input
-            type="number"
-            min={64}
-            max={65536}
-            step={64}
-            style={{ width: 110 }}
-            value={draft.resumeFlushKb}
-            onChange={(e) =>
-              patch({ resumeFlushKb: Math.max(64, Number(e.target.value) || 1024) })
-            }
-          />
-        </label>
-
-        <label className="setting">
-          <span className="setting__text">
-            <span className="setting__title">断点保存（按时间）</span>
-            <span className="setting__hint">
-              最多隔多久写一次续传记录，单位毫秒。越大写盘越少、崩溃重下越多。改完下个任务生效。
-            </span>
-          </span>
-          <input
-            type="number"
-            min={100}
-            max={10000}
-            step={50}
-            style={{ width: 110 }}
-            value={draft.resumeFlushMs}
-            onChange={(e) =>
-              patch({ resumeFlushMs: Math.min(10000, Math.max(100, Number(e.target.value) || 250)) })
-            }
-          />
-        </label>
-
-        <label className="setting">
-          <span className="setting__text">
-            <span className="setting__title">断点保存（按百分比）</span>
-            <span className="setting__hint">
-              每下完百分之几写一次，0 表示关。跟上面两项谁先到谁写。改完下个任务生效。
-            </span>
-          </span>
-          <input
-            type="number"
-            min={0}
-            max={100}
-            step={1}
-            style={{ width: 110 }}
-            value={draft.resumeFlushPct}
-            onChange={(e) =>
-              patch({ resumeFlushPct: Math.min(100, Math.max(0, Number(e.target.value) || 0)) })
-            }
+            placeholder={"example.com\nanother-site.org"}
+            value={draft.extensionSkipHosts}
+            onChange={(e) => patch({ extensionSkipHosts: e.target.value })}
+            disabled={!draft.extensionEnabled}
           />
         </label>
       </section>
 
-      <section className="settings-section">
+      <section className="settings-section" hidden={tab !== "计划下载"}>
         <h3 className="settings-section__title">计划下载</h3>
 
         <p className="settings-section__note">
@@ -614,7 +750,37 @@ export function SettingsPage({
         />
       </section>
 
-      <section className="settings-section">
+
+
+      <section className="settings-section" hidden={tab !== "完成后"}>
+        <h3 className="settings-section__title">完成后</h3>
+
+        <Switch
+          title="下载完成后打开文件"
+          hint="用系统默认程序打开刚下好的文件。"
+          checked={draft.openFileWhenDone}
+          onChange={(v) => patch({ openFileWhenDone: v })}
+        />
+        <Switch
+          title="下载完成后打开所在目录"
+          hint="在文件资源管理器中定位到该文件。"
+          checked={draft.openDirWhenDone}
+          onChange={(v) => patch({ openDirWhenDone: v })}
+        />
+      </section>
+
+      <section className="settings-section" hidden={tab !== "窗口"}>
+        <h3 className="settings-section__title">窗口</h3>
+
+        <Switch
+          title="关闭窗口时最小化到托盘"
+          hint="下载还在进行时不会退出，避免中断传输。"
+          checked={draft.minimizeToTray}
+          onChange={(v) => patch({ minimizeToTray: v })}
+        />
+      </section>
+
+      <section className="settings-section" hidden={tab !== "剪贴板"}>
         <h3 className="settings-section__title">剪贴板</h3>
 
         <Switch
@@ -683,35 +849,7 @@ export function SettingsPage({
         </div>
       </section>
 
-      <section className="settings-section">
-        <h3 className="settings-section__title">完成后</h3>
-
-        <Switch
-          title="下载完成后打开文件"
-          hint="用系统默认程序打开刚下好的文件。"
-          checked={draft.openFileWhenDone}
-          onChange={(v) => patch({ openFileWhenDone: v })}
-        />
-        <Switch
-          title="下载完成后打开所在目录"
-          hint="在文件资源管理器中定位到该文件。"
-          checked={draft.openDirWhenDone}
-          onChange={(v) => patch({ openDirWhenDone: v })}
-        />
-      </section>
-
-      <section className="settings-section">
-        <h3 className="settings-section__title">窗口</h3>
-
-        <Switch
-          title="关闭窗口时最小化到托盘"
-          hint="下载还在进行时不会退出，避免中断传输。"
-          checked={draft.minimizeToTray}
-          onChange={(v) => patch({ minimizeToTray: v })}
-        />
-      </section>
-
-      <section className="settings-section">
+      <section className="settings-section" hidden={tab !== "软件更新"}>
         <h3 className="settings-section__title">软件更新</h3>
 
         <div className="setting">
@@ -757,65 +895,7 @@ export function SettingsPage({
         </p>
       </section>
 
-      <section className="settings-section">
-        <h3 className="settings-section__title">浏览器扩展</h3>
 
-        <p className="settings-section__note">
-          装好扩展后，浏览器里的下载会交给 VKMDownload。扩展每次都会先问这里该不该接管，
-          所以下面的改动立刻生效，不用重装扩展。
-        </p>
-
-        <Switch
-          title="接管浏览器下载"
-          hint="总开关。关闭后浏览器恢复自己下载，扩展仍然装着但不再拦截。"
-          checked={draft.extensionEnabled}
-          onChange={(v) => patch({ extensionEnabled: v })}
-        />
-
-        <label className="setting">
-          <span className="setting__text">
-            <span className="setting__title">小于此大小交给浏览器</span>
-            <span className="setting__hint">
-              浏览器自己也会下载很多小东西（自动更新、网页图标、PDF 里的图片）。
-              设一个下限可以把这些挡在外面。填 0 表示全部接管。
-            </span>
-          </span>
-          <span className="field__row" style={{ flex: "0 0 auto" }}>
-            <input
-              type="number"
-              min={0}
-              max={1024}
-              step={1}
-              style={{ width: 88 }}
-              value={Math.round(draft.extensionMinSizeKb / 1024)}
-              onChange={(e) =>
-                patch({ extensionMinSizeKb: Math.max(0, Number(e.target.value) || 0) * 1024 })
-              }
-              disabled={!draft.extensionEnabled}
-            />
-            <span className="field__suffix">MB</span>
-          </span>
-        </label>
-
-        <label className="setting setting--stacked">
-          <span className="setting__text">
-            <span className="setting__title">不接管的网站</span>
-            <span className="setting__hint">
-              一行一个域名，子域名也算。例如填 <code>example.com</code> 会同时排除
-              <code>www.example.com</code> 和 <code>cdn.example.com</code>。
-            </span>
-          </span>
-          <textarea
-            className="field__textarea"
-            rows={3}
-            spellCheck={false}
-            placeholder={"example.com\nanother-site.org"}
-            value={draft.extensionSkipHosts}
-            onChange={(e) => patch({ extensionSkipHosts: e.target.value })}
-            disabled={!draft.extensionEnabled}
-          />
-        </label>
-      </section>
 
       <div className="settings__foot">
         {/* The status comes first so its `margin-right: auto` pushes the button

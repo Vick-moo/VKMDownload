@@ -1626,6 +1626,20 @@ func TestRefreshIntervalMapping(t *testing.T) {
 	if cfg.ResumeFlushPct != 0 {
 		t.Errorf("default ResumeFlushPct = %d, want 0 (off)", cfg.ResumeFlushPct)
 	}
+	if !cfg.ResumeFlushBySize || !cfg.ResumeFlushByTime || cfg.ResumeFlushByPct {
+		t.Errorf("default flush switches = size %v time %v pct %v, want true/true/false",
+			cfg.ResumeFlushBySize, cfg.ResumeFlushByTime, cfg.ResumeFlushByPct)
+	}
+
+	// Switching everything off must flip the time trigger back on: a
+	// transfer that never persists is a silent full re-download on crash.
+	cfg.ResumeFlushBySize = false
+	cfg.ResumeFlushByTime = false
+	cfg.ResumeFlushPct = 0
+	cfg.normalize()
+	if !cfg.ResumeFlushByTime {
+		t.Error("all triggers off was accepted; the time trigger must be forced back on")
+	}
 }
 
 // TestApplySpeedLimitRetunesLive pins the no-restart rule for the speed

@@ -933,6 +933,39 @@ input:focus {
   color: var(--text-muted);
 }
 
+/* Chrome-tabs style category bar: one concern per tab instead of a scroll. */
+.settings-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-bottom: var(--space-3);
+}
+
+.settings-tab {
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-secondary);
+  border-radius: var(--radius-md);
+  padding: 6px 14px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.settings-tab--active {
+  background: var(--accent-subtle);
+  border-color: var(--accent);
+  color: var(--text);
+  font-weight: 600;
+}
+
+/* Sub-group header inside a tab: frequent settings first, advanced last. */
+.settings-subsection__title {
+  margin: var(--space-3) 0 var(--space-1);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
 /* An explanatory paragraph inside a section, for settings that need more than
    a one-line hint. It carries a top margin so it never hugs the divider of
    the row above it. */

@@ -703,6 +703,29 @@ func TestSaveThrottlesIndependently(t *testing.T) {
 	if psaves != 3 {
 		t.Errorf("saved %d times over 320KiB at 10%%, want 3", psaves)
 	}
+
+	// Disabled dimensions never fire: byte trigger off, clock far in the
+	// future, percent off — 2MiB of blocks, zero saves.
+	var dsaves int
+	r := &progressTracker{
+		total:        2 << 20,
+		interval:     &iv,
+		step:         1,
+		saveInterval: -1,
+		saveStep:     -1,
+		savePct:      0,
+		start:        time.Now(),
+		lastEmit:     time.Now(),
+		lastSave:     time.Now(),
+		report:       func(Progress) {},
+		save:         func() error { dsaves++; return nil },
+	}
+	for i := 0; i < 2048; i++ {
+		r.add(1 << 10)
+	}
+	if dsaves != 0 {
+		t.Errorf("saved %d times with every trigger off, want 0", dsaves)
+	}
 }
 
 func TestProgressTrackerETAUsesSeconds(t *testing.T) {

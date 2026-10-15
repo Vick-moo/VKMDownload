@@ -310,6 +310,17 @@
 - Tests: extended TestRefreshIntervalMapping, TestSaveThrottlesIndependently
   (percent case). Suites green, tsc clean, exe rebuilt + restarted.
 
+### 31. Settings tabs + flush switches + reorder
+- Settings page is tabbed (Chrome-tabs style): download / extension / plan /
+  clipboard / done / window / update. Sections stay mounted so drafts survive.
+- Download tab grouped: parallel / speed / display / resume-flush; ask-location
+  and organize sink to its bottom. Extension up, clipboard down, update last.
+- Resume-flush triggers are individually switchable (any subset, at least one
+  forced on); numbers disable with their switch.
+- Footnote: block moves via script broke JSX twice (truncated take + brace
+  drift); repaired against git pristine, verified by counts + tsc.
+- Verified: tsc clean, build green, app restarted.
+
 ## TODO (user requested, work later)
 
 - Detached ask-location popup WITHOUT v3 migration (backup plan).

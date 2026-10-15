@@ -145,6 +145,7 @@ cd desktop && wails build            # 产出 build/bin/VKMDownload.exe
 37. Stale UI resurrection: reload generation guard + completed-row progress guard (App.tsx subscriptions).
 38. Perf batch: fillProbedName async, batch() save coalescing, pump newest-wins, memo TaskRow, single update check.
 39. Resume flush knobs: SaveInterval/SaveBytes/SavePercent (download.go), ResumeFlushKb/Ms/Pct (config.go), SettingsPage rows. Fixture rule: set Progress fields BEFORE Normalize.
+40. Settings tabs + flush switches + reorder (SettingsPage.tsx, styles.css).
 ## 8. 剩下未动的（有意延后）
 
 - ~~`Remove`/`Cancel` 在 binding 线程同步 `waitStopped(3s)`~~：已修——等删改走后台 goroutine，`Cancel` 用代际 guard 防误删（`manager.go:Cancel/Remove`）。
