@@ -264,6 +264,15 @@
   1:1 tracking restored.
 - Verified: build + tsc clean, app restarted. Human drag check needed.
 
+### 27. Helper files hidden in Explorer
+- .part + sidecar are now created with the Windows hidden flag, so the
+  download folder shows only finished files (same idea as system files).
+- Rename preserves the flag, so publish explicitly unhides the finished
+  file - otherwise completed downloads would stay invisible. No new
+  dependency (stdlib kernel32 via build-tagged files; no-ops off Windows).
+- Test: TestHelperFilesHideAndPublishUnhides. Engine suite green,
+  linux/darwin builds verified. Exe rebuilt + app restarted.
+
 ## TODO (user requested, work later)
 
 - Detached ask-location dialog in its own small window (no main window).

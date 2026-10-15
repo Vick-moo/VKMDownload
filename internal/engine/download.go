@@ -427,6 +427,9 @@ func (s *session) openPart() error {
 		return fmt.Errorf("open partial file %s: %w", s.part, err)
 	}
 	s.file = f
+	// Helper files stay out of the user's way in Explorer; unhideFile on
+	// publish (rename preserves attributes) makes the finished file visible.
+	hideFile(s.part)
 	return nil
 }
 
@@ -1141,6 +1144,9 @@ func (s *session) publish(res *Result) (*Result, error) {
 	if err := moveFile(s.part, s.target); err != nil {
 		return nil, err
 	}
+	// Rename preserves the hidden flag on Windows: without this the finished
+	// download would stay invisible in Explorer.
+	unhideFile(s.target)
 
 	// Report 100% as the final event so a UI never stalls just short of done.
 	// This must happen *before* the sidecar is removed: finish() emits through

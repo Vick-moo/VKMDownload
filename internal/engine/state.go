@@ -78,7 +78,11 @@ func saveState(path string, st *State) error {
 	}
 	// On Windows os.Rename maps to MoveFileEx with MOVEFILE_REPLACE_EXISTING,
 	// so this does replace an existing sidecar.
-	return os.Rename(tmp, path)
+	if err := os.Rename(tmp, path); err != nil {
+		return err
+	}
+	hideFile(path)
+	return nil
 }
 
 func loadState(path string) (*State, error) {

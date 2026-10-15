@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -718,6 +719,33 @@ func TestMoveFileCreatesParentDirectory(t *testing.T) {
 // ---------------------------------------------------------------------------
 // Probe against a hand-written handler
 // ---------------------------------------------------------------------------
+
+// TestHelperFilesHideAndPublishUnhides pins the Explorer behaviour: helper
+// files are hidden while downloading, and the finished file is visible.
+// On non-Windows this only exercises the no-op path.
+func TestHelperFilesHideAndPublishUnhides(t *testing.T) {
+	dir := t.TempDir()
+	part := filepath.Join(dir, "x.bin"+PartSuffix)
+	if err := os.WriteFile(part, []byte("half"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	hideFile(part)
+	if !isHidden(part) && runtime.GOOS == "windows" {
+		t.Error("helper file is not hidden on Windows")
+	}
+
+	target := filepath.Join(dir, "x.bin")
+	if err := moveFile(part, target); err != nil {
+		t.Fatalf("moveFile: %v", err)
+	}
+	unhideFile(target)
+	if isHidden(target) {
+		t.Error("finished file is still hidden after publish")
+	}
+	if _, err := os.Stat(target); err != nil {
+		t.Errorf("finished file missing: %v", err)
+	}
+}
 
 // TestDownloaderProgressIntervalLive pins the live cadence: trackers read it
 // per block, so the default lands on construction and Set retunes after.
