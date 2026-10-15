@@ -147,6 +147,7 @@ cd desktop && wails build            # 产出 build/bin/VKMDownload.exe
 39. Resume flush knobs: SaveInterval/SaveBytes/SavePercent (download.go), ResumeFlushKb/Ms/Pct (config.go), SettingsPage rows. Fixture rule: set Progress fields BEFORE Normalize.
 40. Settings tabs + flush switches + reorder (SettingsPage.tsx, styles.css).
 41. Flush checkbox style (.setting__check) + number-first order.
+42. Flush rows use Switch + nested number/hint (SettingsPage.tsx).
 ## 8. 剩下未动的（有意延后）
 
 - ~~`Remove`/`Cancel` 在 binding 线程同步 `waitStopped(3s)`~~：已修——等删改走后台 goroutine，`Cancel` 用代际 guard 防误删（`manager.go:Cancel/Remove`）。

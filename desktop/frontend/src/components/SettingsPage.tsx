@@ -413,14 +413,16 @@ export function SettingsPage({
 
         <h4 className="settings-subsection__title">断点保存</h4>
 
-        <label className="setting">
-          <span className="setting__text">
-            <span className="setting__title">断点保存（按大小）</span>
-            <span className="setting__hint">
-              下了多少才写一次续传记录，单位 KB。越大写盘越少、崩溃重下越多。改完下个任务生效。
-            </span>
-          </span>
-          <span className="field__row" style={{ flex: "0 0 auto" }}>
+        <Switch
+          title="按大小"
+          checked={draft.resumeFlushBySize}
+          onChange={(v) => {
+            if (!v && !draft.resumeFlushByTime && !draft.resumeFlushByPct) return;
+            patch({ resumeFlushBySize: v });
+          }}
+        />
+        <div className="setting setting--nested">
+          <span className="field__row" style={{ flex: "1 1 auto" }}>
             <input
               type="number"
               min={64}
@@ -433,29 +435,22 @@ export function SettingsPage({
                 patch({ resumeFlushKb: Math.max(64, Number(e.target.value) || 1024) })
               }
             />
-            <input
-              type="checkbox"
-              className="setting__check"
-              aria-label="启用按大小保存"
-              title="启用按大小保存（至少保留一种）"
-              checked={draft.resumeFlushBySize}
-              onChange={(e) => {
-                const v = e.target.checked;
-                if (!v && !draft.resumeFlushByTime && !draft.resumeFlushByPct) return;
-                patch({ resumeFlushBySize: v });
-              }}
-            />
-          </span>
-        </label>
-
-        <label className="setting">
-          <span className="setting__text">
-            <span className="setting__title">断点保存（按时间）</span>
             <span className="setting__hint">
-              最多隔多久写一次续传记录，单位毫秒。越大写盘越少、崩溃重下越多。改完下个任务生效。
+              下了多少才写一次续传记录，单位 KB。越大写盘越少、崩溃重下越多。改完下个任务生效。
             </span>
           </span>
-          <span className="field__row" style={{ flex: "0 0 auto" }}>
+        </div>
+
+        <Switch
+          title="按时间"
+          checked={draft.resumeFlushByTime}
+          onChange={(v) => {
+            if (!v && !draft.resumeFlushBySize && !draft.resumeFlushByPct) return;
+            patch({ resumeFlushByTime: v });
+          }}
+        />
+        <div className="setting setting--nested">
+          <span className="field__row" style={{ flex: "1 1 auto" }}>
             <input
               type="number"
               min={100}
@@ -468,29 +463,22 @@ export function SettingsPage({
                 patch({ resumeFlushMs: Math.min(10000, Math.max(100, Number(e.target.value) || 250)) })
               }
             />
-            <input
-              type="checkbox"
-              className="setting__check"
-              aria-label="启用按时间保存"
-              title="启用按时间保存（至少保留一种）"
-              checked={draft.resumeFlushByTime}
-              onChange={(e) => {
-                const v = e.target.checked;
-                if (!v && !draft.resumeFlushBySize && !draft.resumeFlushByPct) return;
-                patch({ resumeFlushByTime: v });
-              }}
-            />
-          </span>
-        </label>
-
-        <label className="setting">
-          <span className="setting__text">
-            <span className="setting__title">断点保存（按百分比）</span>
             <span className="setting__hint">
-              每下完百分之几写一次。跟上面启用的项谁先到谁写。改完下个任务生效。
+              最多隔多久写一次续传记录，单位毫秒。越大写盘越少、崩溃重下越多。改完下个任务生效。
             </span>
           </span>
-          <span className="field__row" style={{ flex: "0 0 auto" }}>
+        </div>
+
+        <Switch
+          title="按百分比"
+          checked={draft.resumeFlushByPct}
+          onChange={(v) => {
+            if (!v && !draft.resumeFlushBySize && !draft.resumeFlushByTime) return;
+            patch({ resumeFlushByPct: v });
+          }}
+        />
+        <div className="setting setting--nested">
+          <span className="field__row" style={{ flex: "1 1 auto" }}>
             <input
               type="number"
               min={0}
@@ -503,20 +491,11 @@ export function SettingsPage({
                 patch({ resumeFlushPct: Math.min(100, Math.max(0, Number(e.target.value) || 0)) })
               }
             />
-            <input
-              type="checkbox"
-              className="setting__check"
-              aria-label="启用按百分比保存"
-              title="启用按百分比保存（至少保留一种）"
-              checked={draft.resumeFlushByPct}
-              onChange={(e) => {
-                const v = e.target.checked;
-                if (!v && !draft.resumeFlushBySize && !draft.resumeFlushByTime) return;
-                patch({ resumeFlushByPct: v });
-              }}
-            />
+            <span className="setting__hint">
+              每下完百分之几写一次。跟上面启用的项谁先到谁写。改完下个任务生效。
+            </span>
           </span>
-        </label>
+        </div>
         <Switch
           title="每次下载先问保存位置"
           hint="浏览器和剪贴板来的下载会先弹窗确认位置，关掉弹窗等于放弃这次下载。关闭后按上面的自动开始/剪贴板规则直接建任务。"

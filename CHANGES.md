@@ -326,6 +326,11 @@
   (accent fill + white tick) instead of the native box.
 - Verified: tsc + build clean, app restarted.
 
+### 33. Flush rows redesigned (subtitle + switch, box below, hint last)
+- Per user layout: sub-title row with the on/off switch at right, number box
+  on the next row, description under it. Uses the existing Switch component.
+- Verified: tsc + build clean, app restarted.
+
 ## TODO (user requested, work later)
 
 - Detached ask-location popup WITHOUT v3 migration (backup plan).

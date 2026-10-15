@@ -965,8 +965,15 @@ input:focus {
 }
 
 /* Custom checkbox for the flush switches: the native box looks out of place
-   on the dark theme, so it is redrawn to match. */
-.setting__check {
+   on the dark theme, so it is redrawn to match. Scoped under .field__row
+   because that rule gives every input flex:1, which would stretch the box
+   into a pill. */
+.field__row input.setting__check {
+  flex: none;
+  align-self: center;
+  width: 18px;
+  height: 18px;
+}
   appearance: none;
   -webkit-appearance: none;
   flex: none;
