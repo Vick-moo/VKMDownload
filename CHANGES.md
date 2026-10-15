@@ -341,6 +341,10 @@
   rows (title + hint left, number + switch right), matching every other row.
   Removed the flush card CSS. Verified: tsc + build clean, app restarted.
 
+### 36. UI small fixes (UNRELEASED, UI only)
+- Row switches vertically centered against number boxes.
+- Clipboard interval hint notes monitoring must be on first.
+
 ## TODO (user requested, work later)
 
 - Detached ask-location popup WITHOUT v3 migration (backup plan).
