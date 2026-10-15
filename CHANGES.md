@@ -345,6 +345,13 @@
 - Row switches vertically centered against number boxes.
 - Clipboard interval hint notes monitoring must be on first.
 
+### 37. Concurrent-duplicate guard + extension size wait (UNRELEASED)
+- Manager: url+dest inflight claim in Start, so same-instant /add arrivals
+  yield one task and duplicates (was: N tasks for N racers, seen 3x same URL).
+  Regression test TestStartConcurrentSameURL (fails 16-vs-1 without fix).
+- Extension: sizeKb polls up to ~1.5s for totalBytes before answering unknown,
+  so the min-size filter sees real sizes instead of bypassing on -1.
+
 ## TODO (user requested, work later)
 
 - Detached ask-location popup WITHOUT v3 migration (backup plan).

@@ -205,14 +205,21 @@ type Manager struct {
 	// pausing everything for the restart cannot be undone by the queue
 	// starter waking a queued task back up.
 	updating bool
+
+	// inflight marks url+dest pairs currently being added, so two /add
+	// arriving in the same instant cannot both slip past findUnfinished.
+	// The check-then-insert in Start is not atomic on its own: both would
+	// see "no duplicate" before either inserted.
+	inflight map[string]struct{}
 }
 
 func NewManager(app *App) *Manager {
 	return &Manager{
-		app:    app,
-		tasks:  make(map[string]*task),
-		pump:   make(chan TaskView, 512),
-		livedl: make(map[string]*engine.Downloader),
+		app:      app,
+		tasks:    make(map[string]*task),
+		pump:     make(chan TaskView, 512),
+		livedl:   make(map[string]*engine.Downloader),
+		inflight: make(map[string]struct{}),
 	}
 }
 
@@ -402,6 +409,60 @@ func (m *Manager) findUnfinished(url, dest string) *task {
 	return nil
 }
 
+// claimOrWaitDuplicate guards the exact-URL duplicate check against a race.
+//
+// The first caller for a url+dest pair claims the key and proceeds; a second
+// caller arriving before the first inserted waits for that task to land and
+// is told about it as a duplicate. The wait path always answers
+// duplicateError, never a generic error: the extension falls back to a
+// browser download on any other error, which would fetch the file twice.
+func (m *Manager) claimOrWaitDuplicate(url, dest string) (TaskView, error, bool) {
+	key := url + "\x00" + dest
+	m.mu.Lock()
+	if _, ok := m.inflight[key]; !ok {
+		m.inflight[key] = struct{}{}
+		m.mu.Unlock()
+		// The caller drops the claim via releaseInflight, deferred in Start.
+		return TaskView{}, nil, true
+	}
+	m.mu.Unlock()
+
+	if dup := m.waitUnfinished(url, dest, 3*time.Second); dup != nil {
+		v := snapshot(dup)
+		return v, &duplicateError{ID: v.ID, Status: v.Status, Name: v.Name}, false
+	}
+	// The other add never landed (it was rejected after claiming); take the
+	// slot and continue as new. The holder's remaining path to insert holds
+	// no I/O, so it cannot still be in flight after this wait.
+	m.mu.Lock()
+	m.inflight[key] = struct{}{}
+	m.mu.Unlock()
+	return TaskView{}, nil, true
+}
+
+// releaseInflight drops the claim taken by claimOrWaitDuplicate.
+func (m *Manager) releaseInflight(url, dest string) {
+	key := url + "\x00" + dest
+	m.mu.Lock()
+	delete(m.inflight, key)
+	m.mu.Unlock()
+}
+
+// waitUnfinished polls findUnfinished until a task for url+dest appears or
+// the timeout elapses.
+func (m *Manager) waitUnfinished(url, dest string, timeout time.Duration) *task {
+	deadline := time.Now().Add(timeout)
+	for {
+		if dup := m.findUnfinished(url, dest); dup != nil {
+			return dup
+		}
+		if time.Now().After(deadline) {
+			return nil
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
 // findSameContent returns an unfinished task that is most likely the same
 // file under a different URL: same host, same filename, and compatible size.
 // (Sizes are compatible when either side is unknown — a row that never
@@ -581,6 +642,14 @@ func (m *Manager) Start(req StartRequest) (TaskView, error) {
 	// (Checked against the resolved dest, so the same file deliberately sent
 	// to two folders still counts as two tasks. Checked before probing, so
 	// an exact repeat never pays for a network round trip.)
+	//
+	// The claim comes first: the check below cannot see an add that has not
+	// inserted yet, so without the inflight guard two adds arriving together
+	// both pass and both insert.
+	if v, err, proceed := m.claimOrWaitDuplicate(url, dest); !proceed {
+		return v, err
+	}
+	defer m.releaseInflight(url, dest)
 	if dup := m.findUnfinished(url, dest); dup != nil {
 		v := snapshot(dup)
 		return v, &duplicateError{ID: v.ID, Status: v.Status, Name: v.Name}

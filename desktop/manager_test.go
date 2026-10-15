@@ -1820,3 +1820,41 @@ func TestHumanErrorMappings(t *testing.T) {
 type fakeErr struct{ s string }
 
 func (e *fakeErr) Error() string { return e.s }
+
+// TestStartConcurrentSameURL adds the same link from many goroutines at once.
+// Before the inflight guard they all slipped past the duplicate check and
+// each inserted a task; now exactly one wins and the rest are duplicates.
+func TestStartConcurrentSameURL(t *testing.T) {
+	a := newTestApp(t)
+	dest := t.TempDir()
+
+	const n = 16
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	created := 0
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			// A caller-supplied filename keeps the whole path synchronous
+			// (no network probe), so this hammers the exact race window.
+			_, err := a.mgr.Start(StartRequest{
+				URL:      "https://example.com/same.bin",
+				Dest:     dest,
+				Filename: "same.bin",
+			})
+			if err == nil {
+				mu.Lock()
+				created++
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+	if created != 1 {
+		t.Fatalf("created = %d, want 1", created)
+	}
+	if got := len(a.mgr.List()); got != 1 {
+		t.Fatalf("tasks = %d, want 1", got)
+	}
+}

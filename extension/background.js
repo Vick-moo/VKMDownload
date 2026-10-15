@@ -228,20 +228,29 @@ function hostSkipped(host, list) {
  * The download's size in KiB, or -1 when it is not known.
  *
  * Chrome usually does not know the length at onCreated — it learns it from the
- * response headers a moment later — so this waits briefly and asks again. The
+ * response headers a moment later — so this polls briefly and asks again. The
  * alternative is sending our own HEAD request, which needs a host permission
- * for every site the user might download from; a 250ms wait and no extra
+ * for every site the user might download from; waiting and no extra
  * permission is the better trade.
+ *
+ * Unknown stays unknown (-1) rather than failing: dropping it would leak a
+ * real file to the browser, but the caller treats -1 as "take", so the
+ * minimum-size filter cannot see these. Poll long enough that most headers
+ * have arrived before giving up.
  */
 async function sizeKb(item) {
   if (item.totalBytes > 0) return item.totalBytes / 1024;
 
-  await new Promise((resolve) => setTimeout(resolve, 250));
-  try {
-    const [found] = await chrome.downloads.search({ id: item.id });
-    if (found && found.totalBytes > 0) return found.totalBytes / 1024;
-  } catch {
-    // The item may already be gone.
+  for (let i = 0; i < 5; i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    try {
+      const [found] = await chrome.downloads.search({ id: item.id });
+      if (!found) return -1;
+      if (found.totalBytes > 0) return found.totalBytes / 1024;
+    } catch {
+      // The item may already be gone.
+      return -1;
+    }
   }
   return -1;
 }

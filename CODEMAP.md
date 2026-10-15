@@ -150,6 +150,7 @@ cd desktop && wails build            # 产出 build/bin/VKMDownload.exe
 42. Flush rows use Switch + nested number/hint (SettingsPage.tsx).
 43. Flush cards (flush-group/flush-card CSS + markup, SettingsPage.tsx).
 44. Flush rows native (plain .setting rows, no cards).
+45. Concurrent same-URL guard (inflight claim in Start) + ext size wait 1.5s.
 ## 8. 剩下未动的（有意延后）
 
 - ~~`Remove`/`Cancel` 在 binding 线程同步 `waitStopped(3s)`~~：已修——等删改走后台 goroutine，`Cancel` 用代际 guard 防误删（`manager.go:Cancel/Remove`）。
