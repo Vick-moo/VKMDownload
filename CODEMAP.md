@@ -56,7 +56,7 @@
 | `frontend/src/components/NewTaskDialog.tsx` | 新建任务输入（前端无路径净化，靠后端） |
 | `frontend/src/components/SettingsPage.tsx` | 设置页 |
 | `extension/background.js` | `findApp` 端口扫描 18888–18898、`handOver` 先删后送、`nameFromUrl` |
-| `extension/manifest.json` | 权限（`downloads` + `contextMenus` 必需，`storage` 当前无调用） |
+| \extension/manifest.json\ | 权限只留四项（downloads/contextMenus/notifications/cookies）；storage 已因无调用移除 |
 
 ## 3. 改某功能该看哪
 
