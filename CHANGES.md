@@ -275,6 +275,15 @@
 
 ## TODO (user requested, work later)
 
+- Detached ask-location popup WITHOUT v3 migration (backup plan).
+  Idea: tiny companion program (Go stdlib + native dialog, tens of KB) that
+  shows URL/dir/filename/connections and POSTs back to the main app's
+  loopback API. Main app stays in tray; helper launched on ask arrivals.
+  Pros: detached small window now, no migration. Cons: second component to
+  maintain, plain styling, edge cases (e.g. helper with no app running).
+  Requested 2026-10-15 as an option. Not started.
+
+
 - Detached ask-location dialog in its own small window (no main window).
   WHY v3: user wants only the small placement dialog to pop when a browser
   download arrives, without the whole main window coming along. Wails v2 is
