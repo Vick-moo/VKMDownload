@@ -612,6 +612,7 @@ func (s *session) runSegmented(ctx context.Context) (*Result, error) {
 // exponential backoff.
 func (s *session) fetchSegment(ctx context.Context, seg *Segment) error {
 	b := s.d.opt.Backoff.normalized()
+	var lastErr error
 
 	for attempt := 0; attempt <= b.MaxTries; attempt++ {
 		if attempt > 0 {
@@ -634,13 +635,20 @@ func (s *session) fetchSegment(ctx context.Context, seg *Segment) error {
 			attempt = -1
 		case !isRetryable(err):
 			return err
+		default:
+			lastErr = err
 		}
 	}
 
 	// The loop can only fall through when every attempt asked for more work
 	// than the segment had left, which fetchOnce maps to errSegmentIncomplete,
 	// and the last check found none. Reaching here means the plan accounted for
-	// fewer bytes than the resource has.
+	// fewer bytes than the resource has. When retries were exhausted instead,
+	// keep the last real error: without it every such failure degrades into a
+	// generic "bytes unclaimed" with 0 B on disk and nothing actionable.
+	if lastErr != nil {
+		return fmt.Errorf("segment %s ended with bytes unclaimed (last error: %v)", s.mgr.describe(seg), lastErr)
+	}
 	return fmt.Errorf("segment %s ended with bytes unclaimed", s.mgr.describe(seg))
 }
 
@@ -873,7 +881,15 @@ func (s *session) validateRangeResponse(resp *http.Response, seg *Segment, off, 
 		if start != off {
 			return fmt.Errorf("206 Content-Range starts at %d, but %d was requested", start, off)
 		}
-		if end != off+n-1 {
+		// Some servers (observed: dl.fuckingfast.co) ignore the requested
+		// range end and always answer with start-EOF, e.g. asking for
+		// bytes=0-524287 yields "Content-Range: bytes 0-2097151999/2097152000"
+		// while the body still carries the requested prefix. Requiring an
+		// exact end match turns every multi-connection block into a failure
+		// (retried, then reported as a generic "bytes unclaimed" with 0 B on
+		// disk). Accept any end at or past the requested end and read exactly
+		// the n bytes asked for; a short end is still an error.
+		if end < off+n-1 {
 			return fmt.Errorf("206 Content-Range ends at %d, but %d was requested", end, off+n-1)
 		}
 		if total >= 0 && s.probe.Size >= 0 && total != s.probe.Size {

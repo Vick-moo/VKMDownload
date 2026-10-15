@@ -39,9 +39,15 @@ func (a *App) onTrayReady() {
 	}()
 	go func() {
 		for range quit.ClickedCh {
-			systray.Quit()
+			// Explicit exit: mark intent BEFORE asking Wails to quit, or
+			// Frontend.Quit re-enters beforeClose (which hides when
+			// MinimizeToTray is on) and vetoes the quit, leaving a
+			// headless process. shutdown/stopTray removes the icon.
+			a.requestQuit()
 			if a.ctx != nil {
 				runtime.Quit(a.ctx)
+			} else {
+				systray.Quit()
 			}
 		}
 	}()

@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/wailsapp/wails/v2/pkg/options"
@@ -15,7 +16,7 @@ import (
 )
 
 // appVersion is what Version() reports and the browser extension displays.
-const appVersion = "0.2.4"
+const appVersion = "0.2.5"
 
 // App is the object exposed to the front-end. Every exported method becomes a
 // callable binding, so internal state is kept unexported.
@@ -59,6 +60,13 @@ type App struct {
 	// reliably redirect on Windows, and a test that silently writes the user's
 	// own task list is worse than no test.
 	dataDirOverride string
+
+	// quitFlag records an explicit exit intent (tray 退出 / Quit binding).
+	// Wails Windows Frontend.Quit consults OnBeforeClose first, so without
+	// this flag a Quit requested while MinimizeToTray is on is vetoed by
+	// beforeClose and the process lingers in the background with no window
+	// and no tray icon.
+	quitFlag atomic.Bool
 }
 
 // NewApp creates the application object and its task manager.
@@ -154,8 +162,14 @@ func (a *App) shutdown(ctx context.Context) {
 // When "minimise to tray" is on the close always becomes a hide: silently
 // killing a download because the window was closed is exactly the behaviour a
 // download manager must not have, and the tray icon (with 显示窗口/退出) is
-// what brings the window back. Real exits go through the tray's 退出 item.
+// what brings the window back. Real exits go through the tray's 退出 item
+// (or Quit binding), which sets quitFlag via requestQuit first — Wails
+// Windows Frontend.Quit consults this same hook, so without the bypass below
+// every explicit quit is vetoed and the process lingers headless.
 func (a *App) beforeClose(ctx context.Context) (prevent bool) {
+	if a.quitFlag.Load() {
+		return false
+	}
 	cfg := a.Config()
 	if !cfg.MinimizeToTray {
 		return false
@@ -163,6 +177,10 @@ func (a *App) beforeClose(ctx context.Context) (prevent bool) {
 	a.hide(ctx)
 	return true
 }
+
+// requestQuit records an explicit exit intent so the next beforeClose lets
+// the quit through instead of turning it into a hide.
+func (a *App) requestQuit() { a.quitFlag.Store(true) }
 
 // onSecondInstance runs in the first instance when the user launches the app
 // again. The second process exits on its own; this only brings the existing
@@ -277,8 +295,9 @@ func (a *App) StopAllTasks() int { return a.mgr.StopAll() }
 
 // ClearFailedTasks removes every failed record, returning how many went.
 //
-// Records only: the partial files stay, since they are what a later attempt at
-// the same URL resumes from.
+// Failed tasks are unfinished by definition, so their partials go with the
+// records (same rule as a single removal); finished files elsewhere are
+// never touched.
 func (a *App) ClearFailedTasks() int {
 	n := a.mgr.RemoveFailed()
 	a.debugLog("cleared %d failed tasks", n)
@@ -290,7 +309,7 @@ func (a *App) ClearFailedTasks() int {
 // It takes ids rather than a filter so the front-end can offer "delete
 // everything I can see" over whatever it is currently showing — a file type, a
 // status, a search — without the rule for what is visible living in two places.
-// Records only, as with every other removal.
+// Finished files are never touched; unfinished partials go with their records.
 func (a *App) RemoveTasks(ids []string) int {
 	n := a.mgr.RemoveTasks(ids)
 	a.debugLog("removed %d tasks by selection", n)
@@ -300,6 +319,10 @@ func (a *App) RemoveTasks(ids []string) int {
 // StartPlan starts every waiting task and runs the end-of-plan action once they
 // have all settled.
 func (a *App) StartPlan() (int, error) { return a.mgr.StartPlan() }
+
+// StartPlanSelected starts the selected tasks and runs the end-of-plan action
+// once they have all settled. Tasks outside the selection are ignored.
+func (a *App) StartPlanSelected(ids []string) (int, error) { return a.mgr.StartPlanSelected(ids) }
 
 // PlanRunning reports whether a plan is in progress.
 func (a *App) PlanRunning() bool { return a.mgr.PlanRunning() }
@@ -463,8 +486,38 @@ func (a *App) ClipboardProbe() (map[string]string, error) {
 // so the two cannot drift: they did, briefly, because this was a literal.
 func (a *App) Version() string { return appVersion }
 
+// BringToFront pulls the main window in front of other windows.
+//
+// It exists for the ask-location dialog: a download arrives while the user is
+// in the browser, and the dialog opens inside our window — which sits behind
+// the browser, forcing the user to minimise it to find the question. Wails
+// has no focus API, so this uses the standard always-on-top flash: pin, show,
+// unpin. The window ends up frontmost in z-order without staying pinned.
+func (a *App) BringToFront() {
+	ctx := a.ctx
+	if ctx == nil {
+		return
+	}
+	runtime.WindowUnminimise(ctx)
+	runtime.WindowShow(ctx)
+	runtime.WindowSetAlwaysOnTop(ctx, true)
+	runtime.WindowSetAlwaysOnTop(ctx, false)
+}
+
+// FindUnfinishedByURL returns the id of the unfinished task for url, or "".
+//
+// It backs the new-task dialog's "already listed" path so the UI can point at
+// the existing record instead of just complaining.
+func (a *App) FindUnfinishedByURL(url string) string {
+	if t := a.mgr.findUnfinished(strings.TrimSpace(url), ""); t != nil {
+		return snapshot(t).ID
+	}
+	return ""
+}
+
 // Quit terminates the application, backing the front-end's own exit control.
 func (a *App) Quit() {
+	a.requestQuit()
 	_ = a.mgr.saveTasks()
 	runtime.Quit(a.ctx)
 }

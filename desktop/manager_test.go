@@ -471,6 +471,33 @@ func TestBeforeCloseAllowsClosing(t *testing.T) {
 	}
 }
 
+// TestBeforeCloseQuitIntentLetsTrayExitThrough pins the tray-quit fix.
+//
+// Wails Windows Frontend.Quit consults OnBeforeClose first, so a tray 退出
+// that calls runtime.Quit while MinimizeToTray is on used to be turned into
+// a hide: the icon was already gone (systray.Quit ran first) and the process
+// lingered headless. requestQuit must make the next beforeClose allow the
+// quit through.
+func TestBeforeCloseQuitIntentLetsTrayExitThrough(t *testing.T) {
+	app := newTestApp(t)
+	app.ctx = context.Background()
+	app.hide = func(context.Context) {}
+
+	app.mu.Lock()
+	cfg := app.cfg
+	cfg.MinimizeToTray = true
+	app.cfg = cfg
+	app.mu.Unlock()
+
+	if !app.beforeClose(context.Background()) {
+		t.Fatal("precondition broken: close should hide while minimise-to-tray is on")
+	}
+	app.requestQuit()
+	if app.beforeClose(context.Background()) {
+		t.Error("close refused after requestQuit; tray 退出 would linger headless")
+	}
+}
+
 // TestNewAppEmitterDelegatesToRuntime guards the emitter against the regression
 // that took the app down with a stack overflow: NewApp once assigned a closure
 // whose body called the very field it was assigning, so the first event
@@ -703,9 +730,10 @@ func TestRemoveTasksBySelection(t *testing.T) {
 	}
 	jarA, jarB, zip := mk("a.jar"), mk("b.jar"), mk("c.zip")
 
-	// A partial file for one of the doomed tasks, to prove it survives.
+	// A partial file for one of the doomed tasks: unfinished tasks take their
+	// partials with them, so it must be gone.
 	partial := jarA.Dest + engine.PartSuffix
-	if err := os.WriteFile(partial, []byte("keep me"), 0o644); err != nil {
+	if err := os.WriteFile(partial, []byte("drop me"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -722,9 +750,10 @@ func TestRemoveTasksBySelection(t *testing.T) {
 		t.Error("a task outside the selection was removed")
 	}
 
-	if _, err := os.Stat(partial); err != nil {
-		t.Errorf("a partial file was touched: %v", err)
-	}
+	waitFor(t, "the unfinished partial to be removed with its record", 10*time.Second, func() bool {
+		_, err := os.Stat(partial)
+		return os.IsNotExist(err)
+	})
 }
 
 // TestRemoveTasksWithAnUnknownIdIsHarmless: the list can change between drawing
@@ -749,9 +778,8 @@ func TestRemoveTasksWithAnUnknownIdIsHarmless(t *testing.T) {
 // because a burst of bad URLs can leave hundreds of failed rows: three hundred
 // and twenty-six arrived in one four-second burst once.
 //
-// The contract is the same as a single removal — records only. A partial file is
-// what a later attempt at the same URL resumes from, and deleting them as a side
-// effect of tidying a list would be a destructive surprise.
+// Failed tasks are unfinished by definition, so their partials go with the
+// records; finished files elsewhere are never touched by the sweep.
 func TestRemoveFailedClearsRecordsOnly(t *testing.T) {
 	app := newTestApp(t)
 
@@ -809,9 +837,10 @@ func TestRemoveFailedClearsRecordsOnly(t *testing.T) {
 		t.Error("a completed task was removed")
 	}
 
-	if _, err := os.Stat(partial); err != nil {
-		t.Errorf("the partial file was touched: %v", err)
-	}
+	waitFor(t, "the failed partial to be removed with its record", 10*time.Second, func() bool {
+		_, err := os.Stat(partial)
+		return os.IsNotExist(err)
+	})
 }
 
 // TestRemoveFailedWithNothingToDo is the empty case, which must not report a
@@ -830,11 +859,11 @@ func TestRemoveFailedWithNothingToDo(t *testing.T) {
 	}
 }
 
-// TestRemoveLeavesEveryFileAlone covers what the delete button does. The user
-// was explicit: removing a row from the list must not disturb anything on disk.
-// That includes the partial file and sidecar, which are what a later attempt at
-// the same URL resumes from.
-func TestRemoveLeavesEveryFileAlone(t *testing.T) {
+// TestRemoveKeepsPlannedFileDropsPartials covers what the delete button does:
+// removing an unfinished row drops its .part + sidecar (they could never
+// resume without the index entry), but a file sitting at the task's path is
+// never deleted as a side effect of tidying the list.
+func TestRemoveKeepsPlannedFileDropsPartials(t *testing.T) {
 	app := newTestApp(t)
 	dest := filepath.Join(t.TempDir(), "kept.bin")
 
@@ -854,11 +883,15 @@ func TestRemoveLeavesEveryFileAlone(t *testing.T) {
 		t.Fatalf("Remove: %v", err)
 	}
 
-	for _, p := range []string{dest, dest + engine.PartSuffix, dest + engine.StateSuffix} {
-		if _, err := os.Stat(p); err != nil {
-			t.Errorf("%s was removed: %v", filepath.Base(p), err)
-		}
+	// The file itself must survive; the orphan partials must not.
+	if _, err := os.Stat(dest); err != nil {
+		t.Errorf("the file was removed with its record: %v", err)
 	}
+	waitFor(t, "the orphan partials to be removed", 10*time.Second, func() bool {
+		_, err1 := os.Stat(dest + engine.PartSuffix)
+		_, err2 := os.Stat(dest + engine.StateSuffix)
+		return os.IsNotExist(err1) && os.IsNotExist(err2)
+	})
 
 	// Nothing may remain in the index either.
 	if _, ok := find(app.mgr, task.ID); ok {
@@ -1124,6 +1157,413 @@ func TestStartPlanWithNothingToDoIsRefused(t *testing.T) {
 	if app.mgr.PlanRunning() {
 		t.Error("PlanRunning is true after a refused plan; the slot was not released")
 	}
+}
+
+// TestStartPlanWithFullSlotsStillRuns pins the plan-button fix: when every
+// MaxConcurrent slot is already occupied, StartAll cannot start anything new,
+// yet the running transfers plus the queued ones are still real work. The
+// plan must be accepted (covering active + queued) rather than refused with
+// "没有等待下载的任务".
+func TestStartPlanWithFullSlotsStillRuns(t *testing.T) {
+	want := payload(1 << 20)
+	srv := rangedServer(t, want, 15*time.Millisecond)
+
+	app := newTestApp(t)
+	dir := t.TempDir()
+
+	// Fill both concurrency slots.
+	for i := 0; i < 2; i++ {
+		if _, err := app.mgr.Start(StartRequest{
+			URL:   srv.URL + "/full.bin",
+			Dest:  filepath.Join(dir, fmt.Sprintf("full-%d.bin", i)),
+			Conns: 2,
+			Start: false,
+		}); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+	}
+	if n := app.mgr.StartAll(); n != 2 {
+		t.Fatalf("StartAll started %d, want 2 (MaxConcurrent)", n)
+	}
+
+	// One more task arrives while the slots are full: it can only queue.
+	if _, err := app.mgr.Start(StartRequest{
+		URL:   srv.URL + "/full.bin",
+		Dest:  filepath.Join(dir, "full-2.bin"),
+		Conns: 2,
+		Start: false,
+	}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	n, err := app.mgr.StartPlan()
+	if err != nil {
+		t.Fatalf("StartPlan refused while 2 tasks were running and 1 queued: %v", err)
+	}
+	if n != 3 {
+		t.Errorf("StartPlan covered %d, want 3 (2 active + 1 queued)", n)
+	}
+	if !app.mgr.PlanRunning() {
+		t.Error("PlanRunning is false immediately after StartPlan")
+	}
+
+	// Settle everything; the watcher must then finish the plan.
+	app.mgr.StopAll()
+	waitFor(t, "the plan to stop running", 30*time.Second, func() bool {
+		return !app.mgr.PlanRunning()
+	})
+}
+
+// TestRemoveDropsUnfinishedPartials pins the no-junk rule: removing a task
+// that never finished deletes its .part + sidecar (they could never resume
+// without the index entry), while a completed task's file is never touched.
+func TestRemoveDropsUnfinishedPartials(t *testing.T) {
+	app := newTestApp(t)
+	dir := t.TempDir()
+
+	tv, err := app.mgr.Start(StartRequest{
+		URL:   "https://example.com/junk.bin",
+		Dest:  filepath.Join(dir, "junk.bin"),
+		Start: false,
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	for _, suf := range []string{engine.PartSuffix, engine.StateSuffix} {
+		if err := os.WriteFile(tv.Dest+suf, []byte("orphan"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := app.mgr.Remove(tv.ID, false); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+	waitFor(t, "unfinished partials to be removed", 10*time.Second, func() bool {
+		_, err1 := os.Stat(tv.Dest + engine.PartSuffix)
+		_, err2 := os.Stat(tv.Dest + engine.StateSuffix)
+		return os.IsNotExist(err1) && os.IsNotExist(err2)
+	})
+
+	// A finished file is the user's data: removing its record deletes nothing.
+	tv2, err := app.mgr.Start(StartRequest{
+		URL:   "https://example.com/done.bin",
+		Dest:  filepath.Join(dir, "done.bin"),
+		Start: false,
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if err := os.WriteFile(tv2.Dest, []byte("finished"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tk := app.mgr.get(tv2.ID)
+	tk.mu.Lock()
+	tk.view.Status = StatusCompleted
+	tk.mu.Unlock()
+	if err := app.mgr.Remove(tv2.ID, false); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+	time.Sleep(500 * time.Millisecond)
+	if _, err := os.Stat(tv2.Dest); err != nil {
+		t.Errorf("finished file removed with its record: %v", err)
+	}
+}
+
+// TestNewTasksRestPaused pins the no-auto-follow rule: a task added without
+// Start stays paused — never queued — so starting one task cannot pull the
+// rest along. Only an explicit Start All / plan or per-task resume runs them.
+func TestNewTasksRestPaused(t *testing.T) {
+	app := newTestApp(t)
+
+	v, err := app.mgr.Start(StartRequest{
+		URL: "http://127.0.0.1:1/rest.bin", Dest: filepath.Join(t.TempDir(), "rest.bin"),
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if v.Status != StatusPaused {
+		t.Errorf("new idle task status = %s, want paused", v.Status)
+	}
+}
+
+// TestDuplicateURLIsRejected pins the one-URL-one-task rule: re-adding an
+// unfinished link to the same destination fails and points at the existing
+// record, instead of spawning a second transfer that would fight over the
+// same partial file (or burn a single-use token outright).
+func TestDuplicateURLIsRejected(t *testing.T) {	app := newTestApp(t)
+	dir := t.TempDir()
+
+	first, err := app.mgr.Start(StartRequest{
+		URL: "http://127.0.0.1:1/same.bin", Dest: filepath.Join(dir, "same.bin"),
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if _, err := app.mgr.Start(StartRequest{
+		URL: "http://127.0.0.1:1/same.bin", Dest: filepath.Join(dir, "same.bin"),
+	}); err == nil {
+		t.Error("re-adding the same URL+dest was accepted")
+	} else if !strings.Contains(err.Error(), "已在列表中") {
+		t.Errorf("error = %v, want it to say the link is already listed", err)
+	}
+
+	// The same file deliberately sent to another folder is a different task.
+	if _, err := app.mgr.Start(StartRequest{
+		URL: "http://127.0.0.1:1/same.bin", Dest: filepath.Join(dir, "elsewhere.bin"),
+	}); err != nil {
+		t.Errorf("same URL to another folder was rejected: %v", err)
+	}
+
+	// Completed tasks are exempt: re-downloading a finished file is legitimate.
+	tk := app.mgr.get(first.ID)
+	tk.mu.Lock()
+	tk.view.Status = StatusCompleted
+	tk.mu.Unlock()
+	if _, err := app.mgr.Start(StartRequest{
+		URL: "http://127.0.0.1:1/same.bin", Dest: filepath.Join(dir, "same.bin"),
+	}); err != nil {
+		t.Errorf("re-adding a completed download was rejected: %v", err)
+	}
+}
+
+// TestSameFileDifferentURLIsRejected pins the second duplicate layer:
+// single-use links mint a fresh URL per click, so URL matching is blind to
+// them. Two different URLs on one host advertising the same filename and
+// size are the same file and the second add is refused.
+func TestSameFileDifferentURLIsRejected(t *testing.T) {
+	const name = "same-file.bin"
+	const size = 128 << 10
+	body := make([]byte, size)
+	for i := range body {
+		body[i] = byte(i)
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("ETag", `"v1"`)
+		if r.Method == http.MethodHead {
+			w.Header().Set("Content-Length", fmt.Sprint(size))
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.Header().Set("Content-Disposition", `attachment; filename="`+name+`"`)
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes 0-0/%d", size))
+		w.Header().Set("Content-Length", "1")
+		w.WriteHeader(http.StatusPartialContent)
+		_, _ = w.Write(body[:1])
+	}))
+	defer srv.Close()
+
+	app := newTestApp(t)
+	dir := t.TempDir()
+
+	first, err := app.mgr.Start(StartRequest{
+		URL: srv.URL + "/token-one", Dest: dir, Start: false,
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if first.Name != name {
+		t.Fatalf("probed name = %q, want %q", first.Name, name)
+	}
+	if first.Size != size {
+		t.Fatalf("probed size = %d, want %d", first.Size, size)
+	}
+
+	// Same file behind another token URL: refused, pointing at the first.
+	if _, err := app.mgr.Start(StartRequest{
+		URL: srv.URL + "/token-two", Dest: dir, Start: false,
+	}); err == nil {
+		t.Error("same file under another URL was accepted")
+	} else if !strings.Contains(err.Error(), "已在列表中") {
+		t.Errorf("error = %v, want it to say the file is already listed", err)
+	}
+
+	// A genuinely different file on the same host is still accepted.
+	if _, err := app.mgr.Start(StartRequest{
+		URL: srv.URL + "/token-one", Dest: filepath.Join(dir, "sub"), Start: false,
+	}); err != nil {
+		t.Errorf("same link to another folder was rejected: %v", err)
+	}
+}
+
+// TestHostReachableFastFails pins the add-time probe budget: a dead host
+// must be reported unreachable quickly, not after seconds of retries.
+func TestHostReachableFastFails(t *testing.T) {
+	start := time.Now()
+	if hostReachable("http://127.0.0.1:1/never") {
+		t.Error("unlistening port reported reachable")
+	}
+	if took := time.Since(start); took > 5*time.Second {
+		t.Errorf("dead host took %v to reject", took)
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	defer srv.Close()
+	if !hostReachable(srv.URL + "/x") {
+		t.Error("live test server reported unreachable")
+	}
+}
+
+// TestStartPlanSelectedCoversOnlyTheSelection pins the scoped plan: only the
+// chosen ids are started and watched, and the end action fires once they
+// settle even while other tasks sit untouched.
+func TestStartPlanSelectedCoversOnlyTheSelection(t *testing.T) {
+	want := payload(256 << 10)
+	srv := rangedServer(t, want, 5*time.Millisecond)
+
+	app := newTestApp(t)
+	dir := t.TempDir()
+
+	mk := func(name string) string {
+		v, err := app.mgr.Start(StartRequest{
+			URL: srv.URL + "/plan-sel.bin", Dest: filepath.Join(dir, name),
+			Conns: 2, Start: false,
+		})
+		if err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		return v.ID
+	}
+	// Same URL to different folders is allowed (first duplicate layer).
+	in1, in2, out := mk("sel-1.bin"), mk("sel-2.bin"), mk("sel-out.bin")
+
+	var mu sync.Mutex
+	planned := 0
+	app.emit = func(name string, _ ...any) {
+		if name == "plan:done" {
+			mu.Lock()
+			planned++
+			mu.Unlock()
+		}
+	}
+
+	n, err := app.mgr.StartPlanSelected([]string{in1, in2, "no-such-id"})
+	if err != nil {
+		t.Fatalf("StartPlanSelected: %v", err)
+	}
+	if n != 2 {
+		t.Errorf("StartPlanSelected covered %d, want 2", n)
+	}
+	if !app.mgr.PlanRunning() {
+		t.Error("PlanRunning is false immediately after StartPlanSelected")
+	}
+
+	// The outsider must never start.
+	if v, ok := find(app.mgr, out); !ok || (v.Status != StatusPaused && v.Status != StatusQueued) {
+		t.Errorf("outsider status = %v, want it untouched", v.Status)
+	}
+
+	waitFor(t, "the scoped plan to report completion", 60*time.Second, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return planned > 0
+	})
+	waitFor(t, "the plan to stop running", 5*time.Second, func() bool {
+		return !app.mgr.PlanRunning()
+	})
+}
+
+// TestRemoveFindsPartialsByServerName pins the path bug: a task created
+// without a filename keeps Dest as the directory while the engine resolves
+// dir+suggested-name underneath. Removing it must delete dir+name.part, not
+// the nonexistent dir.part.
+func TestRemoveFindsPartialsByServerName(t *testing.T) {
+	app := newTestApp(t)
+	dir := t.TempDir()
+
+	tv, err := app.mgr.Start(StartRequest{
+		URL: "http://127.0.0.1:1/nameless.bin", Dest: dir, Start: false,
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if tv.Dest != dir {
+		t.Fatalf("dest = %q, want the directory %q", tv.Dest, dir)
+	}
+
+	// The server names it mid-transfer; the view picks the name up.
+	tk := app.mgr.get(tv.ID)
+	tk.mu.Lock()
+	tk.view.Name = "real-name.bin"
+	tk.mu.Unlock()
+
+	part := filepath.Join(dir, "real-name.bin"+engine.PartSuffix)
+	state := filepath.Join(dir, "real-name.bin"+engine.StateSuffix)
+	for _, p := range []string{part, state} {
+		if err := os.WriteFile(p, []byte("half"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := app.mgr.Remove(tv.ID, false); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+	waitFor(t, "the server-named partials to be removed", 10*time.Second, func() bool {
+		_, err1 := os.Stat(part)
+		_, err2 := os.Stat(state)
+		return os.IsNotExist(err1) && os.IsNotExist(err2)
+	})
+}
+
+// TestStartEmitsProgressImmediately pins the responsive-button rule: starting
+// tasks must report downloading/queued at once via task:progress, not wait
+// for the engine's first progress event (seconds away on a slow link).
+func TestStartEmitsProgressImmediately(t *testing.T) {
+	app := newTestApp(t)
+	dir := t.TempDir()
+
+	for i := 0; i < 3; i++ {
+		if _, err := app.mgr.Start(StartRequest{
+			URL: "http://127.0.0.1:1/instant.bin", Dest: filepath.Join(dir, fmt.Sprintf("in-%d.bin", i)),
+		}); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+	}
+
+	var mu sync.Mutex
+	seen := map[string]string{}
+	app.emit = func(name string, data ...any) {
+		if name != "task:progress" || len(data) == 0 {
+			return
+		}
+		if v, ok := data[0].(TaskView); ok {
+			mu.Lock()
+			seen[v.ID] = string(v.Status)
+			mu.Unlock()
+		}
+	}
+
+	if n := app.mgr.StartAll(); n != 2 {
+		t.Fatalf("StartAll started %d, want 2 (MaxConcurrent)", n)
+	}
+
+	// Synchronous: no waiting for engine progress. Two run, one queues
+	// behind MaxConcurrent — all three must report at once.
+	// (Copy out from under the lock first: StopAll below emits too, and
+	// holding this lock across it would deadlock the recorder.)
+	mu.Lock()
+	got := make(map[string]string, len(seen))
+	for id, st := range seen {
+		got[id] = st
+	}
+	mu.Unlock()
+	if len(got) != 3 {
+		t.Fatalf("task:progress reported %d tasks, want 3 immediately", len(got))
+	}
+	downloading, queued := 0, 0
+	for id, st := range got {
+		switch st {
+		case string(StatusDownloading):
+			downloading++
+		case string(StatusQueued):
+			queued++
+		default:
+			t.Errorf("task %s reported %s, want downloading or queued", id, st)
+		}
+	}
+	if downloading != 2 || queued != 1 {
+		t.Errorf("got %d downloading + %d queued, want 2 + 1", downloading, queued)
+	}
+	app.mgr.StopAll()
 }
 
 // TestStatsAggregatesActiveTasks covers the sidebar totals.

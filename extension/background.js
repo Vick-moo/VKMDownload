@@ -102,6 +102,11 @@ async function handOver(payload) {
     if (!response.ok) {
       return { ok: false, error: body.error || `HTTP ${response.status}` };
     }
+    // A duplicate URL is answered 200 with the existing record: the file is
+    // already coming down, so there must be no browser fallback download.
+    if (body.duplicate) {
+      return { ok: true, duplicate: true, name: body.name || "" };
+    }
     return { ok: true, name: body.name || "" };
   } catch (error) {
     // The app may have exited between the ping and this call.
@@ -112,6 +117,16 @@ async function handOver(payload) {
 
 /** Tells the user what happened, since neither path has a UI of its own. */
 function report(result, fallbackName) {
+  if (result.duplicate) {
+    chrome.notifications.create({
+      type: "basic",
+      iconUrl: "icons/icon128.png",
+      title: "已在下载列表中",
+      message: result.name || fallbackName || "该链接已在列表中，无需重复添加",
+      priority: 0,
+    });
+    return;
+  }
   const succeeded = result.ok;
   chrome.notifications.create({
     type: "basic",
@@ -267,6 +282,18 @@ chrome.downloads.onCreated.addListener(async (item) => {
   const kb = await sizeKb(item);
   if (policy.minSizeKb > 0 && kb >= 0 && kb < policy.minSizeKb) return;
 
+  // Chrome usually does not know the filename at onCreated either — it
+  // arrives with the response headers, right around when the size does.
+  // Re-read the item so the handover carries the real name; otherwise the
+  // app falls back to a URL token and the finished file has no real name.
+  let filename = item.filename ? item.filename.split(/[\\/]/).pop() : "";
+  try {
+    const [fresh] = await chrome.downloads.search({ id: item.id });
+    if (fresh && fresh.filename) filename = fresh.filename.split(/[\\/]/).pop();
+  } catch {
+    // The item may already be gone; fall back to what onCreated saw.
+  }
+
   // Cancel first, then hand over: the user sees the browser's entry disappear
   // rather than sit there failed next to the app's own progress.
   chrome.downloads.cancel(item.id, () => {
@@ -276,7 +303,7 @@ chrome.downloads.onCreated.addListener(async (item) => {
 
   const result = await handOver({
     url,
-    filename: item.filename ? item.filename.split(/[\\/]/).pop() : "",
+    filename,
     referer: item.referrer || "",
     cookie: await cookiesFor(url),
     userAgent: navigator.userAgent || "",

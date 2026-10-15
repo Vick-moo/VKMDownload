@@ -23,6 +23,8 @@ interface Props {
   onClose: () => void;
   /** Called after a task is created, with whether it was started. */
   onCreated: () => void;
+  /** Called with the existing task id when the URL is already listed. */
+  onLocateTask?: (id: string) => void;
 }
 
 /**
@@ -43,6 +45,7 @@ export function NewTaskDialog({
   config,
   onClose,
   onCreated,
+  onLocateTask,
 }: Props): JSX.Element | null {
   const [url, setURL] = useState("");
   const [dest, setDest] = useState("");
@@ -111,7 +114,22 @@ export function NewTaskDialog({
       onCreated();
       onClose();
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      const msg = e instanceof Error ? e.message : String(e);
+      // A duplicate URL is refused by the backend; point at the existing
+      // record instead of leaving the user staring at an error.
+      if (msg.includes("已在列表中")) {
+        try {
+          const id = await api.findUnfinishedByURL(trimmed);
+          if (id) {
+            onClose();
+            onLocateTask?.(id);
+            return;
+          }
+        } catch {
+          // Fall through to the plain error below.
+        }
+      }
+      setError(msg);
     } finally {
       setBusy(false);
     }

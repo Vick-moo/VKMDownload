@@ -40,9 +40,9 @@
 |---|---|---|
 | `manager.go` | `Manager` 状态机：Start/Pause/Resume/Cancel/Remove、批量操作、计划下载、`Stats`、`loadTasks/saveTasks` | 任务卡住、暂停变取消、批量卡死、计数对不上 |
 | `update.go` | 更新检查：`CheckUpdate` binding、`isNewerVersion` 对比、`checkUpdateOnce` 启动通知、`OpenReleasePage` | 更新横幅不出现、版本号比错 |
-| `tray.go` | 托盘图标（fyne.io/systray，自带消息循环）：显示窗口/退出，左键恢复 | 关窗口窗口丢失、托盘无图标 |
+| `tray.go` | 托盘图标（fyne.io/systray，自带消息循环）：显示窗口/退出，左键恢复 | 关窗口窗口丢失、托盘无图标、托盘退出后进程残留 |
 | `config.go` | 设置结构（含 `AskLocation`、`Organize*`、`UpdateStatus` 相关）+ `organizeTarget` 落点计算 | 设置不生效、整理落点不对 |
-| `app.go` | Wails 生命周期、binding、剪贴板轮询、托盘关闭语义 | 启动崩溃、关不掉窗口、剪贴板重复建任务 |
+| `app.go` | Wails 生命周期、binding、剪贴板轮询、托盘关闭语义、quitFlag 退出意图 | 启动崩溃、关不掉窗口、剪贴板重复建任务 |
 | `api.go` | 回环端点 `/ping` `/settings` `/add`、`apiGuard`、`sanitizeSuggestedName` | 扩展连不上、文件名越界 |
 | `config.go` | 设置结构、默认值、`normalize`（含 `MaxConcurrent` 校验） | 设置不生效、默认值异常 |
 
@@ -117,7 +117,21 @@ cd desktop && wails build            # 产出 build/bin/VKMDownload.exe
 9. 剪贴板旧轮询器残留：`clipGen` 代际计数保证旧 loop 退出；`timer` 改复用。
 10. 文件名净化：`sanitizeSuggestedName` 补过滤 `:*?"<>|`、控制字符、尾部点空格、保留设备名；`Start` 的手工文件名走同一净化；`Referer` 剥 `CRLF`。
 11. 更新检查（新功能）：`update.go` 查 `releases/latest`，启动时后台跑、失败静默；有新版发 `update:available` 事件，前端顶部常驻横幅；`OpenReleasePage` 只允许本项目发布页。
-
+12. 托盘退出被 beforeClose 否决：Wails Windows Frontend.Quit 会先问 OnBeforeClose，MinimizeToTray 开时托盘 退出 与 Quit binding 被转成隐藏，图标已没但进程残留。修法：App 加 quitFlag，托盘退出与 Quit 先 requestQuit 再 runtime.Quit，beforeClose 见到置位直接放行；测试 TestBeforeCloseQuitIntentLetsTrayExitThrough 锁定。
+13. 多连接在无视 Range 尾端的服务器上全灭：dl.fuckingfast.co 对任何 Range 回 start-EOF 的 Content-Range，引擎要求尾端精确相等于是每块失败重试后吞成 bytes unclaimed、0 B。修法：validateRangeResponse 接受 end 大于等于所要并只读前 n 字节；fetchSegment 尾部保留 lastErr；测试 TestDownloadRangeEndIgnoredByServer 锁定。版本升到 0.2.5（app.go + wails.json）。
+14. Plan refused when slots full: StartPlan only counted newly started tasks; with MaxConcurrent slots occupied it reported no waiting tasks and never launched the watcher. Fix: active+queued counts as a valid plan. Test: TestStartPlanWithFullSlotsStillRuns.
+15. Record deletion leaves junk: Remove now drops .part+sidecar for unfinished tasks (finished files never auto-deleted). README delete section + App/TaskRow texts updated. Test: TestRemoveDropsUnfinishedPartials.
+16. Extension empty filename: onCreated hands over stale item.filename; re-search after size wait (background.js). Reload unpacked extension to apply.
+17. Probe drops GET disposition: probeRange refused to recompute SuggestedName once the URL fallback was set (probe.go). Fix: disposition-derived name always wins. Test: TestProbePrefersDispositionOverURLToken.
+18. Paused-by-default + dupe rejection: Start creates paused (manager.go), same URL+dest unfinished rejected via duplicateError, apiAdd answers 200-duplicate (no browser fallback), dialog locates row via FindUnfinishedByURL. Tests: TestNewTasksRestPaused, TestDuplicateURLIsRejected.
+19. Add-time probe + content dupes: Start probes unnamed adds (probeName, fail-open) for instant name/size and layer-two dedup by host+name+size (findSameContent). Exe rebuilt.
+20. Probe fast-fail: hostReachable 2s dial pre-check in probeName; dead hosts skip probing. Test: TestHostReachableFastFails.
+21. BringToFront for ask dialogs: Unminimise+Show+topmost flash (app.go), called from locationAsk/clipboardURL handlers. Single-window limit documented.
+22. Selection bulk verbs: runSelected in App.tsx (resume/pause/remove over selected set); no backend change.
+23. Selection UX: task__check checkbox in TaskRow name cell; App toolbar buttons switch all<->selected scope; runSelected reused by all three.
+24. Scoped plan: StartPlanSelected + watchPlanSelected + finishPlanScoped/End (manager.go), App/plan-button scope switch. Checkbox left of name.
+25. Delete path bug: partialPaths() (manager.go) resolves dir+Name like the engine; Remove/Cancel use it. Test: TestRemoveFindsPartialsByServerName.
+26. Instant start feedback: startRun emits task:progress on all paths (manager.go). Test: TestStartEmitsProgressImmediately.
 ## 8. 剩下未动的（有意延后）
 
 - ~~`Remove`/`Cancel` 在 binding 线程同步 `waitStopped(3s)`~~：已修——等删改走后台 goroutine，`Cancel` 用代际 guard 防误删（`manager.go:Cancel/Remove`）。

@@ -7,11 +7,13 @@
  */
 import {
   ApplyUpdate,
+  BringToFront,
   CancelTask,
   CheckUpdate,
   ClipboardProbe,
   Config as GetConfig,
   DefaultOrganizeGroups,
+  FindUnfinishedByURL,
   ListTasks,
   NewTask,
   OpenFile,
@@ -29,6 +31,7 @@ import {
   SetConfig,
   StartAllTasks,
   StartPlan,
+  StartPlanSelected,
   StopAllTasks,
   TaskStats,
   Version,
@@ -37,6 +40,7 @@ import { EventsOn } from "../wailsjs/runtime/runtime";
 import type { Config, OrganizeGroup, StartRequest, TaskView, UpdateInfo, UpdateStatus } from "./types";
 export const api = {
   version: (): Promise<string> => Version(),
+  bringToFront: (): Promise<void> => BringToFront(),
   checkUpdate: (): Promise<UpdateInfo> => CheckUpdate(),
   startUpdate: (): Promise<UpdateStatus> => StartUpdate(),
   updateProgress: (): Promise<UpdateStatus> => UpdateProgress(),
@@ -45,6 +49,8 @@ export const api = {
   openReleasePage: (url: string): Promise<void> => OpenReleasePage(url),
   listTasks: (): Promise<TaskView[]> => ListTasks(),
   newTask: (req: StartRequest): Promise<TaskView> => NewTask(req),
+  findUnfinishedByURL: (url: string): Promise<string> =>
+    FindUnfinishedByURL(url),
   pauseTask: (id: string): Promise<void> => PauseTask(id),
   resumeTask: (id: string): Promise<void> => ResumeTask(id),
   cancelTask: (id: string): Promise<void> => CancelTask(id),
@@ -55,6 +61,7 @@ export const api = {
   startAllTasks: (): Promise<number> => StartAllTasks(),
   stopAllTasks: (): Promise<number> => StopAllTasks(),
   startPlan: (): Promise<number> => StartPlan(),
+  startPlanSelected: (ids: string[]): Promise<number> => StartPlanSelected(ids),
   planRunning: (): Promise<boolean> => PlanRunning(),
   revealInExplorer: (id: string): Promise<void> => RevealInExplorer(id),
   openFile: (id: string): Promise<void> => OpenFile(id),

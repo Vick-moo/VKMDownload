@@ -773,6 +773,43 @@ func TestProbeReportsRangeSupportFromBehaviour(t *testing.T) {
 	}
 }
 
+// TestProbePrefersDispositionOverURLToken pins the filename fix: some hosts
+// send no Content-Disposition on HEAD but do on the ranged GET (observed:
+// dl.fuckingfast.co). The probe must promote the disposition name over the
+// URL-token fallback it assigned from HEAD, or every such file lands with
+// the token as its name.
+func TestProbePrefersDispositionOverURLToken(t *testing.T) {
+	const real = "Onimusha_Way_of_the_Sword_--_fitgirl-repacks.site_--_.part05.rar"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("ETag", `"v1"`)
+		if r.Method == http.MethodHead {
+			w.Header().Set("Content-Length", "2097152000")
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.Header().Set("Content-Disposition", `attachment; filename*=UTF-8''`+real)
+		w.Header().Set("Content-Range", "bytes 0-0/2097152000")
+		w.Header().Set("Content-Length", "1")
+		w.WriteHeader(http.StatusPartialContent)
+		_, _ = w.Write([]byte{0})
+	}))
+	defer srv.Close()
+
+	d, err := New(Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+
+	p, err := d.Probe(context.Background(), srv.URL+"/dl/TOKEN")
+	if err != nil {
+		t.Fatalf("Probe: %v", err)
+	}
+	if p.SuggestedName != real {
+		t.Errorf("SuggestedName = %q, want the disposition name %q", p.SuggestedName, real)
+	}
+}
+
 func TestProbeRejectsUnknownScheme(t *testing.T) {
 	d, err := New(Options{})
 	if err != nil {

@@ -1206,6 +1206,26 @@ body.resizing {
   white-space: nowrap;
   font-size: 14px;
   font-weight: 500;
+  flex: 1;
+  min-width: 0;
+}
+
+/* Name + selection checkbox share one row: the name keeps the ellipsis, the
+   box stays a fixed 16px at the right. */
+.task__namerow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.task__check {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  cursor: pointer;
+  accent-color: var(--accent);
 }
 
 /* Shown in place of the name while the server has not supplied one yet: the URL

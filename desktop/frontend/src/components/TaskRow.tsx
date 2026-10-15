@@ -78,15 +78,26 @@ export function TaskRow({
         {/* The name is unknown until the server answers, and stays unknown if
             the transfer fails early; the URL's last segment is a better label
             than the whole address. */}
-        <span className="task__name" title={task.name || task.url}>
-          {task.name ? (
-            ellipsizeMiddle(task.name, 60)
-          ) : (
-            <span className="task__name-pending">
-              {ellipsizeMiddle(urlTail(task.url), 60)}
-            </span>
-          )}
-        </span>
+        <div className="task__namerow">
+          <input
+            type="checkbox"
+            className="task__check"
+            checked={selected}
+            aria-label={`选择 ${task.name || task.url}`}
+            title="选择此任务（可多选，对顶部按钮生效）"
+            onClick={(e) => e.stopPropagation()}
+            onChange={() => onSelect(task.id, true)}
+          />
+          <span className="task__name" title={task.name || task.url}>
+            {task.name ? (
+              ellipsizeMiddle(task.name, 60)
+            ) : (
+              <span className="task__name-pending">
+                {ellipsizeMiddle(urlTail(task.url), 60)}
+              </span>
+            )}
+          </span>
+        </div>
         {task.status === "failed" && task.error ? (
           <span className="task__error">{task.error}</span>
         ) : (
@@ -193,13 +204,14 @@ export function TaskRow({
         </button>
 
         {/* No separate ✕: it did exactly what the trash button does — remove
-            the row and leave every file alone — so two buttons for one action
-            only invited the question of how they differed. */}
+            the row, keep finished files, drop unfinished partials — so two
+            buttons for one action only invited the question of how they
+            differed. */}
         <button
           type="button"
           className="icon-btn"
           aria-label="从列表移除"
-          title="从列表移除（不删除文件）"
+          title="从列表移除（下好的文件不动，没下完的半成品会一起删）"
           onClick={() => void run(() => api.removeTask(task.id, false))}
         >
           <IconTrash size={16} />

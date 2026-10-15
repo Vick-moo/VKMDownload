@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -279,6 +280,19 @@ func (a *App) apiAdd(w http.ResponseWriter, r *http.Request) {
 		UserAgent: req.UserAgent,
 	})
 	if err != nil {
+		// A duplicate must NOT fail the handover: the extension falls back
+		// to a browser download on any error, which would download the file
+		// twice. Answer 200 with the existing record instead.
+		var dup *duplicateError
+		if errors.As(err, &dup) {
+			a.debugLog("extension duplicate %s (existing %s)", req.URL, dup.ID)
+			writeJSON(w, http.StatusOK, map[string]any{
+				"duplicate": true,
+				"id":        task.ID,
+				"name":      task.Name,
+			})
+			return
+		}
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}

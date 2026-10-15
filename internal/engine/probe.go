@@ -291,8 +291,17 @@ func (d *Downloader) probeRange(ctx context.Context, rawURL string, res *ProbeRe
 	if res.ContentType == "" {
 		res.ContentType = resp.Header.Get("Content-Type")
 	}
-	if res.ContentDisposition == "" {
-		res.ContentDisposition = resp.Header.Get("Content-Disposition")
+	// A Content-Disposition learned here outranks a URL fallback assigned
+	// earlier: probeHead fills SuggestedName from the URL token when HEAD
+	// carries no disposition (observed: hosts that only send it on GET),
+	// and without this the real filename is recorded yet never used.
+	if cd := resp.Header.Get("Content-Disposition"); cd != "" {
+		if res.ContentDisposition == "" {
+			res.ContentDisposition = cd
+		}
+		if fn := filenameFromDisposition(cd); fn != "" {
+			res.SuggestedName = fn
+		}
 	}
 	if res.SuggestedName == "" {
 		res.SuggestedName = suggestName(res.ContentDisposition, res.FinalURL)

@@ -147,6 +147,8 @@ function App(): JSX.Element {
         setDialogUserAgent("");
         setDialogAsk(false);
         setDialogOpen(true);
+        // The user is in another app; pull the question in front of it.
+        void api.bringToFront().catch(() => {});
       }),
       // Ask-location arrivals (extension or clipboard): nothing is created
       // yet. The dialog collects the placement; closing it abandons the
@@ -162,6 +164,8 @@ function App(): JSX.Element {
           setDialogUserAgent(req.userAgent ?? "");
           setDialogAsk(true);
           setDialogOpen(true);
+          // The user is in the browser; pull the question in front of it.
+          void api.bringToFront().catch(() => {});
         },
       ),
       // A newer release, announced once per run by the Go side.
@@ -256,41 +260,88 @@ function App(): JSX.Element {
     [],
   );
 
+  // Bulk verbs over the current selection. Per-task calls are settled
+  // individually so one bad row cannot abort the rest; the notice reports
+  // how many actually went through. Removing also clears the selection,
+  // since selected ids would otherwise point at rows that no longer exist.
+  const runSelected = useCallback(
+    async (action: "resume" | "pause" | "remove") => {
+      const ids = [...selected];
+      if (ids.length === 0) return;
+      const verbs = { resume: "继续", pause: "暂停", remove: "删除" } as const;
+      let ok = 0;
+      await Promise.all(
+        ids.map(async (id) => {
+          try {
+            if (action === "resume") await api.resumeTask(id);
+            else if (action === "pause") await api.pauseTask(id);
+            else await api.removeTask(id, false);
+            ok++;
+          } catch {
+            // Count what worked; the row keeps its state for a retry.
+          }
+        }),
+      );
+      if (action === "remove") setSelected(new Set());
+      void reload();
+      flash(ok > 0 ? `已${verbs[action]} ${ok}/${ids.length} 个` : `${verbs[action]}失败`);
+    },
+    [selected, flash, reload],
+  );
+
   const onStartAll = useCallback(async () => {
+    if (selected.size > 0) {
+      await runSelected("resume");
+      return;
+    }
     try {
       const n = await api.startAllTasks();
       flash(n > 0 ? `已开始 ${n} 个任务` : "没有等待中的任务");
     } catch (e) {
       flash(`开始失败：${e instanceof Error ? e.message : String(e)}`);
     }
-  }, [flash]);
+  }, [flash, selected, runSelected]);
 
   const onStopAll = useCallback(async () => {
+    if (selected.size > 0) {
+      await runSelected("pause");
+      return;
+    }
     try {
       const n = await api.stopAllTasks();
       flash(n > 0 ? `已暂停 ${n} 个任务` : "没有正在下载的任务");
     } catch (e) {
       flash(`暂停失败：${e instanceof Error ? e.message : String(e)}`);
     }
-  }, [flash]);
+  }, [flash, selected, runSelected]);
 
   const onStartPlan = useCallback(async () => {
     try {
-      const n = await api.startPlan();
-      flash(`计划已启动 · ${n} 个任务，全部结束后执行设置里的动作`);
+      const n =
+        selected.size > 0
+          ? await api.startPlanSelected([...selected])
+          : await api.startPlan();
+      flash(
+        selected.size > 0
+          ? `计划已启动 · 选中 ${n} 个任务，结束后执行设置里的动作`
+          : `计划已启动 · ${n} 个任务，全部结束后执行设置里的动作`,
+      );
     } catch (e) {
       flash(`计划未能启动：${e instanceof Error ? e.message : String(e)}`);
     }
-  }, [flash]);
+  }, [flash, selected]);
 
   const onDeleteVisible = useCallback(async () => {
     setDeleting(true);
     try {
       const n = await api.removeTasks(visible.map((t) => t.id));
       setConfirmDeleteOpen(false);
+      // Removed rows must leave the selection too, or the toolbar keeps
+      // acting on ids that no longer exist.
+      setSelected(new Set());
       flash(
         n > 0
-          ? `已删除 ${n} 条记录 · 磁盘上的文件没有动`
+          ? `已删除 ${n} 条记录 · 没下完的半成品已清理，下好的文件没动`
           : "没有可删除的记录",
       );
     } catch (e) {
@@ -473,49 +524,80 @@ function App(): JSX.Element {
 
               {/* Bulk actions. Each reports what it did through the notice line,
                   because a click that finds nothing to do is otherwise
-                  indistinguishable from one that failed. */}
+                  indistinguishable from one that failed.
+                  When rows are checked these three switch from "everything"
+                  to "the selection", so starting one never pulls the rest
+                  along; the plan button below always means everything. */}
               <button
                 type="button"
                 className="btn"
                 onClick={() => void onStartAll()}
-                title="开始所有等待中的任务"
+                title={
+                  selected.size > 0
+                    ? `开始选中的 ${selected.size} 个任务`
+                    : "开始所有等待中的任务"
+                }
               >
                 <IconPlay size={16} />
-                全部开始
+                {selected.size > 0 ? `开始选中(${selected.size})` : "全部开始"}
               </button>
               <button
                 type="button"
                 className="btn"
                 onClick={() => void onStopAll()}
-                title="暂停所有正在下载的任务，保留断点"
+                title={
+                  selected.size > 0
+                    ? `暂停选中的 ${selected.size} 个任务，保留断点`
+                    : "暂停所有正在下载的任务，保留断点"
+                }
               >
                 <IconPause size={16} />
-                全部停止
+                {selected.size > 0 ? `停止选中(${selected.size})` : "全部停止"}
               </button>
               <button
                 type="button"
                 className="btn btn--plan"
                 onClick={() => void onStartPlan()}
-                title="下载全部任务，全部结束后执行设置里的动作"
+                title={
+                  selected.size > 0
+                    ? `只下载选中的 ${selected.size} 个任务，结束后执行设置里的动作`
+                    : "下载全部任务，全部结束后执行设置里的动作"
+                }
               >
                 <IconPlan size={16} />
-                计划下载
+                {selected.size > 0 ? `计划选中(${selected.size})` : "计划下载"}
               </button>
+
+
 
               {/* Deletes what the list is currently showing, whatever that is.
                   The label names the filter and the count, because "delete
                   all" over an unnoticed filter is how someone loses rows they
-                  meant to keep. */}
-              {visible.length > 0 ? (
+                  meant to keep. With checked rows it switches to the
+                  selection instead — same rule as 开始/停止 above: finished
+                  files stay, unfinished partials go with their records. */}
+              {visible.length > 0 || selected.size > 0 ? (
                 <button
                   type="button"
                   className="btn btn--danger"
-                  onClick={() => setConfirmDeleteOpen(true)}
-                  title="只删除列表里的记录，磁盘上的文件不会动"
+                  onClick={() =>
+                    selected.size > 0
+                      ? void runSelected("remove")
+                      : setConfirmDeleteOpen(true)
+                  }
+                  title={
+                    selected.size > 0
+                      ? `删除选中的 ${selected.size} 条记录，下好的文件不动，没下完的半成品会一起清理`
+                      : "删除列表里的记录，没下完的半成品会一起清理，下好的文件不动"
+                  }
                 >
                   <IconTrash size={16} />
-                  删除{filter === "all" ? "全部" : filterLabel(filter)}
-                  <span className="btn__count">{visible.length}</span>
+                  {selected.size > 0
+                    ? `删除选中(${selected.size})`
+                    : `删除${filter === "all" ? "全部" : filterLabel(filter)}`}
+                  <span className="btn__count">
+                    {selected.size > 0 ? selected.size : visible.length}
+                  </span>
                 </button>
               ) : null}
 
@@ -592,6 +674,12 @@ function App(): JSX.Element {
           // next poll.
         }}
         onCreated={() => void reload()}
+        onLocateTask={(id) => {
+          setFilter("all");
+          setSelected(new Set([id]));
+          void reload();
+          flash("该链接已在列表中，已为你选中");
+        }}
       />
 
       {updateHintOpen ? (
@@ -612,7 +700,7 @@ function App(): JSX.Element {
         <ConfirmDialog
           title="删除这些记录？"
           message={`将从列表里删除${filter === "all" ? "全部" : filterLabel(filter)} ${visible.length} 条记录。`}
-          detail="只删除列表记录。磁盘上已经下好的文件、以及未完成的 .part 文件都会保留，可以之后再续传或自己删除。"
+          detail="只删除列表记录。下好的文件会保留；没下完的半成品和续传记录会一起删掉，同链接重下从头开始。"
           confirmLabel={`删除 ${visible.length} 条`}
           busy={deleting}
           onConfirm={() => void onDeleteVisible()}

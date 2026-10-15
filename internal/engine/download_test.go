@@ -1170,3 +1170,71 @@ func TestDownloadRejectsEmptyURL(t *testing.T) {
 		t.Errorf("error = %v, want it to complain about the missing URL", err)
 	}
 }
+
+// TestDownloadRangeEndIgnoredByServer is the regression test for hosts that
+// answer every Range request with start-EOF instead of the requested span
+// (observed: dl.fuckingfast.co returns "Content-Range: bytes 0-2097151999/…"
+// for a request of bytes=0-524287, with the body carrying the requested
+// prefix). The engine used to demand an exact end match, so every
+// multi-connection block failed, retried, and collapsed into a generic
+// "bytes unclaimed" with 0 B on disk — while a single connection worked.
+func TestDownloadRangeEndIgnoredByServer(t *testing.T) {
+	const size = 256 << 10
+	body := make([]byte, size)
+	for i := range body {
+		body[i] = byte(i * 31)
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("ETag", `"ff1"`)
+		if r.Method == http.MethodHead {
+			w.Header().Set("Content-Length", strconv.Itoa(size))
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		if rg := r.Header.Get("Range"); rg != "" {
+			var start, end int
+			if _, err := fmt.Sscanf(rg, "bytes=%d-%d", &start, &end); err != nil || start < 0 || end < start || start >= size {
+				w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
+				return
+			}
+			if end >= size {
+				end = size - 1
+			}
+			// Lie about the end like the real host: header claims EOF…
+			w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, size-1, size))
+			w.Header().Set("Content-Length", strconv.Itoa(end-start+1))
+			w.WriteHeader(http.StatusPartialContent)
+			// …but the body carries exactly the requested bytes.
+			_, _ = w.Write(body[start : end+1])
+			return
+		}
+		w.Header().Set("Content-Length", strconv.Itoa(size))
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(body)
+	}))
+	defer srv.Close()
+
+	dest := filepath.Join(t.TempDir(), "ff.bin")
+
+	d, err := New(testOptions(4))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+
+	res, err := d.Download(context.Background(), Request{URL: srv.URL, Dest: dest})
+	if err != nil {
+		t.Fatalf("Download: %v", err)
+	}
+	if res.Size != size {
+		t.Errorf("Result.Size = %d, want %d", res.Size, size)
+	}
+	got, err := os.ReadFile(dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, body) {
+		t.Errorf("downloaded %d bytes but contents differ", len(got))
+	}
+}

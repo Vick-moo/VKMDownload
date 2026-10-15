@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -277,6 +279,191 @@ func (m *Manager) List() []TaskView {
 	return out
 }
 
+// duplicateError reports an attempt to add a URL that already has an
+// unfinished task. It carries the existing record so callers can point at it
+// instead of just complaining.
+type duplicateError struct {
+	ID     string
+	Status TaskStatus
+	Name   string
+}
+
+func (e *duplicateError) Error() string {
+	label := string(e.Status)
+	switch e.Status {
+	case StatusDownloading:
+		label = "下载中"
+	case StatusQueued:
+		label = "排队中"
+	case StatusPaused:
+		label = "已暂停"
+	case StatusFailed:
+		label = "已失败"
+	case StatusCanceled:
+		label = "已取消"
+	}
+	if e.Name != "" {
+		return fmt.Sprintf("该链接已在列表中（%s：%s），无需重复添加", label, e.Name)
+	}
+	return fmt.Sprintf("该链接已在列表中（%s），无需重复添加", label)
+}
+
+// findUnfinished returns the first task for url that has not completed, or
+// nil. An empty dest matches any destination; otherwise both must match, so
+// the same file deliberately downloaded to two folders counts as two tasks.
+// Completed tasks are never matches: re-downloading a finished file is
+// a legitimate new task.
+func (m *Manager) findUnfinished(url, dest string) *task {
+	m.mu.Lock()
+	ids := append([]string(nil), m.order...)
+	m.mu.Unlock()
+
+	for _, id := range ids {
+		t := m.get(id)
+		if t == nil {
+			continue
+		}
+		t.mu.Lock()
+		match := t.view.URL == url && t.view.Status != StatusCompleted &&
+			(dest == "" || t.view.Dest == dest)
+		t.mu.Unlock()
+		if match {
+			return t
+		}
+	}
+	return nil
+}
+
+// findSameContent returns an unfinished task that is most likely the same
+// file under a different URL: same host, same filename, and compatible size.
+// (Sizes are compatible when either side is unknown — a row that never
+// started reports 0 — or both agree.) Completed tasks never match, and an
+// explicit escape hatch always exists: rename the newcomer and it no longer
+// matches.
+func (m *Manager) findSameContent(url, name string, size int64) *task {
+	host := urlHost(url)
+	if host == "" || name == "" {
+		return nil
+	}
+
+	m.mu.Lock()
+	ids := append([]string(nil), m.order...)
+	m.mu.Unlock()
+
+	for _, id := range ids {
+		t := m.get(id)
+		if t == nil {
+			continue
+		}
+		t.mu.Lock()
+		v := t.view
+		// Identical URLs are the first layer's business (same link to
+		// another folder is allowed); this layer is only for different
+		// URLs pointing at the same file.
+		match := v.URL != url &&
+			v.Status != StatusCompleted &&
+			v.Name != "" && v.Name == name &&
+			urlHost(v.URL) == host &&
+			(size <= 0 || v.Size <= 0 || v.Size == size)
+		t.mu.Unlock()
+		if match {
+			return t
+		}
+	}
+	return nil
+}
+
+// urlHost returns the lower-cased hostname without a www. prefix, or "".
+func urlHost(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	return strings.ToLower(strings.TrimPrefix(u.Hostname(), "www."))
+}
+
+// probeName asks the server for the real filename and size without
+// downloading anything. It backs add-time naming and the content-based
+// duplicate check. It fails open: any error means ("", 0) and the caller
+// keeps the old unnamed behaviour.
+func (m *Manager) probeName(rawURL string, req StartRequest) (string, int64) {
+	base := m.app.ctx
+	if base == nil {
+		base = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(base, 10*time.Second)
+	defer cancel()
+
+	// Fast-fail for dead hosts: a refused/unreachable address fails the dial
+	// in milliseconds, while a full probe would work through retries for
+	// seconds. A failed dial skips the probe entirely (fail open). Note this
+	// bypasses any configured proxy, so proxy users simply keep the old
+	// unnamed-until-start behaviour.
+	if !hostReachable(rawURL) {
+		return "", 0
+	}
+
+	// Same credentials the transfer itself would send: some hosts only name
+	// the file for a client that looks like its own user.
+	opt := engine.Options{}.Normalize()
+	// One quick look, not a campaign: this runs on every add, and the real
+	// transfer re-probes with the full budget anyway, so a dead host must
+	// fail fast rather than work through retries here.
+	opt.Backoff = engine.Backoff{
+		Base: 300 * time.Millisecond, Max: time.Second,
+		Factor: 2, Jitter: 0, MaxTries: 1,
+	}
+	opt.Headers = http.Header{}
+	if r := strings.TrimSpace(req.Referer); r != "" {
+		opt.Headers.Set("Referer", r)
+	}
+	if c := strings.TrimSpace(req.Cookie); c != "" {
+		opt.Headers.Set("Cookie", c)
+	}
+	if u := strings.TrimSpace(req.UserAgent); u != "" {
+		opt.Headers.Set("User-Agent", u)
+	}
+
+	dl, err := engine.New(opt)
+	if err != nil {
+		return "", 0
+	}
+	defer dl.Close()
+
+	p, err := dl.Probe(ctx, rawURL)
+	if err != nil {
+		return "", 0
+	}
+	if p.Size < 0 {
+		p.Size = 0
+	}
+	return p.SuggestedName, p.Size
+}
+
+// hostReachable reports whether the URL's host accepts a TCP connection
+// within a short budget. It is only a pre-check for the add-time probe.
+func hostReachable(rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Hostname() == "" {
+		return false
+	}
+	port := u.Port()
+	if port == "" {
+		if strings.EqualFold(u.Scheme, "https") {
+			port = "443"
+		} else {
+			port = "80"
+		}
+	}
+	d := net.Dialer{Timeout: 2 * time.Second}
+	c, err := d.Dial("tcp", net.JoinHostPort(u.Hostname(), port))
+	if err != nil {
+		return false
+	}
+	_ = c.Close()
+	return true
+}
+
 // Start creates a task and begins transferring it when req.Start is set.
 func (m *Manager) Start(req StartRequest) (TaskView, error) {
 	url := strings.TrimSpace(req.URL)
@@ -315,6 +502,42 @@ func (m *Manager) Start(req StartRequest) (TaskView, error) {
 		name = fn
 	}
 
+	// One URL, one unfinished task per destination. A second record for the
+	// same link in the same folder would either fight over the same partial
+	// file or — for single-use links — fail outright while burning the token.
+	// Completed tasks are exempt: re-downloading a finished file is legitimate.
+	// (Checked against the resolved dest, so the same file deliberately sent
+	// to two folders still counts as two tasks. Checked before probing, so
+	// an exact repeat never pays for a network round trip.)
+	if dup := m.findUnfinished(url, dest); dup != nil {
+		v := snapshot(dup)
+		return v, &duplicateError{ID: v.ID, Status: v.Status, Name: v.Name}
+	}
+
+	// When the caller supplies no filename, ask the server once up front.
+	// This fills the row's name and size immediately (instead of a blank
+	// name and 0 B until the transfer starts) and powers the content-based
+	// duplicate check below. Any probe failure keeps the old behaviour:
+	// unnamed, unknown size, created anyway.
+	var probedSize int64
+	if name == "" {
+		pn, ps := m.probeName(url, req)
+		if pn != "" {
+			name = pn
+		}
+		probedSize = ps
+	}
+
+	// Second layer: single-use links mint a fresh URL per click, so the check
+	// above is blind to them. Same host + same filename + compatible size
+	// means the same file with overwhelming probability.
+	if name != "" {
+		if dup := m.findSameContent(url, name, probedSize); dup != nil {
+			v := snapshot(dup)
+			return v, &duplicateError{ID: v.ID, Status: v.Status, Name: v.Name}
+		}
+	}
+
 	conns := req.Conns
 	if conns <= 0 {
 		conns = cfg.Connections
@@ -332,7 +555,8 @@ func (m *Manager) Start(req StartRequest) (TaskView, error) {
 		URL:     url,
 		Dest:    dest,
 		Name:    name,
-		Status:  StatusQueued,
+		Size:    probedSize,
+		Status:  StatusPaused,
 		Conns:   conns,
 		Created: time.Now().Format(time.RFC3339Nano),
 	}
@@ -375,6 +599,7 @@ func (m *Manager) startRun(t *task) {
 		t.view.Status = StatusQueued
 		t.mu.Unlock()
 		_ = m.saveTasks()
+		m.app.emit("task:progress", snapshot(t))
 		return
 	}
 	if m.activeCount() >= m.maxConcurrent() {
@@ -382,6 +607,10 @@ func (m *Manager) startRun(t *task) {
 		t.view.Status = StatusQueued
 		t.mu.Unlock()
 		_ = m.saveTasks()
+		// Report the queueing at once: without this the row sits on its old
+		// status until the engine's first progress event, which on a slow
+		// link arrives seconds later and reads as a dead button.
+		m.app.emit("task:progress", snapshot(t))
 		return
 	}
 	// The done channel is created here, under the same lock as cancel, so a
@@ -399,6 +628,11 @@ func (m *Manager) startRun(t *task) {
 	done := make(chan struct{})
 	t.done = done
 	t.mu.Unlock()
+
+	// Report the start at once, for the same reason as the queueing above:
+	// the engine's first progress event can lag seconds behind on a slow
+	// link, and until then the UI shows the pre-start state.
+	m.app.emit("task:progress", snapshot(t))
 
 	go m.run(t, ctx, cancel, done)
 }
@@ -546,6 +780,20 @@ func (m *Manager) Resume(id string) error {
 	return nil
 }
 
+// partialPaths returns the .part + sidecar paths for a task. A task created
+// without a filename keeps Dest as the directory while the engine resolves
+// dir+suggested-name underneath, so dest+suffix alone points at a file that
+// was never created and the real partials survive every deletion.
+func partialPaths(dest, name string) (part, state string) {
+	target := dest
+	if name != "" {
+		if st, err := os.Stat(dest); err == nil && st.IsDir() {
+			target = filepath.Join(dest, name)
+		}
+	}
+	return target + engine.PartSuffix, target + engine.StateSuffix
+}
+
 // Cancel stops a task and discards its partial data.
 func (m *Manager) Cancel(id string) error {
 	t := m.get(id)
@@ -590,8 +838,9 @@ func (m *Manager) Cancel(id string) error {
 
 		// A cancelled task should start clean, so the partial file and the
 		// sidecar that would resume it are both removed.
-		_ = os.Remove(dest + engine.PartSuffix)
-		_ = os.Remove(dest + engine.StateSuffix)
+		part, state := partialPaths(dest, v.Name)
+		_ = os.Remove(part)
+		_ = os.Remove(state)
 		m.pumpQueue()
 	}()
 	return nil
@@ -606,6 +855,7 @@ func (m *Manager) Remove(id string, deleteFiles bool) error {
 	t.mu.Lock()
 	cancel := t.cancel
 	dest := t.view.Dest
+	name := t.view.Name
 	wasComplete := t.view.Status == StatusCompleted
 	t.mu.Unlock()
 
@@ -637,14 +887,20 @@ func (m *Manager) Remove(id string, deleteFiles bool) error {
 		// waiting avoids a race between removal and a final flush.
 		t.waitStopped(3 * time.Second)
 
-		// Removing a task touches nothing on disk unless the caller asked for
-		// it. The partial file and its sidecar are deliberately left too: they
-		// are what a later attempt at the same URL resumes from, and the
-		// user's instruction was explicit that deleting a row must not disturb
-		// any file.
+		// Records go; an unfinished task's partial data goes with them. A
+		// .part + sidecar without their index entry can never resume (the
+		// next attempt at the same URL starts from scratch), so leaving them
+		// behind only accumulates junk named after URL tokens. A completed
+		// task's file is the user's data: it is removed only when the caller
+		// explicitly asked for it, never as a side effect of tidying the list.
+		// partialPaths mirrors the engine's dir+suggested-name resolution:
+		// tasks created without a filename keep Dest as the directory.
+		if !wasComplete {
+			part, state := partialPaths(dest, name)
+			_ = os.Remove(part)
+			_ = os.Remove(state)
+		}
 		if deleteFiles {
-			_ = os.Remove(dest + engine.PartSuffix)
-			_ = os.Remove(dest + engine.StateSuffix)
 			// Only delete the published file when the task actually produced
 			// one, so a failed task cannot remove an unrelated file sharing
 			// the name.
@@ -661,11 +917,8 @@ func (m *Manager) Remove(id string, deleteFiles bool) error {
 //
 // The caller decides which, so "delete everything I can see" works for any
 // filter — by status, by file type, by search — without this needing to know
-// what the filter was.
-//
-// Records only, exactly like Remove: the partial files are what a later attempt
-// at the same URL resumes from, and a tidy-up of the list is not consent to
-// delete gigabytes from disk.
+// what the filter was. Finished files are never touched; unfinished partials
+// go with their records.
 func (m *Manager) RemoveTasks(ids []string) int {
 	removed := 0
 	for _, id := range ids {
@@ -756,8 +1009,19 @@ func (m *Manager) StartPlan() (int, error) {
 	m.planRunning = true
 	m.mu.Unlock()
 
-	started := m.StartAll()
-	if started == 0 {
+	// Try to start everything waiting; tasks beyond the concurrency budget
+	// stay queued and are pulled in by pumpQueue as slots free up.
+	m.StartAll()
+	// A plan covers everything that is running or waiting, not just the tasks
+	// this call managed to start: when every MaxConcurrent slot is already
+	// occupied, StartAll cannot start anything new (started == 0) yet there
+	// is still real work — the running transfers plus the queued ones
+	// pumpQueue pulls in as slots free up. Refusing the plan in that case
+	// ("没有等待下载的任务") made the plan button dead exactly when the list
+	// was full of queued tasks.
+	stats := m.Stats()
+	covered := int(stats["active"] + stats["queued"])
+	if covered == 0 {
 		m.mu.Lock()
 		m.planRunning = false
 		m.mu.Unlock()
@@ -765,7 +1029,100 @@ func (m *Manager) StartPlan() (int, error) {
 	}
 
 	go m.watchPlan()
-	return started, nil
+	return covered, nil
+}
+
+// StartPlanSelected starts the given tasks and, once they have all settled,
+// runs the end-of-plan action. It is the selection-scoped twin of StartPlan:
+// only the listed ids are started and watched, everything else is ignored.
+func (m *Manager) StartPlanSelected(ids []string) (int, error) {
+	m.mu.Lock()
+	if m.planRunning {
+		m.mu.Unlock()
+		return 0, fmt.Errorf("计划已经在运行")
+	}
+	// Claim the slot before starting anything, so two quick clicks cannot both
+	// spawn a watcher.
+	m.planRunning = true
+	m.mu.Unlock()
+
+	want := map[string]bool{}
+	for _, id := range ids {
+		if m.get(id) != nil {
+			want[id] = true
+		}
+	}
+	if len(want) == 0 {
+		m.mu.Lock()
+		m.planRunning = false
+		m.mu.Unlock()
+		return 0, fmt.Errorf("没有选中的任务")
+	}
+
+	for _, v := range m.List() {
+		if !want[v.ID] {
+			continue
+		}
+		switch v.Status {
+		case StatusPaused, StatusFailed, StatusCanceled, StatusQueued:
+			_ = m.Resume(v.ID)
+		}
+	}
+
+	covered := 0
+	for _, v := range m.List() {
+		if want[v.ID] && (v.Status == StatusDownloading || v.Status == StatusQueued) {
+			covered++
+		}
+	}
+	if covered == 0 {
+		m.mu.Lock()
+		m.planRunning = false
+		m.mu.Unlock()
+		return 0, fmt.Errorf("选中的任务没有可下载的")
+	}
+
+	go m.watchPlanSelected(want)
+	return covered, nil
+}
+
+// watchPlanSelected waits until every planned task has settled, then finishes
+// the plan. Removal or cancellation of a planned task counts as settling but
+// marks the plan as intervened, which skips the end actions — same rule as
+// the global watcher.
+func (m *Manager) watchPlanSelected(want map[string]bool) {
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		done, intervened := true, false
+		for id := range want {
+			t := m.get(id)
+			if t == nil {
+				intervened = true
+				continue
+			}
+			switch snapshot(t).Status {
+			case StatusDownloading, StatusQueued:
+				done = false
+			case StatusCanceled:
+				intervened = true
+			}
+		}
+		if done {
+			m.finishPlanScoped(intervened)
+			return
+		}
+	}
+}
+
+// finishPlanScoped ends a selection-scoped plan. It shares the end actions
+// with the global plan.
+func (m *Manager) finishPlanScoped(intervened bool) {
+	m.mu.Lock()
+	m.planRunning = false
+	m.mu.Unlock()
+	m.finishPlanEnd(intervened)
 }
 
 // PlanRunning reports whether a plan is working.
@@ -802,7 +1159,17 @@ func (m *Manager) finishPlan() {
 	// A plan that ends with cancelled tasks did not run to completion: the
 	// user intervened. Firing the end-of-plan actions anyway — especially a
 	// machine shutdown — would punish cancelling.
+	intervened := false
 	if stats := m.Stats(); stats["canceled"] > 0 {
+		intervened = true
+	}
+	m.finishPlanEnd(intervened)
+}
+
+// finishPlanEnd emits plan:done and runs the configured end actions, unless
+// the plan was intervened with.
+func (m *Manager) finishPlanEnd(intervened bool) {
+	if intervened {
 		m.app.emit("plan:done", nil)
 		m.app.debugLog("plan finished with cancellations: end actions skipped")
 		return

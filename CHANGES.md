@@ -1,0 +1,192 @@
+# CHANGES — VKMDownload 变更记录
+
+> 每次改完代码都在这里记一笔：日期、改了什么、为什么改。
+> 发版 / push 前看这份文件写 release notes。
+
+## 2026-10-15 — 0.2.5（未发布）
+
+### 1. 托盘退出后进程残留（bug）
+- 症状：关闭窗口最小化到托盘后，点托盘 退出，图标没了但进程还在后台跑。
+- 根因：Wails Windows 的 `Frontend.Quit` 会先问 `OnBeforeClose`（`desktop/main.go:47` 绑的 `app.beforeClose`），而 `beforeClose` 在 `MinimizeToTray` 开时永远返回 `true` 拦截，于是托盘的 退出 和 `Quit` binding 都被否决。
+- 改动：
+  - `desktop/app.go`：`App` 加 `quitFlag atomic.Bool` + `requestQuit()`；`beforeClose` 见到置位直接放行；`Quit()` 先置位再 `runtime.Quit`；`appVersion` 升到 `0.2.5`。
+  - `desktop/tray.go`：退出 handler 先 `requestQuit()` 再 `runtime.Quit`（图标清理走 `shutdown/stopTray`）。
+  - `desktop/manager_test.go`：加 `TestBeforeCloseQuitIntentLetsTrayExitThrough`。
+  - `desktop/wails.json`：`productVersion` 升到 `0.2.5`。
+- 验证：`go vet` 通过；`TestBeforeClose*` 通过；`go test ./...`（desktop）全绿。
+
+### 2. 多连接在部分服务器上全 0 B（bug）
+- 症状：`dl.fuckingfast.co` 的任务多连接下载全是 0 B，失败信息是 `segmented download failed ... bytes unclaimed`；单连接能下（实测 25 秒 386 MB）。
+- 根因：该站无视 Range 尾端——请求 `bytes=0-524287` 却回 `Content-Range: bytes 0-2097151999/2097152000`（body 倒是正确的前缀）。引擎 `validateRangeResponse` 要求尾端精确相等，于是每块都失败；错误是 retryable 所以重试 10 次，最后 `fetchSegment` 吞掉真错只报通用的 `bytes unclaimed`，界面永远 0 B。
+- 改动：
+  - `internal/engine/download.go`：`validateRangeResponse` 接受 `end >= off+n-1`（只读前 n 字节）；`fetchSegment` 循环尾保留 `lastErr` 并写进报错信息。
+  - `internal/engine/download_test.go`：加 `TestDownloadRangeEndIgnoredByServer`（httptest 模拟无视尾端的服务器，多连接逐字节校验）。
+- 验证：新测试通过；`go test ./...`（engine，约 31s）全绿。
+- 备注：`tasks.json` 里 10 个 `queued` + 0 B 是预期行为（`AutoStart` 关 + `MaxConcurrent: 2`，任务只入列没启动，probe 没跑所以 size 未知），不是 bug。
+
+
+### 3. restart turns never-started queued into paused (pending)
+- New tasks with AutoStart off are queued by design (manager.go Start).
+- But loadTasks (manager.go:1167) rewrites queued to paused on restart.
+- Harmless: Resume still starts them. Only slightly imprecise semantics.
+- User informed; leaving as-is until user decides.
+### 4. Plan download refused when concurrency slots full (bug)
+- Symptom: with tasks queued and MaxConcurrent slots occupied (e.g. by stuck
+  0B downloads), Plan button and Start All appear dead: plan reports no
+  waiting tasks.
+- Root cause: StartPlan only counted tasks newly started by that call
+  (manager.go StartPlan). Slots full means started==0, so it errored and the
+  watcher never launched. Turning everything paused would NOT fix it: gated
+  tasks stay queued either way.
+- Fix: active + queued counts as a valid plan; watcher launches and pumpQueue
+  pulls queued tasks in as slots free. Returns covered count for the UI.
+- Test: TestStartPlanWithFullSlotsStillRuns. Existing plan tests unaffected.
+
+### 5. Deleting a record leaves junk in Downloads (fixed)
+- Symptom: deleting tasks from the list left .part files behind (13 orphans
+  with URL-token names in Downloads). Two sources: engine never cleaned up
+  after failed downloads, and record deletion never touched disk.
+- Decision with user: deleting an UNFINISHED task auto-removes its .part +
+  sidecar (they can never resume without the record). Finished files are
+  never auto-deleted. Same rule flows into bulk delete and ClearFailed.
+  Re-adding the same URL restarts from zero.
+- Changed: desktop/manager.go Remove, README delete section, App.tsx confirm
+  texts (x3), TaskRow trash title, new test TestRemoveDropsUnfinishedPartials.
+- Verified: new test passes, go vet clean, tsc clean.
+
+### 6. Extension hands over empty filename (bug, fixed)
+- Symptom: files grabbed from the browser land in Downloads named after URL
+  tokens with no extension (e.g. 2GB fuckingfast files unrecognizable).
+- Root cause: extension/background.js onCreated handler handed over
+  item.filename from creation time, when Chrome usually does not know it yet.
+  The 250ms wait for size was not reused for the name.
+- Fix: re-search the download item after the size wait and hand over the
+  fresh filename when present. Only helps servers sending Content-Disposition
+  and only future downloads; already-landed token files need manual rename.
+- Verified: node --check clean. Needs extension reload in browser to take
+  effect (unpacked extension: chrome://extensions reload button).
+
+### 7. Probe ignores Content-Disposition from ranged GET (bug, fixed)
+- Symptom: fuckingfast files land with URL-token names even though the server
+  sends Content-Disposition with the real name (RFC 5987 filename* form).
+- Root cause: probeHead fills SuggestedName from the URL token when HEAD has
+  no disposition; probeRange then refused to recompute it (guarded by == "")
+  even after learning the real disposition. The probe knew the name but never
+  used it. Manager already adopts probe names on first progress, so no UI
+  change needed.
+- Fix: probeRange promotes a disposition-derived name over the URL fallback.
+- Verified: new test TestProbePrefersDispositionOverURLToken passes; live
+  `vdl info` on a token URL now reports the real .rar name.
+- Side finding: these dl links are single-use/expiring (a used one 404s).
+  Start remaining parts promptly.
+
+### 8. New tasks paused by default + duplicate URLs rejected
+- New tasks added without Start now rest PAUSED (was queued): clicking one
+  task starts only that one, the rest never auto-follow. Start All / plan
+  still pick up paused tasks, so bulk flows are unchanged.
+- Same URL re-added to the same folder is rejected with the existing record
+  (no second transfer fighting over one .part, no burnt single-use tokens).
+  Same URL to another folder is allowed; completed re-downloads allowed.
+- Extension: duplicate handover answers 200 (no browser fallback double
+  download) with an already-listed notification.
+- Dialog: on duplicate it closes, selects the existing row and flashes.
+- Tests: TestNewTasksRestPaused, TestDuplicateURLIsRejected. Full desktop
+  suite green with no old-test changes needed.
+- Verified: go vet clean, tsc clean, wails build green (bindings regenerated).
+
+### 9. Add-time probe: instant names+sizes, content-based duplicates
+- New tasks with no browser filename are probed once at add time (10s cap,
+  fail-open, 1 retry): the row shows the real name and size immediately
+  instead of blank/0B, and the probe powers duplicate layer two.
+- Layer two: different URLs, same host + filename + compatible size are the
+  same file (single-use token links) and re-adds are rejected. Identical
+  URLs stay on layer one (another folder is allowed); completed exempt.
+- Dead links cost ~4s on add (then created unnamed as before); live links
+  ~0.5s. Transfer re-probes anyway, so add-probe retries stay minimal.
+- Tests: TestSameFileDifferentURLIsRejected. Full desktop suite green.
+
+### 10. Add-time probe fast-fail for dead hosts
+- The 4s per dead-link add was our own retry sleeps, not the server.
+- Fix: 2s TCP dial pre-check (hostReachable); unreconnectable hosts skip the
+  probe entirely. Live links unaffected. Proxy users keep old behaviour
+  (dial bypasses proxy, fail-open).
+- Result: probe-related tests 20s -> 4.5s; full desktop suite 89s -> 21s.
+- Test: TestHostReachableFastFails. Exe rebuilt.
+
+### 11. Ask-location dialog hidden behind browser (fixed as far as possible)
+- Symptom: with ask-location on, the placement dialog opened behind the
+  browser; user had to minimise the browser to find it.
+- Fix: new BringToFront binding (Unminimise + Show + always-on-top flash)
+  called when ask/clipboard dialogs open. Wails v2 is single-window, so a
+  detached small window is NOT possible; whole window comes forward with the
+  modal dialog. Alternative offered: turn off ask-location for zero popups.
+- Verified: vet + tsc clean, wails build green. Foreground behaviour needs
+  human verification (Windows may still only flash the taskbar).
+
+### 12. Multi-select bulk actions (done, field editing still pending)
+- Toolbar shows when rows are selected (click, Ctrl+click to add):
+  continue / pause / delete-selected with per-task settle counting, plus
+  clear-selection. Delete follows the unfinished-partials rule.
+- Uses existing per-task bindings; no backend change. Original TODO's
+  batch field editing (connections/destination) still open.
+
+### 13. Selection UX redo: checkbox + scope-switching buttons
+- Per user: always-visible checkbox at the right of each name (no edit mode);
+  row click / Ctrl+click still work.
+- Top buttons switch scope when rows are checked: start/stop/delete act on
+  the selection with counts in labels; plan stays all-tasks. Removed the
+  extra selection bar. Delete-visible also clears stale selection.
+- Verified: build + tsc clean.
+
+### 14. Scoped plan download + checkbox left (per user)
+- Plan button joins the scope switch: with checked rows it runs
+  StartPlanSelected (only those ids started and watched; removals and
+  cancels count as intervened and skip end actions). No selection means
+  the global plan as before. finishPlan refactored into finishPlanEnd.
+- Checkbox moved to the LEFT of the name (convention; user asked to be
+  stopped on illogical ideas, rule added to both AGENTS.md).
+- Fixed two stale comments (ClearFailedTasks/RemoveTasks records-only).
+- Test: TestStartPlanSelectedCoversOnlyTheSelection. Full suite green.
+
+### 15. Delete missed dir-destined partials (bug, fixed)
+- Symptom: every delete flavour left .part/.json behind for tasks created
+  without a filename. Root cause: Remove/Cancel deleted dest+suffix, but
+  those tasks keep Dest as the DIRECTORY while the engine resolves
+  dir+server-name underneath, so the deletion pointed at a nonexistent path.
+- Fix: partialPaths() mirrors the engine resolution (dir+view.Name when
+  Dest is a directory); used by Remove and Cancel. User's 4 orphan files
+  deleted manually (records long gone, unreachable by code).
+- Test: TestRemoveFindsPartialsByServerName. Full suite green, exe rebuilt
+  and app restarted.
+
+### 16. Start button looked dead on slow links (fixed)
+- Symptom: clicking start-all changed nothing on screen for seconds.
+- Root cause: startRun changed status but emitted no event; UI waited for
+  the engine's first progress (seconds away on slow links).
+- Fix: startRun emits task:progress synchronously on every path
+  (downloading, queued-behind-limit, update-parked). Covers single,
+  bulk, plan and pumpQueue starts.
+- Test: TestStartEmitsProgressImmediately (asserts 2 downloading + 1 queued
+  events with zero waiting). Also caught and fixed a test-side deadlock
+  (never hold a lock across StopAll: its paths emit too). Full suite green,
+  exe rebuilt + restarted.
+
+## TODO (user requested, work later)
+
+- Detached ask-location dialog in its own small window (no main window).
+  Blocked: Wails v2 is single-window; the modal must live in the main window
+  (bring-to-front is the current ceiling). Requires Wails v3 migration
+  (multi-window support), which is rewrite-scale work. Requested 2026-10-15.
+  Not started.
+
+
+- Multi-select + multi-edit tasks in the list. Bulk start/stop/remove DONE (2026-10-15, CHANGES #12). Batch field editing (connections/destination) still open.
+
+
+### 3. restart turns never-started queued into paused (pending)
+- New tasks with AutoStart off are queued by design (manager.go Start).
+- But loadTasks (manager.go:1167) rewrites queued to paused on restart.
+- Harmless: Resume still starts them. Only slightly imprecise semantics.
+- User informed; leaving as-is until user decides.
+## 2026-10-14 — 0.2.4（已发布）
+- 见 `release-notes-0.2.4.md`。
