@@ -352,6 +352,12 @@
 - Extension: sizeKb polls up to ~1.5s for totalBytes before answering unknown,
   so the min-size filter sees real sizes instead of bypassing on -1.
 
+### 38. Extension 1.0.2 store update (pushed, store review pending)
+- Manifest 1.0.1 -> 1.0.2 (update submissions need a higher version).
+- Store zip rebuilt with the sizeKb fix; package replaced on Partner Center,
+  review clock restarted.
+- #37 commits pushed to main; no GitHub release yet.
+
 ## TODO (user requested, work later)
 
 - Detached ask-location popup WITHOUT v3 migration (backup plan).
