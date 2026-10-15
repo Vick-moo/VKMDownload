@@ -143,6 +143,7 @@ cd desktop && wails build            # 产出 build/bin/VKMDownload.exe
 35. Drag runaway: always recompute from mousedown snapshot, never accumulate onto live state.
 36. Hidden helpers: hide_windows/other.go (hideFile/unhideFile); wired in openPart/saveState/publish.
 37. Stale UI resurrection: reload generation guard + completed-row progress guard (App.tsx subscriptions).
+38. Perf batch: fillProbedName async, batch() save coalescing, pump newest-wins, memo TaskRow, single update check.
 ## 8. 剩下未动的（有意延后）
 
 - ~~`Remove`/`Cancel` 在 binding 线程同步 `waitStopped(3s)`~~：已修——等删改走后台 goroutine，`Cancel` 用代际 guard 防误删（`manager.go:Cancel/Remove`）。

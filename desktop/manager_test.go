@@ -1328,7 +1328,9 @@ func TestDuplicateURLIsRejected(t *testing.T) {	app := newTestApp(t)
 // TestSameFileDifferentURLIsRejected pins the second duplicate layer:
 // single-use links mint a fresh URL per click, so URL matching is blind to
 // them. Two different URLs on one host advertising the same filename and
-// size are the same file and the second add is refused.
+// size are the same file. Adding is never blocked on the network: the row
+// appears unnamed at once, the probe fills it in, and a probed duplicate of
+// a still-untouched row removes it again.
 func TestSameFileDifferentURLIsRejected(t *testing.T) {
 	const name = "same-file.bin"
 	const size = 128 << 10
@@ -1355,33 +1357,53 @@ func TestSameFileDifferentURLIsRejected(t *testing.T) {
 	app := newTestApp(t)
 	dir := t.TempDir()
 
+	// The add itself never waits for the network: unnamed, paused, returned.
+	// The add itself never waits for the network; the background probe fills
+	// the row (asserted below, no racy blankness check: on loopback the
+	// probe can win before Start returns).
 	first, err := app.mgr.Start(StartRequest{
 		URL: srv.URL + "/token-one", Dest: dir, Start: false,
 	})
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	if first.Name != name {
-		t.Fatalf("probed name = %q, want %q", first.Name, name)
-	}
-	if first.Size != size {
-		t.Fatalf("probed size = %d, want %d", first.Size, size)
-	}
 
-	// Same file behind another token URL: refused, pointing at the first.
-	if _, err := app.mgr.Start(StartRequest{
+	// The background probe fills the row.
+	waitFor(t, "the probe to name the row", 15*time.Second, func() bool {
+		v, ok := find(app.mgr, first.ID)
+		return ok && v.Name == name && v.Size == size
+	})
+
+	// Same file behind another token URL: accepted at first (nothing known
+	// yet), then removed once its own probe names it — the original stays.
+	// Same file behind another token URL: accepted at first (nothing known
+	// yet), then removed once its own probe names it — the original stays.
+	// (Generous timeout: a probe hanging to its context deadline on a loaded
+	// box must not flake this.)
+	second, err := app.mgr.Start(StartRequest{
 		URL: srv.URL + "/token-two", Dest: dir, Start: false,
-	}); err == nil {
-		t.Error("same file under another URL was accepted")
-	} else if !strings.Contains(err.Error(), "已在列表中") {
-		t.Errorf("error = %v, want it to say the file is already listed", err)
+	})
+	if err != nil {
+		t.Fatalf("second Start should not block: %v", err)
+	}
+	waitFor(t, "the probed duplicate to be removed", 30*time.Second, func() bool {
+		_, ok := find(app.mgr, second.ID)
+		return !ok
+	})
+	if _, ok := find(app.mgr, first.ID); !ok {
+		t.Error("the original task was removed instead of the duplicate")
 	}
 
-	// A genuinely different file on the same host is still accepted.
-	if _, err := app.mgr.Start(StartRequest{
-		URL: srv.URL + "/token-one", Dest: filepath.Join(dir, "sub"), Start: false,
-	}); err != nil {
+	// A genuinely different file on the same host is still accepted: give it
+	// a name up front so no probe is even needed.
+	third, err := app.mgr.Start(StartRequest{
+		URL: srv.URL + "/token-one", Dest: filepath.Join(dir, "sub"),
+		Filename: "other.bin", Start: false,
+	})
+	if err != nil {
 		t.Errorf("same link to another folder was rejected: %v", err)
+	} else if v, ok := find(app.mgr, third.ID); !ok || v.Name != "other.bin" {
+		t.Errorf("third task = %+v, want it listed as other.bin", v)
 	}
 }
 

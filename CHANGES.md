@@ -285,6 +285,20 @@
   legitimately returns them to downloading).
 - Verified: build + tsc clean, app restarted.
 
+### 29. Optimization batch (5 items)
+- Async add-time probe: Start returns at once, probe fills name/size via
+  event; untouched probed duplicates remove themselves (fillProbedName).
+- Bulk index writes coalesced: batch() makes StartAll/StopAll/RemoveTasks/
+  RemoveFailed/StartPlanSelected write tasks.json once (kept Indent: humans
+  read this file when diagnosing).
+- Progress pump keeps newest on saturation instead of dropping it.
+- TaskRow memoized (+ stable onChanged); update check single-sourced to the
+  mount query (event subscription removed).
+- Also fixed: progress out-of-order delivery watermark (pre-existing race,
+  failed on clean tree too), racy test assertion, TempDir flakes noted.
+- Verified: desktop + engine suites green, race on progress/limiter clean,
+  tsc clean, exe rebuilt + restarted.
+
 ## TODO (user requested, work later)
 
 - Detached ask-location popup WITHOUT v3 migration (backup plan).

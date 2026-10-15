@@ -192,6 +192,12 @@ type Manager struct {
 	livedlMu sync.Mutex
 	livedl   map[string]*engine.Downloader
 
+	// saveDepth/saveDirty coalesce index writes across bulk verbs: StartAll
+	// over a hundred tasks used to rewrite tasks.json a hundred times.
+	// While depth > 0, saveTasks only marks dirty; batch flushes once.
+	saveDirty bool
+	saveDepth int
+
 	// planRunning is set while a plan is working through its tasks.
 	planRunning bool
 
@@ -292,13 +298,23 @@ func (m *Manager) Run(ctx context.Context) {
 	}
 }
 
-// emit queues a progress event, dropping it when the pump is saturated.
-// Dropping is safe: a snapshot is stale as soon as a newer one exists, and
-// another arrives within a few hundred milliseconds.
+// emit queues a progress event. Only progress travels the pump; terminal and
+// structural events (done/failed/added/removed) go direct. When saturated,
+// the stale backlog is shed in favour of the newest snapshot: under flood the
+// UI would otherwise replay outdated positions first and visibly jump
+// backwards before correcting itself.
 func (m *Manager) emit(v TaskView) {
 	select {
 	case m.pump <- v:
 	default:
+		select {
+		case <-m.pump:
+		default:
+		}
+		select {
+		case m.pump <- v:
+		default:
+		}
 	}
 }
 
@@ -391,8 +407,9 @@ func (m *Manager) findUnfinished(url, dest string) *task {
 // (Sizes are compatible when either side is unknown — a row that never
 // started reports 0 — or both agree.) Completed tasks never match, and an
 // explicit escape hatch always exists: rename the newcomer and it no longer
-// matches.
-func (m *Manager) findSameContent(url, name string, size int64) *task {
+// matches. excludeID skips one task, for the post-probe check of the newcomer
+// itself.
+func (m *Manager) findSameContent(url, name string, size int64, excludeID string) *task {
 	host := urlHost(url)
 	if host == "" || name == "" {
 		return nil
@@ -403,6 +420,9 @@ func (m *Manager) findSameContent(url, name string, size int64) *task {
 	m.mu.Unlock()
 
 	for _, id := range ids {
+		if id == excludeID {
+			continue
+		}
 		t := m.get(id)
 		if t == nil {
 			continue
@@ -566,25 +586,15 @@ func (m *Manager) Start(req StartRequest) (TaskView, error) {
 		return v, &duplicateError{ID: v.ID, Status: v.Status, Name: v.Name}
 	}
 
-	// When the caller supplies no filename, ask the server once up front.
-	// This fills the row's name and size immediately (instead of a blank
-	// name and 0 B until the transfer starts) and powers the content-based
-	// duplicate check below. Any probe failure keeps the old behaviour:
-	// unnamed, unknown size, created anyway.
-	var probedSize int64
-	if name == "" {
-		pn, ps := m.probeName(url, req)
-		if pn != "" {
-			name = pn
-		}
-		probedSize = ps
-	}
-
-	// Second layer: single-use links mint a fresh URL per click, so the check
-	// above is blind to them. Same host + same filename + compatible size
-	// means the same file with overwhelming probability.
-	if name != "" {
-		if dup := m.findSameContent(url, name, probedSize); dup != nil {
+	// When the caller supplies no filename, the server is asked once up
+	// front — asynchronously, so adding never blocks on the network. The row
+	// is created unnamed first; fillProbedName fills the name and size when
+	// the probe lands (failures keep the old behaviour) and then runs the
+	// content-based duplicate check. A caller-supplied filename is checked
+	// synchronously instead: no network involved.
+	needsProbe := name == ""
+	if !needsProbe {
+		if dup := m.findSameContent(url, name, 0, ""); dup != nil {
 			v := snapshot(dup)
 			return v, &duplicateError{ID: v.ID, Status: v.Status, Name: v.Name}
 		}
@@ -607,7 +617,6 @@ func (m *Manager) Start(req StartRequest) (TaskView, error) {
 		URL:     url,
 		Dest:    dest,
 		Name:    name,
-		Size:    probedSize,
 		Status:  StatusPaused,
 		Conns:   conns,
 		Created: time.Now().Format(time.RFC3339Nano),
@@ -620,11 +629,58 @@ func (m *Manager) Start(req StartRequest) (TaskView, error) {
 
 	m.app.emit("task:added", snapshot(t))
 
+	if needsProbe {
+		go m.fillProbedName(id, url, req)
+	}
+
 	if req.Start {
 		m.startRun(t)
 	}
 	_ = m.saveTasks()
 	return snapshot(t), nil
+}
+
+// fillProbedName resolves the server filename and size for a task added
+// without one, then runs the content-based duplicate check. It never blocks
+// Start and never fails it: any probe failure leaves the row as created. A
+// probed duplicate removes the newcomer only while it is still untouched
+// (paused with nothing downloaded); a task the user already started is left
+// alone, and so is anything whose row already vanished.
+func (m *Manager) fillProbedName(id, url string, req StartRequest) {
+	pn, ps := m.probeName(url, req)
+	if pn == "" && ps <= 0 {
+		return
+	}
+	t := m.get(id)
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	if t.view.Name == "" {
+		t.view.Name = pn
+	}
+	if t.view.Size == 0 && ps > 0 {
+		t.view.Size = ps
+	}
+	name, size := t.view.Name, t.view.Size
+	t.mu.Unlock()
+	_ = m.saveTasks()
+	m.app.emit("task:progress", snapshot(t))
+
+	if name == "" {
+		return
+	}
+	if dup := m.findSameContent(url, name, size, id); dup != nil {
+		v := snapshot(dup)
+		t.mu.Lock()
+		untouched := t.view.Status == StatusPaused && t.view.Downloaded == 0
+		t.mu.Unlock()
+		if !untouched {
+			return
+		}
+		m.app.debugLog("duplicate of %s (%s), removing newcomer %s", v.ID, v.Name, id)
+		_ = m.Remove(id, false)
+	}
 }
 
 // startRun launches the transfer goroutine for t, honouring MaxConcurrent.
@@ -986,11 +1042,13 @@ func (m *Manager) Remove(id string, deleteFiles bool) error {
 // go with their records.
 func (m *Manager) RemoveTasks(ids []string) int {
 	removed := 0
-	for _, id := range ids {
-		if err := m.Remove(id, false); err == nil {
-			removed++
+	m.batch(func() {
+		for _, id := range ids {
+			if err := m.Remove(id, false); err == nil {
+				removed++
+			}
 		}
-	}
+	})
 	return removed
 }
 
@@ -1028,22 +1086,24 @@ func (m *Manager) RemoveFailed() int {
 // slots free up.
 func (m *Manager) StartAll() int {
 	n := 0
-	for _, v := range m.List() {
-		switch v.Status {
-		case StatusPaused, StatusFailed, StatusCanceled, StatusQueued:
-			if err := m.Resume(v.ID); err != nil {
-				continue
-			}
-			if t := m.get(v.ID); t != nil {
-				t.mu.Lock()
-				running := t.view.Status == StatusDownloading
-				t.mu.Unlock()
-				if running {
-					n++
+	m.batch(func() {
+		for _, v := range m.List() {
+			switch v.Status {
+			case StatusPaused, StatusFailed, StatusCanceled, StatusQueued:
+				if err := m.Resume(v.ID); err != nil {
+					continue
+				}
+				if t := m.get(v.ID); t != nil {
+					t.mu.Lock()
+					running := t.view.Status == StatusDownloading
+					t.mu.Unlock()
+					if running {
+						n++
+					}
 				}
 			}
 		}
-	}
+	})
 	return n
 }
 
@@ -1051,13 +1111,15 @@ func (m *Manager) StartAll() int {
 // it can be continued later. Tasks that already settled are untouched.
 func (m *Manager) StopAll() int {
 	n := 0
-	for _, v := range m.List() {
-		if v.Status == StatusDownloading || v.Status == StatusQueued {
-			if err := m.Pause(v.ID); err == nil {
-				n++
+	m.batch(func() {
+		for _, v := range m.List() {
+			if v.Status == StatusDownloading || v.Status == StatusQueued {
+				if err := m.Pause(v.ID); err == nil {
+					n++
+				}
 			}
 		}
-	}
+	})
 	return n
 }
 
@@ -1124,15 +1186,17 @@ func (m *Manager) StartPlanSelected(ids []string) (int, error) {
 		return 0, fmt.Errorf("没有选中的任务")
 	}
 
-	for _, v := range m.List() {
-		if !want[v.ID] {
-			continue
+	m.batch(func() {
+		for _, v := range m.List() {
+			if !want[v.ID] {
+				continue
+			}
+			switch v.Status {
+			case StatusPaused, StatusFailed, StatusCanceled, StatusQueued:
+				_ = m.Resume(v.ID)
+			}
 		}
-		switch v.Status {
-		case StatusPaused, StatusFailed, StatusCanceled, StatusQueued:
-			_ = m.Resume(v.ID)
-		}
-	}
+	})
 
 	covered := 0
 	for _, v := range m.List() {
@@ -1564,7 +1628,18 @@ func (m *Manager) Stats() map[string]int64 {
 //
 // The engine's sidecar beside each partial file stays the source of truth for
 // how many bytes arrived; this index only records what the user asked for.
+//
+// Indent is deliberate: humans and agents read this file when diagnosing the
+// app, and the batching below keeps the cost to one write per bulk verb.
 func (m *Manager) saveTasks() error {
+	m.mu.Lock()
+	if m.saveDepth > 0 {
+		m.saveDirty = true
+		m.mu.Unlock()
+		return nil
+	}
+	m.mu.Unlock()
+
 	path := filepath.Join(m.app.dataDir(), "tasks.json")
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
@@ -1578,6 +1653,29 @@ func (m *Manager) saveTasks() error {
 		return err
 	}
 	return os.Rename(tmp, path)
+}
+
+// batch runs fn with index writes coalesced: every saveTasks inside only
+// marks dirty, and one real write happens at the end (if anything changed).
+// Nesting is safe: only the outermost batch flushes.
+func (m *Manager) batch(fn func()) {
+	m.mu.Lock()
+	m.saveDepth++
+	m.mu.Unlock()
+
+	fn()
+
+	m.mu.Lock()
+	m.saveDepth--
+	dirty := m.saveDirty
+	if m.saveDepth == 0 {
+		m.saveDirty = false
+	}
+	m.mu.Unlock()
+
+	if dirty {
+		_ = m.saveTasks()
+	}
 }
 
 // loadTasks restores the index written by saveTasks.

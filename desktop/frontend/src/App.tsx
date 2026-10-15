@@ -104,9 +104,10 @@ function App(): JSX.Element {
       .then((c) => setConfig(c))
       .catch(() => setConfig(null));
     // Asked once: the version cannot change while the app is running.
-    // The update banner has two triggers: the event from the Go side, and
-    // this direct check. The event alone is not enough — it can fire before
-    // the subscription below exists and would then be missed silently.
+    // This direct check is the only trigger on purpose: the backend also
+    // emits update:available, but an event fired before this subscription
+    // exists would be missed silently, and two triggers can paint the
+    // banner twice for one release.
     void api
       .checkUpdate()
       .then((info) => {
@@ -188,10 +189,6 @@ function App(): JSX.Element {
           void api.bringToFront().catch(() => {});
         },
       ),
-      // A newer release, announced once per run by the Go side.
-      on<UpdateInfo>(EVENTS.updateAvailable, (info) => {
-        if (info && info.available) setUpdate(info);
-      }),
     ];
     return () => offs.forEach((off) => off());
   }, []);
@@ -248,6 +245,10 @@ function App(): JSX.Element {
     },
     [sortKey],
   );
+
+  // Stable across renders so memoized rows below don't reconcile on every
+  // tick: an inline arrow would be a new reference each time and defeat memo.
+  const handleChanged = useCallback(() => void reload(), [reload]);
 
   const onSelect = useCallback((id: string, additive: boolean) => {
     setSelected((prev) => {
@@ -671,7 +672,7 @@ function App(): JSX.Element {
                 selected={selected}
                 onSelect={onSelect}
                 groupByType={filter === "all"}
-                onChanged={() => void reload()}
+                onChanged={handleChanged}
               />
             )}
           </>

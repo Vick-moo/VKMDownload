@@ -1,3 +1,4 @@
+import { memo } from "react";
 import type { JSX } from "react";
 import { api } from "../api";
 import {
@@ -33,11 +34,16 @@ const PROGRESSED: TaskStatus[] = ["downloading", "paused", "completed", "failed"
 /**
  * TaskRow renders one download.
  *
+ * Memoized on props: progress events replace the whole tasks array every few
+ * hundred milliseconds, and without this every row reconciles on every tick.
+ * Unchanged rows keep their object identity in App's patch handler, so the
+ * default shallow compare is exactly right — no custom comparator to rot.
+ *
  * Three lines: the name and its status, the progress bar, then the numbers.
  * Keeping the height fixed means the list does not reflow as speeds and ETAs
  * change every few hundred milliseconds.
  */
-export function TaskRow({
+export const TaskRow = memo(function TaskRow({
   task,
   selected,
   onSelect,
@@ -219,4 +225,4 @@ export function TaskRow({
       </div>
     </div>
   );
-}
+});
