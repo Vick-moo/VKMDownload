@@ -336,6 +336,11 @@
   title + number + switch right, hint below. Removed the checkbox restyle
   dead CSS. Verified: tsc + build clean, app restarted.
 
+### 35. Flush rows back to native design language
+- The card mockup was layout reference only; restyled into plain .setting
+  rows (title + hint left, number + switch right), matching every other row.
+  Removed the flush card CSS. Verified: tsc + build clean, app restarted.
+
 ## TODO (user requested, work later)
 
 - Detached ask-location popup WITHOUT v3 migration (backup plan).

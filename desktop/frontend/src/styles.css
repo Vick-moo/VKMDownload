@@ -964,56 +964,6 @@ input:focus {
   font-weight: 600;
 }
 
-/* Flush trigger cards (mockup-approved): one bordered card per trigger, title
-   + number on the first row with the switch pinned right, hint below. */
-.flush-group {
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  padding: var(--space-3) var(--space-4);
-}
-
-.flush-group__head {
-  font-size: 17px;
-  font-weight: 700;
-  padding-left: var(--space-3);
-  border-left: 4px solid var(--accent);
-  border-radius: 2px;
-  margin-bottom: var(--space-3);
-}
-
-.flush-card {
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  padding: var(--space-3) var(--space-4);
-  margin-bottom: var(--space-3);
-}
-
-.flush-card:last-child {
-  margin-bottom: 0;
-}
-
-.flush-card__row {
-  display: flex;
-  align-items: center;
-  gap: var(--space-4);
-}
-
-.flush-card__title {
-  min-width: 90px;
-  font-size: 15px;
-  font-weight: 600;
-}
-
-.flush-card__row .switch {
-  margin-left: auto;
-}
-
-.flush-card__hint {
-  margin-top: var(--space-2);
-  font-size: 12px;
-  line-height: 17px;
-  color: var(--text-muted);
-}
 
 /* Sub-group header inside a tab: frequent settings first, advanced last. */
 .settings-subsection__title {

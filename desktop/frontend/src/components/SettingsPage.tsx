@@ -411,114 +411,116 @@ export function SettingsPage({
           </select>
         </label>
 
-        <div className="flush-group">
-          <div className="flush-group__head">断点保存</div>
-
-          <div className="flush-card">
-            <div className="flush-card__row">
-              <span className="flush-card__title">按大小</span>
+                <label className="setting">
+          <span className="setting__text">
+            <span className="setting__title">按大小</span>
+            <span className="setting__hint">
+              下了多少才写一次续传记录，单位 KB。越大写盘越少、崩溃重下越多。改完下个任务生效。
+            </span>
+          </span>
+          <span className="field__row" style={{ flex: "0 0 auto" }}>
+            <input
+              type="number"
+              min={64}
+              max={65536}
+              step={64}
+              style={{ width: 110 }}
+              value={draft.resumeFlushKb}
+              disabled={!draft.resumeFlushBySize}
+              onChange={(e) =>
+                patch({ resumeFlushKb: Math.max(64, Number(e.target.value) || 1024) })
+              }
+            />
+            <span className="switch">
               <input
-                type="number"
-                min={64}
-                max={65536}
-                step={64}
-                style={{ width: 110 }}
-                value={draft.resumeFlushKb}
-                disabled={!draft.resumeFlushBySize}
-                onChange={(e) =>
-                  patch({ resumeFlushKb: Math.max(64, Number(e.target.value) || 1024) })
-                }
+                type="checkbox"
+                aria-label="启用按大小保存"
+                checked={draft.resumeFlushBySize}
+                onChange={(e) => {
+                  const v = e.target.checked;
+                  if (!v && !draft.resumeFlushByTime && !draft.resumeFlushByPct) return;
+                  patch({ resumeFlushBySize: v });
+                }}
               />
-              <span className="switch">
-                <input
-                  type="checkbox"
-                  aria-label="启用按大小保存"
-                  checked={draft.resumeFlushBySize}
-                  onChange={(e) => {
-                    const v = e.target.checked;
-                    if (!v && !draft.resumeFlushByTime && !draft.resumeFlushByPct) return;
-                    patch({ resumeFlushBySize: v });
-                  }}
-                />
-                <span className="switch__track" />
-                <span className="switch__thumb" />
-              </span>
-            </div>
-            <div className="flush-card__hint">
-              写入多少才写一次续传记录，单位 KB。越大写盘越少，崩溃重下越多。改完下个任务生效。
-            </div>
-          </div>
+              <span className="switch__track" />
+              <span className="switch__thumb" />
+            </span>
+          </span>
+        </label>
 
-          <div className="flush-card">
-            <div className="flush-card__row">
-              <span className="flush-card__title">按时间</span>
-              <input
-                type="number"
-                min={100}
-                max={10000}
-                step={50}
-                style={{ width: 110 }}
-                value={draft.resumeFlushMs}
-                disabled={!draft.resumeFlushByTime}
-                onChange={(e) =>
-                  patch({ resumeFlushMs: Math.min(10000, Math.max(100, Number(e.target.value) || 250)) })
-                }
-              />
-              <span className="switch">
-                <input
-                  type="checkbox"
-                  aria-label="启用按时间保存"
-                  checked={draft.resumeFlushByTime}
-                  onChange={(e) => {
-                    const v = e.target.checked;
-                    if (!v && !draft.resumeFlushBySize && !draft.resumeFlushByPct) return;
-                    patch({ resumeFlushByTime: v });
-                  }}
-                />
-                <span className="switch__track" />
-                <span className="switch__thumb" />
-              </span>
-            </div>
-            <div className="flush-card__hint">
+        <label className="setting">
+          <span className="setting__text">
+            <span className="setting__title">按时间</span>
+            <span className="setting__hint">
               最多隔多久写一次续传记录，单位毫秒。越大写盘越少、崩溃重下越多。改完下个任务生效。
-            </div>
-          </div>
-
-          <div className="flush-card">
-            <div className="flush-card__row">
-              <span className="flush-card__title">按百分比</span>
+            </span>
+          </span>
+          <span className="field__row" style={{ flex: "0 0 auto" }}>
+            <input
+              type="number"
+              min={100}
+              max={10000}
+              step={50}
+              style={{ width: 110 }}
+              value={draft.resumeFlushMs}
+              disabled={!draft.resumeFlushByTime}
+              onChange={(e) =>
+                patch({ resumeFlushMs: Math.min(10000, Math.max(100, Number(e.target.value) || 250)) })
+              }
+            />
+            <span className="switch">
               <input
-                type="number"
-                min={0}
-                max={100}
-                step={1}
-                style={{ width: 110 }}
-                value={draft.resumeFlushPct}
-                disabled={!draft.resumeFlushByPct}
-                onChange={(e) =>
-                  patch({ resumeFlushPct: Math.min(100, Math.max(0, Number(e.target.value) || 0)) })
-                }
+                type="checkbox"
+                aria-label="启用按时间保存"
+                checked={draft.resumeFlushByTime}
+                onChange={(e) => {
+                  const v = e.target.checked;
+                  if (!v && !draft.resumeFlushBySize && !draft.resumeFlushByPct) return;
+                  patch({ resumeFlushByTime: v });
+                }}
               />
-              <span className="switch">
-                <input
-                  type="checkbox"
-                  aria-label="启用按百分比保存"
-                  checked={draft.resumeFlushByPct}
-                  onChange={(e) => {
-                    const v = e.target.checked;
-                    if (!v && !draft.resumeFlushBySize && !draft.resumeFlushByTime) return;
-                    patch({ resumeFlushByPct: v });
-                  }}
-                />
-                <span className="switch__track" />
-                <span className="switch__thumb" />
-              </span>
-            </div>
-            <div className="flush-card__hint">
+              <span className="switch__track" />
+              <span className="switch__thumb" />
+            </span>
+          </span>
+        </label>
+
+        <label className="setting">
+          <span className="setting__text">
+            <span className="setting__title">按百分比</span>
+            <span className="setting__hint">
               每下完百分之几写一次。跟上面启用的项谁先到谁写。改完下个任务生效。
-            </div>
-          </div>
-        </div>
+            </span>
+          </span>
+          <span className="field__row" style={{ flex: "0 0 auto" }}>
+            <input
+              type="number"
+              min={0}
+              max={100}
+              step={1}
+              style={{ width: 110 }}
+              value={draft.resumeFlushPct}
+              disabled={!draft.resumeFlushByPct}
+              onChange={(e) =>
+                patch({ resumeFlushPct: Math.min(100, Math.max(0, Number(e.target.value) || 0)) })
+              }
+            />
+            <span className="switch">
+              <input
+                type="checkbox"
+                aria-label="启用按百分比保存"
+                checked={draft.resumeFlushByPct}
+                onChange={(e) => {
+                  const v = e.target.checked;
+                  if (!v && !draft.resumeFlushBySize && !draft.resumeFlushByTime) return;
+                  patch({ resumeFlushByPct: v });
+                }}
+              />
+              <span className="switch__track" />
+              <span className="switch__thumb" />
+            </span>
+          </span>
+        </label>
 
 <Switch
           title="每次下载先问保存位置"
