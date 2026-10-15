@@ -926,6 +926,12 @@ input:focus {
   padding: var(--space-2) var(--space-4);
 }
 
+/* Author display:flex beats the UA [hidden] rule; without this the tab
+   switching renders every section at once. */
+.settings-section[hidden] {
+  display: none;
+}
+
 .settings-section__title {
   margin: var(--space-2) 0;
   font-size: 12px;
