@@ -1377,6 +1377,10 @@ func (m *Manager) run(t *task, ctx context.Context, cancel context.CancelFunc, d
 	opt.MinSegmentSize = cfg.MinSegmentSize
 	opt.Limiter = m.limiterFor(cfg.SpeedLimitKB)
 	opt.ProgressInterval = refreshInterval(cfg.RefreshRate)
+	opt.ProgressBytes = int64(cfg.ResumeFlushKB) << 10
+	opt.SaveInterval = time.Duration(cfg.ResumeFlushMs) * time.Millisecond
+	opt.SaveBytes = int64(cfg.ResumeFlushKB) << 10
+	opt.SavePercent = cfg.ResumeFlushPct
 	if cfg.Proxy != "" {
 		opt.Transport.ProxyURL = cfg.Proxy
 	}

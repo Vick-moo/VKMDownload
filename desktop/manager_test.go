@@ -1289,7 +1289,8 @@ func TestNewTasksRestPaused(t *testing.T) {
 // unfinished link to the same destination fails and points at the existing
 // record, instead of spawning a second transfer that would fight over the
 // same partial file (or burn a single-use token outright).
-func TestDuplicateURLIsRejected(t *testing.T) {	app := newTestApp(t)
+func TestDuplicateURLIsRejected(t *testing.T) {
+	app := newTestApp(t)
 	dir := t.TempDir()
 
 	first, err := app.mgr.Start(StartRequest{
@@ -1376,10 +1377,8 @@ func TestSameFileDifferentURLIsRejected(t *testing.T) {
 
 	// Same file behind another token URL: accepted at first (nothing known
 	// yet), then removed once its own probe names it — the original stays.
-	// Same file behind another token URL: accepted at first (nothing known
-	// yet), then removed once its own probe names it — the original stays.
-	// (Generous timeout: a probe hanging to its context deadline on a loaded
-	// box must not flake this.)
+	// (Generous timeout: localhost stalls on a loaded Windows box must not
+	// flake this.)
 	second, err := app.mgr.Start(StartRequest{
 		URL: srv.URL + "/token-two", Dest: dir, Start: false,
 	})
@@ -1609,10 +1608,23 @@ func TestRefreshIntervalMapping(t *testing.T) {
 	if cfg.RefreshRate != "fast" {
 		t.Errorf("default RefreshRate = %q, want fast", cfg.RefreshRate)
 	}
+	if cfg.ResumeFlushKB != 1024 || cfg.ResumeFlushMs != 250 {
+		t.Errorf("default flush = %dKB/%dms, want 1024KB/250ms",
+			cfg.ResumeFlushKB, cfg.ResumeFlushMs)
+	}
 	cfg.RefreshRate = "bogus"
+	cfg.ResumeFlushKB = 1
+	cfg.ResumeFlushMs = 99999
 	cfg.normalize()
 	if cfg.RefreshRate != "fast" {
 		t.Errorf("normalized RefreshRate = %q, want fast", cfg.RefreshRate)
+	}
+	if cfg.ResumeFlushKB != 1024 || cfg.ResumeFlushMs != 10000 {
+		t.Errorf("normalized flush = %dKB/%dms, want clamped 1024KB/10000ms",
+			cfg.ResumeFlushKB, cfg.ResumeFlushMs)
+	}
+	if cfg.ResumeFlushPct != 0 {
+		t.Errorf("default ResumeFlushPct = %d, want 0 (off)", cfg.ResumeFlushPct)
 	}
 }
 
@@ -1678,6 +1690,43 @@ func TestApplyRefreshIntervalReachesLive(t *testing.T) {
 
 	// Empty registry never panics.
 	app.mgr.applyRefreshInterval(250 * time.Millisecond)
+}
+
+// TestResumeFlushSettingsReachEngine pins the wiring from the settings page
+// to the transfer: aggressive flush thresholds must still produce a correct,
+// fully published file with nothing left behind.
+func TestResumeFlushSettingsReachEngine(t *testing.T) {
+	want := payload(512 << 10)
+	srv := rangedServer(t, want, 0)
+
+	app := newTestApp(t)
+	cfg := app.Config()
+	cfg.ResumeFlushKB = 64
+	cfg.ResumeFlushMs = 100
+	cfg.ResumeFlushPct = 5
+	if err := app.SetConfig(cfg); err != nil {
+		t.Fatalf("SetConfig: %v", err)
+	}
+
+	dir := t.TempDir()
+	tv, err := app.mgr.Start(StartRequest{
+		URL: srv.URL + "/flush.bin", Dest: filepath.Join(dir, "flush.bin"),
+		Conns: 2, Start: true,
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	waitFor(t, "the download to complete", 60*time.Second, func() bool {
+		v, ok := find(app.mgr, tv.ID)
+		return ok && v.Status == StatusCompleted
+	})
+
+	assertFileEquals(t, filepath.Join(dir, "flush.bin"), want)
+	for _, suf := range []string{engine.PartSuffix, engine.StateSuffix} {
+		if _, err := os.Stat(filepath.Join(dir, "flush.bin"+suf)); !os.IsNotExist(err) {
+			t.Errorf("leftover %s after publish", suf)
+		}
+	}
 }
 
 // TestStatsAggregatesActiveTasks covers the sidebar totals.

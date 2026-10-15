@@ -514,7 +514,7 @@ export function SettingsPage({
           <span className="setting__text">
             <span className="setting__title">界面刷新速度</span>
             <span className="setting__hint">
-              进度数字多久跳一次。只影响显示，不影响真实下载速度；改完下个任务生效。
+              进度数字多久跳一次。只影响显示，不影响真实下载速度；改完直播生效。
             </span>
           </span>
           <select
@@ -528,6 +528,66 @@ export function SettingsPage({
             <option value="medium">中（650ms）</option>
             <option value="slow">慢（1s）</option>
           </select>
+        </label>
+
+        <label className="setting">
+          <span className="setting__text">
+            <span className="setting__title">断点保存（按大小）</span>
+            <span className="setting__hint">
+              下了多少才写一次续传记录，单位 KB。越大写盘越少、崩溃重下越多。改完下个任务生效。
+            </span>
+          </span>
+          <input
+            type="number"
+            min={64}
+            max={65536}
+            step={64}
+            style={{ width: 110 }}
+            value={draft.resumeFlushKb}
+            onChange={(e) =>
+              patch({ resumeFlushKb: Math.max(64, Number(e.target.value) || 1024) })
+            }
+          />
+        </label>
+
+        <label className="setting">
+          <span className="setting__text">
+            <span className="setting__title">断点保存（按时间）</span>
+            <span className="setting__hint">
+              最多隔多久写一次续传记录，单位毫秒。越大写盘越少、崩溃重下越多。改完下个任务生效。
+            </span>
+          </span>
+          <input
+            type="number"
+            min={100}
+            max={10000}
+            step={50}
+            style={{ width: 110 }}
+            value={draft.resumeFlushMs}
+            onChange={(e) =>
+              patch({ resumeFlushMs: Math.min(10000, Math.max(100, Number(e.target.value) || 250)) })
+            }
+          />
+        </label>
+
+        <label className="setting">
+          <span className="setting__text">
+            <span className="setting__title">断点保存（按百分比）</span>
+            <span className="setting__hint">
+              每下完百分之几写一次，0 表示关。跟上面两项谁先到谁写。改完下个任务生效。
+            </span>
+          </span>
+          <input
+            type="number"
+            min={0}
+            max={100}
+            step={1}
+            style={{ width: 110 }}
+            value={draft.resumeFlushPct}
+            onChange={(e) =>
+              patch({ resumeFlushPct: Math.min(100, Math.max(0, Number(e.target.value) || 0)) })
+            }
+          />
         </label>
       </section>
 

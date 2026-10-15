@@ -84,10 +84,21 @@ type Options struct {
 	// Headers are sent with every request: Cookie, Referer, Authorization...
 	Headers http.Header
 
-	// ProgressInterval and ProgressBytes throttle progress reporting and
-	// state flushing. Both are checked; whichever fires first wins.
+	// ProgressInterval and ProgressBytes throttle progress reporting. Both
+	// are checked; whichever fires first wins.
 	ProgressInterval time.Duration
 	ProgressBytes    int64
+
+	// SaveInterval and SaveBytes throttle sidecar flushing independently of
+	// reporting: crash safety (frequent saves) and disk churn (rare saves)
+	// pull opposite ways, so they get their own knobs. Unset (<=0) follows
+	// the progress thresholds above.
+	SaveInterval time.Duration
+	SaveBytes    int64
+	// SavePercent adds a size-relative save trigger: flush at least every N%
+	// of the total (0 disables). A 2 GiB file at 5% flushes every ~100 MiB
+	// however SaveBytes is set. Unknown total disables it.
+	SavePercent int
 
 	// Transport configures the shared HTTP transport.
 	Transport TransportOptions
@@ -131,6 +142,18 @@ func (o Options) Normalize() Options {
 	}
 	if o.ProgressBytes <= 0 {
 		o.ProgressBytes = 1 << 20
+	}
+	if o.SaveInterval <= 0 {
+		o.SaveInterval = o.ProgressInterval
+	}
+	if o.SaveBytes <= 0 {
+		o.SaveBytes = o.ProgressBytes
+	}
+	if o.SavePercent < 0 {
+		o.SavePercent = 0
+	}
+	if o.SavePercent > 100 {
+		o.SavePercent = 100
 	}
 	o.Transport = o.Transport.normalized()
 	return o
@@ -457,15 +480,20 @@ func (s *session) effectiveAvailable() int64 {
 // newTracker builds the throttled progress reporter for this session.
 func (s *session) newTracker(initial, total int64) {
 	s.track = &progressTracker{
-		total:    total,
-		bytes:    initial,
-		lastMark: initial,
-		start:    time.Now(),
-		lastEmit: time.Now(),
-		interval: &s.d.progressIntervalNs,
-		step:     s.d.opt.ProgressBytes,
-		conns:    s.d.opt.Connections,
-		suggest:  s.probe.SuggestedName,
+		total:        total,
+		bytes:        initial,
+		lastMark:     initial,
+		lastSave:     time.Now(),
+		lastSaveMark: initial,
+		start:        time.Now(),
+		lastEmit:     time.Now(),
+		interval:     &s.d.progressIntervalNs,
+		step:         s.d.opt.ProgressBytes,
+		saveInterval: s.d.opt.SaveInterval,
+		saveStep:     s.d.opt.SaveBytes,
+		savePct:      int64(s.d.opt.SavePercent),
+		conns:        s.d.opt.Connections,
+		suggest:      s.probe.SuggestedName,
 	}
 	s.track.save = s.saveState
 	if s.req.Progress != nil {
@@ -1319,16 +1347,19 @@ func moveFile(src, dst string) error {
 //
 // Flushing on every write would turn a 100 MiB download into hundreds of
 // thousands of sidecar rewrites; flushing never would lose all progress on a
-// crash. The tracker fires on whichever of "every N bytes" or "every N
-// milliseconds" happens first.
+// crash. Reporting and flushing have independent thresholds (report fires on
+// UI cadence, save fires on crash-safety cadence); each fires on whichever
+// of "every N bytes" or "every N milliseconds" happens first.
 type progressTracker struct {
-	mu       sync.Mutex
-	emitMu   sync.Mutex
-	bytes    int64
-	total    int64
-	start    time.Time
-	lastEmit time.Time
-	lastMark int64
+	mu           sync.Mutex
+	emitMu       sync.Mutex
+	bytes        int64
+	total        int64
+	start        time.Time
+	lastEmit     time.Time
+	lastMark     int64
+	lastSave     time.Time
+	lastSaveMark int64
 	// delivered is the highest byte count handed to the callback so far.
 	// Snapshots are taken under mu but delivered outside it, so two workers
 	// can race: the one with the older snapshot must not rewind the UI.
@@ -1337,8 +1368,13 @@ type progressTracker struct {
 	// the current value, so retuning needs no restart.
 	interval *atomic.Int64
 	step     int64
-	conns    int
-	suggest  string
+	// saveInterval/saveStep throttle the sidecar independently of reporting.
+	saveInterval time.Duration
+	saveStep     int64
+	// savePct is a size-relative save trigger (percent of total, 0 disables).
+	savePct int64
+	conns   int
+	suggest string
 
 	report   func(Progress)
 	save     func() error
@@ -1355,6 +1391,16 @@ func (p *progressTracker) add(n int64) {
 	interval := time.Duration(p.interval.Load())
 	dt := now.Sub(p.lastEmit)
 	fire := dt >= interval || p.bytes-p.lastMark >= p.step
+	// The percent trigger joins the byte trigger, whichever is tighter; it
+	// needs a known total, otherwise it stays out of the way.
+	step := p.saveStep
+	if p.savePct > 0 && p.total > 0 {
+		if pct := p.total * p.savePct / 100; pct > 0 && pct < step {
+			step = pct
+		}
+	}
+	save := now.Sub(p.lastSave) >= p.saveInterval ||
+		p.bytes-p.lastSaveMark >= step
 
 	var speed float64
 	if fire {
@@ -1364,9 +1410,18 @@ func (p *progressTracker) add(n int64) {
 		p.lastEmit = now
 		p.lastMark = p.bytes
 	}
+	if save {
+		p.lastSave = now
+		p.lastSaveMark = p.bytes
+	}
 	bytes, total := p.bytes, p.total
 	p.mu.Unlock()
 
+	// Disk IO stays off every lock: a slow flush must serialise neither the
+	// workers nor the callbacks.
+	if save && p.save != nil {
+		_ = p.save()
+	}
 	if !fire {
 		return
 	}
@@ -1381,6 +1436,8 @@ func (p *progressTracker) reset() {
 	p.mu.Lock()
 	p.bytes = 0
 	p.lastMark = 0
+	p.lastSave = time.Now()
+	p.lastSaveMark = 0
 	p.start = time.Now()
 	p.lastEmit = time.Now()
 	p.mu.Unlock()
@@ -1391,7 +1448,8 @@ func (p *progressTracker) reset() {
 	p.emitMu.Unlock()
 }
 
-// finish forces a final 100% event.
+// finish forces a final 100% event. It reports only: persisting here would
+// resurrect the sidecar that publish removes right after.
 func (p *progressTracker) finish() {
 	if p == nil {
 		return
@@ -1406,14 +1464,9 @@ func (p *progressTracker) emit(bytes, total int64, speed float64) {
 	if p == nil {
 		return
 	}
-	// Persist the sidecar before serialising the callback. The save does disk
-	// IO and must not hold emitMu: every worker reports through here, and a
-	// slow flush would otherwise serialise all workers behind one file write.
-	if p.save != nil {
-		_ = p.save()
-	}
 	// Serialise emission: add() decides which goroutine fires, but a slow
-	// callback must not be entered concurrently.
+	// callback must not be entered concurrently. Saving happens in add(),
+	// never here, so a slow flush cannot serialise the callbacks.
 	p.emitMu.Lock()
 	defer p.emitMu.Unlock()
 

@@ -103,6 +103,18 @@ type Config struct {
 	// medium (650ms) or slow (1000ms). It only changes the UI refresh
 	// cadence, never the transfer speed. Applies to newly started runs.
 	RefreshRate string `json:"refreshRate"`
+
+	// ResumeFlushKB caps how much downloaded data may go unsaved: the sidecar
+	// is flushed at least this often by volume. Larger means fewer disk
+	// writes but more re-download after a crash. 0/negative falls back to
+	// the default.
+	ResumeFlushKB int `json:"resumeFlushKb"`
+	// ResumeFlushMs caps how long downloaded data may go unsaved, same
+	// trade-off on the time axis.
+	ResumeFlushMs int `json:"resumeFlushMs"`
+	// ResumeFlushPct adds a size-relative trigger: flush at least every N% of
+	// the total (0 disables). Unknown total disables it too.
+	ResumeFlushPct int `json:"resumeFlushPct"`
 }
 
 // OrganizeGroup maps filename extensions (without the dot, any case) to one
@@ -139,6 +151,9 @@ func DefaultConfig() Config {
 		ClipboardConfirm:    true,
 		ClipboardIntervalMs: 800,
 		RefreshRate:         "fast",
+		ResumeFlushKB:       1024,
+		ResumeFlushMs:       250,
+		ResumeFlushPct:      0,
 
 		// On by default, but only for downloads big enough to be worth a
 		// separate program. Taking over everything — including the browser's own
@@ -230,6 +245,26 @@ func (c *Config) normalize() {
 		// Unknown (including empty from older configs) means today's
 		// behaviour: no visible change on upgrade.
 		c.RefreshRate = "fast"
+	}
+	// Bounds for the resume-flush knobs: below this the sidecar churns for
+	// no benefit, above this a crash costs real re-download minutes.
+	if c.ResumeFlushKB < 64 {
+		c.ResumeFlushKB = 1024
+	}
+	if c.ResumeFlushKB > 64<<10 {
+		c.ResumeFlushKB = 64 << 10
+	}
+	if c.ResumeFlushMs < 100 {
+		c.ResumeFlushMs = 250
+	}
+	if c.ResumeFlushMs > 10000 {
+		c.ResumeFlushMs = 10000
+	}
+	if c.ResumeFlushPct < 0 {
+		c.ResumeFlushPct = 0
+	}
+	if c.ResumeFlushPct > 100 {
+		c.ResumeFlushPct = 100
 	}
 }
 

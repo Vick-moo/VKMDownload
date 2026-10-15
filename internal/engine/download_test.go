@@ -255,7 +255,11 @@ func startServer(t *testing.T, tweak func(*testsrv.Config)) (*testsrv.Server, st
 // testOptions returns options that force real segmentation on small resources
 // while keeping retry penalties short.
 func testOptions(conns int) Options {
-	o := Options{}.Normalize()
+	// ProgressInterval rides in the literal so Normalize derives the save
+	// thresholds from the final value: normalizing first and tweaking after
+	// would leave SaveInterval pinned to the 250ms default while reporting
+	// runs at 50ms.
+	o := Options{ProgressInterval: 50 * time.Millisecond}.Normalize()
 	o.Connections = conns
 	o.MinSizeForSegments = 1
 	o.MinSegmentSize = 64 << 10
@@ -268,7 +272,6 @@ func testOptions(conns int) Options {
 		Jitter:   0,
 		MaxTries: 8,
 	}
-	o.ProgressInterval = 50 * time.Millisecond
 	return o
 }
 

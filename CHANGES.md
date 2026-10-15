@@ -299,6 +299,17 @@
 - Verified: desktop + engine suites green, race on progress/limiter clean,
   tsc clean, exe rebuilt + restarted.
 
+### 30. Resume-flush knobs: per-MB, per-time, per-percent
+- Settings has three independent sidecar knobs (KB / ms / % of total, 0
+  disables the percent one): whichever fires first writes. Report and save
+  throttles are fully split in the tracker now.
+- Debugging footnote: two cancel/resume tests failed mid-way; root cause was
+  testOptions normalizing BEFORE setting ProgressInterval, pinning save
+  thresholds to the 250ms default while reporting ran at 50ms. Production
+  run() always sets every field explicitly - unaffected. Fixed the fixture.
+- Tests: extended TestRefreshIntervalMapping, TestSaveThrottlesIndependently
+  (percent case). Suites green, tsc clean, exe rebuilt + restarted.
+
 ## TODO (user requested, work later)
 
 - Detached ask-location popup WITHOUT v3 migration (backup plan).

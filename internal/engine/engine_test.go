@@ -627,13 +627,16 @@ func TestProgressTrackerThrottles(t *testing.T) {
 	iv := atomic.Int64{}
 	iv.Store(int64(time.Hour)) // only the byte threshold can fire
 	p := &progressTracker{
-		total:    1 << 30,
-		interval: &iv,
-		step:     100,
-		start:    time.Now(),
-		lastEmit: time.Now(),
-		report:   func(Progress) { reports++ },
-		save:     func() error { saves++; return nil },
+		total:        1 << 30,
+		interval:     &iv,
+		step:         100,
+		saveInterval: time.Hour,
+		saveStep:     100,
+		start:        time.Now(),
+		lastEmit:     time.Now(),
+		lastSave:     time.Now(),
+		report:       func(Progress) { reports++ },
+		save:         func() error { saves++; return nil },
 	}
 	for i := 0; i < 1000; i++ {
 		p.add(1)
@@ -649,6 +652,59 @@ func TestProgressTrackerThrottles(t *testing.T) {
 	}
 }
 
+// TestSaveThrottlesIndependently pins the split throttle: reporting can run
+// hot while the sidecar flushes on its own slower cadence, and the percent
+// trigger joins whichever byte threshold is tighter.
+func TestSaveThrottlesIndependently(t *testing.T) {
+	var reports, saves int
+	iv := atomic.Int64{}
+	iv.Store(int64(time.Nanosecond)) // every block reports
+	p := &progressTracker{
+		total:        1 << 20,
+		interval:     &iv,
+		step:         1,
+		saveInterval: time.Hour, // ...but almost never saves
+		saveStep:     1 << 20,
+		savePct:      0,
+		start:        time.Now(),
+		lastEmit:     time.Now(),
+		lastSave:     time.Now(),
+		report:       func(Progress) { reports++ },
+		save:         func() error { saves++; return nil },
+	}
+	for i := 0; i < 1100; i++ {
+		p.add(1 << 10)
+	}
+	if reports < 1000 {
+		t.Errorf("reported %d times for 1100 1KiB blocks, want ~1100", reports)
+	}
+	if saves != 1 {
+		t.Errorf("saved %d times over 1.1MiB, want exactly 1 (the 1MiB step)", saves)
+	}
+
+	// Percent trigger: 10% of 1MiB over 300KiB of blocks saves 3 times.
+	var psaves int
+	q := &progressTracker{
+		total:        1 << 20,
+		interval:     &iv,
+		step:         1,
+		saveInterval: time.Hour,
+		saveStep:     1 << 20,
+		savePct:      10,
+		start:        time.Now(),
+		lastEmit:     time.Now(),
+		lastSave:     time.Now(),
+		report:       func(Progress) {},
+		save:         func() error { psaves++; return nil },
+	}
+	for i := 0; i < 320; i++ {
+		q.add(1 << 10)
+	}
+	if psaves != 3 {
+		t.Errorf("saved %d times over 320KiB at 10%%, want 3", psaves)
+	}
+}
+
 func TestProgressTrackerETAUsesSeconds(t *testing.T) {
 	// Regression guard: (total-bytes)/speed is a count of seconds. Converting
 	// it to a Duration without scaling by time.Second inflates the estimate by
@@ -657,12 +713,15 @@ func TestProgressTrackerETAUsesSeconds(t *testing.T) {
 	iv := atomic.Int64{}
 	iv.Store(int64(time.Nanosecond))
 	p := &progressTracker{
-		total:    1000,
-		interval: &iv,
-		step:     1,
-		start:    time.Now().Add(-time.Second),
-		lastEmit: time.Now().Add(-time.Second),
-		report:   func(pr Progress) { got = pr },
+		total:        1000,
+		interval:     &iv,
+		step:         1,
+		saveInterval: time.Nanosecond,
+		saveStep:     1,
+		start:        time.Now().Add(-time.Second),
+		lastEmit:     time.Now().Add(-time.Second),
+		lastSave:     time.Now().Add(-time.Second),
+		report:       func(pr Progress) { got = pr },
 	}
 	p.add(500) // 500 bytes in ~1s => 500 B/s, so 500 bytes left => ~1s
 
