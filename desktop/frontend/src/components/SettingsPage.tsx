@@ -829,7 +829,7 @@ export function SettingsPage({
           <span className="setting__text">
             <span className="setting__title">检测间隔</span>
             <span className="setting__hint">
-              越短响应越快，但会稍微多占用一点 CPU。默认 800 毫秒。
+              越短响应越快，但会稍微多占用一点 CPU。默认 800 毫秒。需先打开上面的监控才会生效。
             </span>
           </span>
           <input
