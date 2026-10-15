@@ -422,17 +422,6 @@ export function SettingsPage({
           </span>
           <span className="field__row" style={{ flex: "0 0 auto" }}>
             <input
-              type="checkbox"
-              aria-label="启用按大小保存"
-              title="启用按大小保存（至少保留一种）"
-              checked={draft.resumeFlushBySize}
-              onChange={(e) => {
-                const v = e.target.checked;
-                if (!v && !draft.resumeFlushByTime && !draft.resumeFlushByPct) return;
-                patch({ resumeFlushBySize: v });
-              }}
-            />
-            <input
               type="number"
               min={64}
               max={65536}
@@ -443,6 +432,18 @@ export function SettingsPage({
               onChange={(e) =>
                 patch({ resumeFlushKb: Math.max(64, Number(e.target.value) || 1024) })
               }
+            />
+            <input
+              type="checkbox"
+              className="setting__check"
+              aria-label="启用按大小保存"
+              title="启用按大小保存（至少保留一种）"
+              checked={draft.resumeFlushBySize}
+              onChange={(e) => {
+                const v = e.target.checked;
+                if (!v && !draft.resumeFlushByTime && !draft.resumeFlushByPct) return;
+                patch({ resumeFlushBySize: v });
+              }}
             />
           </span>
         </label>
@@ -456,17 +457,6 @@ export function SettingsPage({
           </span>
           <span className="field__row" style={{ flex: "0 0 auto" }}>
             <input
-              type="checkbox"
-              aria-label="启用按时间保存"
-              title="启用按时间保存（至少保留一种）"
-              checked={draft.resumeFlushByTime}
-              onChange={(e) => {
-                const v = e.target.checked;
-                if (!v && !draft.resumeFlushBySize && !draft.resumeFlushByPct) return;
-                patch({ resumeFlushByTime: v });
-              }}
-            />
-            <input
               type="number"
               min={100}
               max={10000}
@@ -477,6 +467,18 @@ export function SettingsPage({
               onChange={(e) =>
                 patch({ resumeFlushMs: Math.min(10000, Math.max(100, Number(e.target.value) || 250)) })
               }
+            />
+            <input
+              type="checkbox"
+              className="setting__check"
+              aria-label="启用按时间保存"
+              title="启用按时间保存（至少保留一种）"
+              checked={draft.resumeFlushByTime}
+              onChange={(e) => {
+                const v = e.target.checked;
+                if (!v && !draft.resumeFlushBySize && !draft.resumeFlushByPct) return;
+                patch({ resumeFlushByTime: v });
+              }}
             />
           </span>
         </label>
@@ -490,17 +492,6 @@ export function SettingsPage({
           </span>
           <span className="field__row" style={{ flex: "0 0 auto" }}>
             <input
-              type="checkbox"
-              aria-label="启用按百分比保存"
-              title="启用按百分比保存（至少保留一种）"
-              checked={draft.resumeFlushByPct}
-              onChange={(e) => {
-                const v = e.target.checked;
-                if (!v && !draft.resumeFlushBySize && !draft.resumeFlushByTime) return;
-                patch({ resumeFlushByPct: v });
-              }}
-            />
-            <input
               type="number"
               min={0}
               max={100}
@@ -511,6 +502,18 @@ export function SettingsPage({
               onChange={(e) =>
                 patch({ resumeFlushPct: Math.min(100, Math.max(0, Number(e.target.value) || 0)) })
               }
+            />
+            <input
+              type="checkbox"
+              className="setting__check"
+              aria-label="启用按百分比保存"
+              title="启用按百分比保存（至少保留一种）"
+              checked={draft.resumeFlushByPct}
+              onChange={(e) => {
+                const v = e.target.checked;
+                if (!v && !draft.resumeFlushBySize && !draft.resumeFlushByTime) return;
+                patch({ resumeFlushByPct: v });
+              }}
             />
           </span>
         </label>

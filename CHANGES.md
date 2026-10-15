@@ -321,6 +321,11 @@
   drift); repaired against git pristine, verified by counts + tsc.
 - Verified: tsc clean, build green, app restarted.
 
+### 32. Flush checkbox restyle + swap
+- Number box left, checkbox right; checkbox redrawn for the dark theme
+  (accent fill + white tick) instead of the native box.
+- Verified: tsc + build clean, app restarted.
+
 ## TODO (user requested, work later)
 
 - Detached ask-location popup WITHOUT v3 migration (backup plan).
