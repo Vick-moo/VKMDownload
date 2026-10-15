@@ -331,6 +331,11 @@
   on the next row, description under it. Uses the existing Switch component.
 - Verified: tsc + build clean, app restarted.
 
+### 34. Flush cards per mockup
+- Trigger cards: group card with accent-bar title, per-trigger card with
+  title + number + switch right, hint below. Removed the checkbox restyle
+  dead CSS. Verified: tsc + build clean, app restarted.
+
 ## TODO (user requested, work later)
 
 - Detached ask-location popup WITHOUT v3 migration (backup plan).

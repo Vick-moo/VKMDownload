@@ -148,6 +148,7 @@ cd desktop && wails build            # 产出 build/bin/VKMDownload.exe
 40. Settings tabs + flush switches + reorder (SettingsPage.tsx, styles.css).
 41. Flush checkbox style (.setting__check) + number-first order.
 42. Flush rows use Switch + nested number/hint (SettingsPage.tsx).
+43. Flush cards (flush-group/flush-card CSS + markup, SettingsPage.tsx).
 ## 8. 剩下未动的（有意延后）
 
 - ~~`Remove`/`Cancel` 在 binding 线程同步 `waitStopped(3s)`~~：已修——等删改走后台 goroutine，`Cancel` 用代际 guard 防误删（`manager.go:Cancel/Remove`）。
