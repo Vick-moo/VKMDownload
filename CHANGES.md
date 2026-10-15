@@ -267,10 +267,17 @@
 ## TODO (user requested, work later)
 
 - Detached ask-location dialog in its own small window (no main window).
-  Blocked: Wails v2 is single-window; the modal must live in the main window
-  (bring-to-front is the current ceiling). Requires Wails v3 migration
-  (multi-window support), which is rewrite-scale work. Requested 2026-10-15.
-  Not started.
+  WHY v3: user wants only the small placement dialog to pop when a browser
+  download arrives, without the whole main window coming along. Wails v2 is
+  single-window so the modal must live in the main window (bring-to-front,
+  CHANGES #11, is the current ceiling); only Wails v3 has multi-window.
+  STATUS (2026-10-15): parked on purpose. v3 is still beta (APIs unstable),
+  and migration is rewrite-scale (window model, JS bridge, bindings,
+  packaging all change; manager/tray/update/clipboard/loopback/React all
+  need porting). Frameworks reviewed: Electron (needs Go engine as sidecar
+  + huge bundle), Tauri (Rust rewrite), Fyne/walk (React UI rewrite).
+  Verdict: stay on v2 until v3 goes stable - Go code moves over almost
+  untouched then. Revisit only when the small window becomes a must.
 
 
 - Multi-select + multi-edit tasks in the list. Bulk start/stop/remove DONE (2026-10-15, CHANGES #12). Batch field editing (connections/destination) still open.
