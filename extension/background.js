@@ -425,8 +425,9 @@ if (hasExtensionApis()) {
       return;
     }
 
-    // Explicit refusal. Put the download back only if the browser entry is
-    // still there; if it already settled or vanished there is nothing to redo.
+    // Explicit refusal. The original browser entry is still alive (nothing
+    // was cancelled on the failure path), so cancel it first: re-downloading
+    // alongside it would fetch the file twice.
     let freshName = filename;
     try {
       const [current] = await chrome.downloads.search({ id: item.id });
@@ -439,6 +440,12 @@ if (hasExtensionApis()) {
       report(result, filename);
       return;
     }
+    await new Promise((resolve) => {
+      chrome.downloads.cancel(item.id, () => {
+        void chrome.runtime.lastError;
+        resolve();
+      });
+    });
     const retry = { url };
     if (freshName) retry.filename = freshName;
     try {
@@ -552,7 +559,7 @@ if (
           return;
         }
 
-        const current = await getPolicy();
+        const current = await getPolicy(true);
         const enabled = !(current && current.enabled);
 
         try {

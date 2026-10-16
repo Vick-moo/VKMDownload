@@ -165,8 +165,7 @@ describe("handOver", () => {
     assert.deepEqual(result, { ok: true, duplicate: true, name: "f.zip" });
   });
 
-  it("reports a peer-check 403 with the app's reason", async () => {
-    stubChrome();
+  it("reports a peer-check 403 with the app's reason", async () => {    stubChrome();
     globalThis.fetch = async (url) => {
       if (String(url).endsWith("/ping")) {
         return { ok: true, status: 200, json: async () => ({ app: "VKMDownload" }) };
@@ -177,5 +176,73 @@ describe("handOver", () => {
     assert.equal(result.ok, false);
     assert.equal(result.refused, true);
     assert.match(result.error, /not a recognized browser/);
+  });
+});
+
+describe("intercept fallback order", () => {
+  // Regression: the failure path used to re-download while the original
+  // browser entry was still alive, fetching the file twice.
+  it("cancels the original before re-downloading on refusal", async () => {
+    const order = [];
+    let createdHandler;
+    const savedFetch = globalThis.fetch;
+    globalThis.chrome = {
+      storage: {
+        local: { get: async () => ({}), set: async () => {}, remove: async () => {} },
+        session: { get: async () => ({}), set: async () => {} },
+      },
+      downloads: {
+        search: async () => [
+          { id: 7, state: "in_progress", filename: "C:\\dl\\f.zip", totalBytes: 5 * 1024 * 1024 },
+        ],
+        cancel: (id, cb) => {
+          order.push("cancel");
+          cb();
+        },
+        erase: (id, cb) => cb(),
+        download: async () => {
+          order.push("download");
+          return 8;
+        },
+        onCreated: {
+          addListener: (fn) => {
+            createdHandler = fn;
+          },
+        },
+        onChanged: { addListener: () => {} },
+      },
+      cookies: { getAll: async () => [] },
+      notifications: { create: () => {} },
+      contextMenus: { removeAll: (cb) => cb(), create: () => {} },
+      runtime: {
+        onMessage: { addListener: () => {} },
+        onInstalled: { addListener: () => {} },
+      },
+    };
+    globalThis.fetch = async (url) => {
+      const u = String(url);
+      if (u.endsWith("/ping")) {
+        return { ok: true, status: 200, json: async () => ({ app: "VKMDownload" }) };
+      }
+      if (u.endsWith("/settings")) {
+        return { ok: true, status: 200, json: async () => ({ enabled: true, minSizeKb: 0, skipHosts: [] }) };
+      }
+      if (u.endsWith("/add")) {
+        return { ok: false, status: 400, json: async () => ({ error: "nope" }) };
+      }
+      throw new Error(`unexpected fetch: ${u}`);
+    };
+    try {
+      delete require.cache[require.resolve("../background.js")];
+      require("../background.js");
+      const ext2 = globalThis.__vkmExt;
+      ext2.resetForTest();
+      await createdHandler({ id: 7, url: "https://example.com/f.zip", totalBytes: 5 * 1024 * 1024 });
+      assert.deepEqual(order, ["cancel", "download"]);
+    } finally {
+      globalThis.fetch = savedFetch;
+      delete require.cache[require.resolve("../background.js")];
+      require("../background.js");
+    }
   });
 });
