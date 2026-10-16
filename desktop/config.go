@@ -123,9 +123,9 @@ type Config struct {
 
 	// VerifyPeerProcess, when true, makes the loopback endpoint confirm the
 	// calling process is a genuine signed browser (see peercheck.go) before
-	// honouring a request. On by default: unlike the token it needs no
-	// setup, and it closes the forged-Origin hole for everything except an
-	// attacker already injected into the browser itself.
+	// honouring a request. On by default: it needs no setup, and it closes
+	// the forged-Origin hole for everything except an attacker already
+	// injected into the browser itself.
 	VerifyPeerProcess bool `json:"verifyPeerProcess"`
 }
 

@@ -404,8 +404,6 @@ func (a *App) RestartClipboardWatch() {
 // OS clipboard is queried at a fixed interval and the text is compared against
 // the previous value, which also means an unchanged clipboard costs one cheap
 // call and nothing else.
-// urlRe finds a URL inside clipboard text. The match is post-processed by
-// extractURL, which strips trailing punctuation.
 // urlRe finds a URL inside clipboard text. CJK punctuation is excluded from
 // the match outright: unlike ASCII closers (which may be legal inside a URL
 // and are only stripped when trailing by extractURL below), a full-width mark
@@ -508,8 +506,7 @@ func (a *App) ClipboardProbe() (map[string]string, error) {
 
 // --------------------------------------------------------------- lifecycle
 
-// Version reports the build identifier shown in the UI.
-// Version reports the running version.
+// Version reports the running version shown in the UI.
 //
 // It reads the same constant the loopback endpoint hands the browser extension,
 // so the two cannot drift: they did, briefly, because this was a literal.

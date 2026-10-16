@@ -56,13 +56,12 @@ type cachedVerdict struct {
 
 var peerTrust = &trustCache{hits: make(map[string]cachedVerdict)}
 
-// errPeerCheckUnsupported is returned by the non-Windows stubs, where the
-// peer table and Authenticode APIs do not exist.
-var errPeerCheckUnsupported = errors.New("peer check unsupported on this OS")
-
 // Injectables for tests: the table lookup and the trust primitive are the
 // only OS-touching parts, so stubbing these two covers every policy branch
-// without real processes or signatures.
+// without real processes or signatures. errPeerCheckUnsupported is returned
+// by the non-Windows stubs, where the peer table and Authenticode APIs do
+// not exist.
+var errPeerCheckUnsupported = errors.New("peer check unsupported on this OS")
 var (
 	tcpOwnerOfPort = tcpOwnerPid
 	processImageOf = processImagePath
@@ -108,16 +107,19 @@ func (a *App) checkPeerProcess(r *http.Request) (bool, string) {
 		a.debugLog("peer check: rejected non-browser caller %s (pid %d)", exe, pid)
 		return false, exe
 	}
-	ifTodoCacheOK := peerTrust.get(exe)
-	if ifTodoCacheOK != nil {
-		if !*ifTodoCacheOK {
+	// One Stat shared by the cache lookup and the store below: if the file
+	// changes during verification, the stored identity will not match next
+	// time and the verdict is recomputed instead of trusted.
+	mtime, size, stated := statOf(exe)
+	if hit := peerTrust.getAt(exe, mtime, size, stated); hit != nil {
+		if !*hit {
 			a.debugLog("peer check: rejected untrusted image %s", exe)
 			return false, exe
 		}
 		return true, ""
 	}
 	ok := verifyTrustOf(exe)
-	peerTrust.put(exe, ok)
+	peerTrust.putAt(exe, mtime, size, stated, ok)
 	if !ok {
 		a.debugLog("peer check: rejected bad signature %s", exe)
 		return false, exe
@@ -126,25 +128,60 @@ func (a *App) checkPeerProcess(r *http.Request) (bool, string) {
 }
 
 func (c *trustCache) get(exe string) *bool {
+	mtime, size, stated := statOf(exe)
+	return c.getAt(exe, mtime, size, stated)
+}
+
+// statOf stats once so verification and caching share the same file identity:
+// otherwise a swap between the check and the store would file a stale
+// verdict under a fresh mtime.
+func statOf(exe string) (mtime int64, size int64, ok bool) {
 	st, err := os.Stat(exe)
 	if err != nil {
+		return 0, 0, false
+	}
+	return st.ModTime().UnixNano(), st.Size(), true
+}
+
+func (c *trustCache) getAt(exe string, mtime, size int64, ok bool) *bool {
+	if !ok {
 		return nil
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	v, ok := c.hits[exe]
-	if !ok || v.mtime != st.ModTime().UnixNano() || v.size != st.Size() {
+	v, found := c.hits[cacheKey(exe)]
+	if !found || v.mtime != mtime || v.size != size {
 		return nil
 	}
 	return &v.ok
 }
 
 func (c *trustCache) put(exe string, ok bool) {
-	st, err := os.Stat(exe)
-	if err != nil {
+	mtime, size, stated := statOf(exe)
+	c.putAt(exe, mtime, size, stated, ok)
+}
+
+func (c *trustCache) putAt(exe string, mtime, size int64, stated, ok bool) {
+	if !stated {
 		return
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.hits[exe] = cachedVerdict{mtime: st.ModTime().UnixNano(), size: st.Size(), ok: ok}
+	if len(c.hits) >= maxTrustEntries {
+		// Bounded: an attacker pointing at endless same-named binaries in
+		// fresh directories must not grow this without limit. Evicting
+		// everything is crude but safe — the next request re-verifies.
+		c.hits = make(map[string]cachedVerdict)
+	}
+	c.hits[cacheKey(exe)] = cachedVerdict{mtime: mtime, size: size, ok: ok}
+}
+
+// maxTrustEntries bounds the verdict cache: one entry per distinct browser
+// binary in practice, so this ceiling is never hit in normal use.
+const maxTrustEntries = 64
+
+// cacheKey normalises for Windows' case-insensitive filesystem so
+// C:\X\Chrome.exe and c:\x\chrome.exe share one verdict.
+func cacheKey(exe string) string {
+	return strings.ToLower(filepath.Clean(exe))
 }

@@ -8,7 +8,21 @@ import (
 	"unsafe"
 )
 
-const tcpTableOwnerPidAll = 5
+const (
+	tcpTableOwnerPidAll = 5
+	afInet              = 2
+)
+
+const (
+	// WinVerifyTrust state actions (wintrust.h).
+	wtdStateActionVerify = 1
+	wtdStateActionClose  = 2
+	// Revocation check mode: none. A whole-chain check costs a network
+	// round trip per new executable and breaks offline machines; the
+	// signature itself (vendor key, intact file) is what impersonation
+	// cannot forge. Revoked-but-still-signed is an accepted residual risk.
+	wtdRevokeNone = 0
+)
 
 var (
 	iphlpapi                = syscall.NewLazyDLL("iphlpapi.dll")
@@ -28,14 +42,20 @@ func tcpOwnerPid(port uint16) (uint32, error) {
 	var size uint32
 	// Size-probe call; its return is intentionally ignored.
 	procGetExtendedTcpTable.Call(0, uintptr(unsafe.Pointer(&size)),
-		0, 2, uintptr(tcpTableOwnerPidAll), 0)
+		0, uintptr(afInet), uintptr(tcpTableOwnerPidAll), 0)
+	if size < 4 {
+		return 0, fmt.Errorf("GetExtendedTcpTable returned empty table")
+	}
 	buf := make([]byte, size)
 	r1, _, _ := procGetExtendedTcpTable.Call(
 		uintptr(unsafe.Pointer(&buf[0])),
 		uintptr(unsafe.Pointer(&size)),
-		0, 2, uintptr(tcpTableOwnerPidAll), 0)
+		0, uintptr(afInet), uintptr(tcpTableOwnerPidAll), 0)
 	if r1 != 0 {
 		return 0, fmt.Errorf("GetExtendedTcpTable: %d", r1)
+	}
+	if len(buf) < 4 {
+		return 0, fmt.Errorf("GetExtendedTcpTable returned short table")
 	}
 	n := *(*uint32)(unsafe.Pointer(&buf[0]))
 	const rowSize = 24 // MIB_TCPROW_OWNER_PID: state + addrs + ports + pid
@@ -60,16 +80,17 @@ func processImagePath(pid uint32) (string, error) {
 	h, _, errno := procOpenProcess.Call(
 		uintptr(queryLimited), 0, uintptr(pid))
 	if h == 0 {
-		return "", errno
+		return "", fmt.Errorf("OpenProcess(%d): %v", pid, errno)
 	}
 	defer procCloseHandle.Call(h)
-	buf := make([]uint16, syscall.MAX_PATH)
+	// 32k units: MAX_PATH truncates long install paths.
+	buf := make([]uint16, 32768)
 	size := uint32(len(buf))
 	r1, _, errno := procQueryImageName.Call(
 		h, 0, uintptr(unsafe.Pointer(&buf[0])),
 		uintptr(unsafe.Pointer(&size)))
 	if r1 == 0 {
-		return "", errno
+		return "", fmt.Errorf("QueryFullProcessImageName(%d): %v", pid, errno)
 	}
 	return syscall.UTF16ToString(buf[:size]), nil
 }
@@ -118,18 +139,17 @@ func verifyFileTrust(path string) bool {
 	fi := fileInfo{filePath: path16}
 	fi.cbStruct = uint32(unsafe.Sizeof(fi))
 	const choiceFile = 1
-	const verifyAction = 1
-	wd := wintrustData{uiChoice: 2, revocationChecks: 0,
+	wd := wintrustData{uiChoice: 2, revocationChecks: wtdRevokeNone,
 		unionChoice:     choiceFile,
 		fileOrCatOrBlob: unsafe.Pointer(&fi),
-		stateAction:     verifyAction}
+		stateAction:     wtdStateActionVerify}
 	wd.cbStruct = uint32(unsafe.Sizeof(wd))
 	r1, _, _ := procWinVerifyTrust.Call(
 		0,
 		uintptr(unsafe.Pointer(&winTrustActionGenericVerifyV2)),
 		uintptr(unsafe.Pointer(&wd)))
-	// Always close the state to avoid a per-call leak.
-	wd.stateAction = 5 // WTD_STATEACTION_CLOSE
+	// Always close the state to avoid a per-call handle leak.
+	wd.stateAction = wtdStateActionClose
 	procWinVerifyTrust.Call(0,
 		uintptr(unsafe.Pointer(&winTrustActionGenericVerifyV2)),
 		uintptr(unsafe.Pointer(&wd)))
