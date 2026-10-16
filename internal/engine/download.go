@@ -280,8 +280,19 @@ func (d *Downloader) Options() Options { return d.opt }
 // HTTP/1.1 is really pinned.
 func (d *Downloader) Transport() *http.Transport { return d.tr }
 
-// Close releases idle connections.
-func (d *Downloader) Close() { d.tr.CloseIdleConnections() }
+// Close releases idle connections and the shared debug handle.
+func (d *Downloader) Close() {
+	d.tr.CloseIdleConnections()
+	// The debug handle is process-global and shared by every Downloader; leave
+	// it open and repeated open/close cycles leak descriptors. The next debugf
+	// reopens it on demand.
+	debugMu.Lock()
+	if debugFile != nil {
+		_ = debugFile.Close()
+		debugFile = nil
+	}
+	debugMu.Unlock()
+}
 
 // Download fetches req.URL into req.Dest.
 //
@@ -349,8 +360,10 @@ func (d *Downloader) Download(ctx context.Context, req Request) (*Result, error)
 		run  func(context.Context) (*Result, error)
 	}
 	var ladder []strategy
-	if s.resumeState != nil {
-		// Only worth trying If-Range when there is something to resume.
+	if s.resumeState != nil && canSegment {
+		// Only worth trying If-Range when there is something to resume, and
+		// only when the length is known: Size<0 can never be segmented, so a
+		// resume of an unknown-length resource falls through to single stream.
 		s.useIfRange = true
 		ladder = append(ladder, strategy{"segmented+if-range", s.runSegmented})
 	}
@@ -564,6 +577,12 @@ func (s *session) saveState() error {
 
 // runSegmented downloads with multiple range requests.
 func (s *session) runSegmented(ctx context.Context) (*Result, error) {
+	// Segmentation is only defined for a known length. An unknown length must
+	// travel the single-stream path; planning ranges against it would produce
+	// an empty plan that completes vacuously and publishes a false success.
+	if s.probe.Size < 0 {
+		return nil, fmt.Errorf("segmented download requires a known length, got %d", s.probe.Size)
+	}
 	if err := s.openPart(); err != nil {
 		return nil, err
 	}
@@ -578,7 +597,15 @@ func (s *session) runSegmented(ctx context.Context) (*Result, error) {
 		}
 	}
 	if s.mgr == nil {
-		s.mgr = newSegmentManager(planSegments(s.probe.Size, s.d.opt.Connections, s.d.opt.MinSegmentSize))
+		plan := planSegments(s.probe.Size, s.d.opt.Connections, s.d.opt.MinSegmentSize)
+		if len(plan) == 0 && s.probe.Size != 0 {
+			// planSegments only returns empty for total<=0, and a negative
+			// size was rejected above, so reaching here means the planner and
+			// the probe disagree. An empty plan completes vacuously, which is
+			// only a real success for an empty resource.
+			return nil, fmt.Errorf("segment planner produced no segments for size %d", s.probe.Size)
+		}
+		s.mgr = newSegmentManager(plan)
 	}
 	s.initialSegs = s.mgr.segmentCount()
 	s.newTracker(reserved, s.probe.Size)
@@ -852,8 +879,15 @@ func (s *session) fetchOnce(ctx context.Context, seg *Segment) error {
 	buf := *bufp
 	defer bufPool.Put(bufp)
 
+	// Never read more than ChunkSize at once: the pooled buffer is shared at
+	// bufPoolBlockSize, but a small ChunkSize is a deliberate brake on memory
+	// and burst size. The same clamp lives on the single-stream path.
+	chunk := s.d.opt.ChunkSize
+	if chunk <= 0 || chunk > len(buf) {
+		chunk = len(buf)
+	}
 	for written < n {
-		want := int64(len(buf))
+		want := int64(chunk)
 		if r := n - written; r < want {
 			want = r
 		}
@@ -872,7 +906,7 @@ func (s *session) fetchOnce(ctx context.Context, seg *Segment) error {
 				// the absolute end rather than a byte count: reporting a
 				// cumulative total as an increment is what previously made the
 				// offset jump past a block that was never written.
-				s.mgr.commit(seg, n, off+written)
+				s.mgr.commit(seg, int64(wn), off+written)
 				committed += int64(wn)
 				s.track.add(int64(wn))
 				// Throttle after the write, so the ceiling applies to bytes
@@ -920,11 +954,12 @@ func (s *session) fetchOnce(ctx context.Context, seg *Segment) error {
 // otherwise be written at the wrong offset, producing a corrupt file that
 // passes a length check.
 func (s *session) validateRangeResponse(resp *http.Response, seg *Segment, off, n int64) error {
+	// A non-range segment must never reach the segmented fetcher: such segments
+	// are only built for the single-stream path (runSingle), which validates
+	// its own responses. Arriving here means the strategy ladder misrouted, so
+	// fail loudly instead of accepting a 200 body at a range offset.
 	if seg.NoRange {
-		if resp.StatusCode != http.StatusOK {
-			return &statusError{resp.StatusCode, "expected 200 for a non-range segment"}
-		}
-		return nil
+		return errors.New("non-range segment reached the segmented fetcher")
 	}
 
 	switch resp.StatusCode {
@@ -1152,7 +1187,11 @@ func (s *session) publish(res *Result) (*Result, error) {
 		return nil, errors.New("publish called before any file was opened")
 	}
 
-	if s.d.opt.VerifySize && s.probe.Size >= 0 {
+	// The finished length is always checked against the announced size when one
+	// is known. A truncated download with plausible contents is otherwise
+	// indistinguishable from a complete one. VerifySize remains as the switch
+	// for additional, stronger verification.
+	if s.probe.Size >= 0 {
 		st, err := s.file.Stat()
 		if err != nil {
 			return nil, err
@@ -1251,6 +1290,19 @@ func isRetryable(err error) bool {
 		return false
 	}
 	if errors.Is(err, ErrSizeMismatch) {
+		return false
+	}
+	// Local write failures are never transient: retrying a full disk or a
+	// permission error only burns the attempt budget to report the same error.
+	if errors.Is(err, io.ErrShortWrite) {
+		return false
+	}
+	var pathErr *os.PathError
+	if errors.As(err, &pathErr) {
+		return false
+	}
+	var sysErr *os.SyscallError
+	if errors.As(err, &sysErr) {
 		return false
 	}
 
@@ -1374,6 +1426,9 @@ type progressTracker struct {
 	// saveInterval/saveStep throttle the sidecar independently of reporting.
 	saveInterval time.Duration
 	saveStep     int64
+	// saveFails counts sidecar flush failures. The watermark below only moves
+	// on success, so this is what distinguishes "saved rarely" from "failing".
+	saveFails int64
 	// savePct is a size-relative save trigger (percent of total, 0 disables).
 	savePct int64
 	conns   int
@@ -1414,17 +1469,31 @@ func (p *progressTracker) add(n int64) {
 		p.lastEmit = now
 		p.lastMark = p.bytes
 	}
-	if save {
-		p.lastSave = now
-		p.lastSaveMark = p.bytes
-	}
 	bytes, total := p.bytes, p.total
 	p.mu.Unlock()
 
 	// Disk IO stays off every lock: a slow flush must serialise neither the
 	// workers nor the callbacks.
 	if save && p.save != nil {
-		_ = p.save()
+		if err := p.save(); err != nil {
+			debugf("save-state failed: %v", err)
+			p.mu.Lock()
+			p.saveFails++
+			p.mu.Unlock()
+		} else {
+			// Only a successful flush may advance the watermark: it describes
+			// what is durable, not what was attempted. The snapshot is kept
+			// (rather than the live counter) so a concurrent success that
+			// already recorded newer progress is never rewound.
+			p.mu.Lock()
+			if bytes > p.lastSaveMark {
+				p.lastSaveMark = bytes
+			}
+			if now.After(p.lastSave) {
+				p.lastSave = now
+			}
+			p.mu.Unlock()
+		}
 	}
 	if !fire {
 		return

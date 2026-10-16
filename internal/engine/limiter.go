@@ -31,20 +31,42 @@ type Limiter struct {
 	last   time.Time
 }
 
-// minimumBurst is the smallest bucket size. It has to be at least one read
-// block, or a transfer waiting for a full block could never be satisfied and
-// would block forever at low rate limits.
+// minimumBurst caps the scaled floor below, not the floor itself: a tiny rate
+// must not bank a quarter-megabyte burst that makes the limit meaningless. The
+// effective floor is burstFloor(rate), which shrinks with the rate.
 const minimumBurst = 256 << 10
+
+// burstFloor scales the minimum bucket with the rate: a 1 KiB/s limit with a
+// 256 KiB bucket would transfer for minutes before throttling ever engaged.
+// The 8 KiB lower bound keeps at least one small block satisfiable so a
+// transfer can always make progress.
+func burstFloor(rate int64) float64 {
+	lo := float64(rate) / 10
+	if lo < 8<<10 {
+		lo = 8 << 10
+	}
+	if lo > minimumBurst {
+		lo = minimumBurst
+	}
+	return lo
+}
+
+// bucketCapacity is the burst allowance for rate: half a second of traffic,
+// but never below the scaled floor.
+func bucketCapacity(rate int64) float64 {
+	c := float64(rate) / 2
+	if f := burstFloor(rate); c < f {
+		c = f
+	}
+	return c
+}
 
 // NewLimiter returns a limiter for the given rate, or nil for an unlimited one.
 func NewLimiter(bytesPerSecond int64) *Limiter {
 	if bytesPerSecond <= 0 {
 		return nil
 	}
-	capacity := float64(bytesPerSecond) / 2 // allow a half-second burst
-	if capacity < minimumBurst {
-		capacity = minimumBurst
-	}
+	capacity := bucketCapacity(bytesPerSecond)
 	return &Limiter{
 		rate:     bytesPerSecond,
 		capacity: capacity,
@@ -77,11 +99,7 @@ func (l *Limiter) SetRate(bytesPerSecond int64) {
 	defer l.mu.Unlock()
 
 	l.rate = bytesPerSecond
-	capacity := float64(bytesPerSecond) / 2 // allow a half-second burst
-	if capacity < minimumBurst {
-		capacity = minimumBurst
-	}
-	l.capacity = capacity
+	l.capacity = bucketCapacity(bytesPerSecond)
 	if l.tokens > l.capacity {
 		l.tokens = l.capacity
 	}
@@ -106,14 +124,10 @@ func (l *Limiter) Wait(ctx context.Context, n int) error {
 
 	remaining := float64(n)
 	for remaining > 0 {
-		// Never ask for more than the bucket can hold, or a request larger than
-		// the capacity could never be satisfied.
-		take := remaining
-		if c := l.cap(); take > c {
-			take = c
-		}
-
-		wait, ok := l.reserve(take)
+		// Capping and spending happen under one lock (see takeCapped): reading
+		// the capacity and then reserving in two steps would let a concurrent
+		// SetRate change the bucket between them.
+		take, wait, ok := l.takeCapped(remaining)
 		if ok {
 			remaining -= take
 			continue
@@ -136,15 +150,18 @@ func (l *Limiter) Wait(ctx context.Context, n int) error {
 	return nil
 }
 
-// reserve takes n tokens if they are available, reporting how long to wait when
-// they are not.
-func (l *Limiter) reserve(n float64) (time.Duration, bool) {
+// takeCapped grants up to need tokens under a single lock, capping the grant
+// at the bucket size so a request larger than the bucket still completes in
+// pieces instead of deadlocking. It reports how long to wait when credit is
+// short. Merging the cap read and the spend avoids a SetRate racing a transfer
+// between the two.
+func (l *Limiter) takeCapped(need float64) (take float64, wait time.Duration, ok bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
 	// A non-positive rate (see SetRate) means unlimited: grant everything.
 	if l.rate <= 0 {
-		return 0, true
+		return need, 0, true
 	}
 
 	now := time.Now()
@@ -154,11 +171,15 @@ func (l *Limiter) reserve(n float64) (time.Duration, bool) {
 		l.tokens = l.capacity
 	}
 
-	if l.tokens >= n {
-		l.tokens -= n
-		return 0, true
+	take = need
+	if take > l.capacity {
+		take = l.capacity
+	}
+	if l.tokens >= take {
+		l.tokens -= take
+		return take, 0, true
 	}
 
-	shortfall := n - l.tokens
-	return time.Duration(shortfall / float64(l.rate) * float64(time.Second)), false
+	shortfall := take - l.tokens
+	return 0, time.Duration(shortfall / float64(l.rate) * float64(time.Second)), false
 }

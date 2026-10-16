@@ -489,7 +489,10 @@ func TestFakeRangeServerFallsBack(t *testing.T) {
 func TestResumeContinuesFromPartialFile(t *testing.T) {
 	srv, url := startServer(t, func(c *testsrv.Config) {
 		// Throttle so the download is still in flight when cancellation lands.
-		c.PerConnRate = 2 << 20
+		// At 1 MiB/s a 4 MiB transfer needs seconds while the first progress
+		// report (and the cancel inside it) fires within milliseconds, so the
+		// interruption below is deterministic, not a race.
+		c.PerConnRate = 1 << 20
 	})
 	dest := filepath.Join(t.TempDir(), "out.bin")
 
@@ -512,10 +515,10 @@ func TestResumeContinuesFromPartialFile(t *testing.T) {
 
 	_, err = d.Download(ctx, Request{URL: url, Dest: dest, Progress: progress})
 	if err == nil {
-		t.Skip("download finished before it could be interrupted")
+		t.Fatal("download finished before it could be interrupted; the throttle should keep it in flight")
 	}
 	if observed == 0 {
-		t.Skip("no usable progress was observed before cancellation")
+		t.Fatal("no usable progress was observed before cancellation")
 	}
 
 	part := dest + PartSuffix
@@ -964,7 +967,7 @@ func TestCancellationStopsPromptly(t *testing.T) {
 		t.Fatal("Download returned nil after its context was cancelled")
 	}
 	if !triggered {
-		t.Skip("cancellation was never triggered; the download was too fast")
+		t.Fatal("cancellation was never triggered; the 1 MiB/s throttle should keep the transfer in flight")
 	}
 	// An unthrottled 4 MiB download over loopback takes milliseconds; the
 	// throttle means a completed transfer would take seconds. Anything close to
@@ -1006,7 +1009,7 @@ func TestCancellationKeepsWorkingSet(t *testing.T) {
 		},
 	})
 	if !triggered {
-		t.Skip("the download finished before cancellation could be triggered")
+		t.Fatal("the download finished before cancellation could be triggered; the 1 MiB/s throttle should keep it in flight")
 	}
 
 	if _, err := os.Stat(dest + PartSuffix); err != nil {

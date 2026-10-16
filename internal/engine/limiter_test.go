@@ -19,8 +19,9 @@ func TestLimiterPacesTransfers(t *testing.T) {
 
 	ctx := context.Background()
 
-	// The bucket starts full, so this is free and establishes a zero balance.
-	if err := lim.Wait(ctx, int(minimumBurst)); err != nil {
+	// The bucket starts full, so draining exactly its capacity is free and
+	// establishes a zero balance.
+	if err := lim.Wait(ctx, int(lim.cap())); err != nil {
 		t.Fatalf("draining the burst: %v", err)
 	}
 
@@ -46,7 +47,8 @@ func TestLimiterWaitHonoursContext(t *testing.T) {
 	lim := NewLimiter(1 << 10) // 1 KiB/s: any real request takes a long time
 	ctx := context.Background()
 
-	if err := lim.Wait(ctx, int(minimumBurst)); err != nil {
+	// Drain exactly the (rate-scaled) bucket so the wait below really blocks.
+	if err := lim.Wait(ctx, int(lim.cap())); err != nil {
 		t.Fatalf("draining the burst: %v", err)
 	}
 
@@ -117,7 +119,8 @@ func TestLimiterSetRateAppliesLive(t *testing.T) {
 	}
 	ctx := context.Background()
 
-	if err := lim.Wait(ctx, int(minimumBurst)); err != nil {
+	// Drain exactly the (rate-scaled) bucket so the retune below is observable.
+	if err := lim.Wait(ctx, int(lim.cap())); err != nil {
 		t.Fatalf("draining the burst: %v", err)
 	}
 
