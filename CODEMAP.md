@@ -180,6 +180,7 @@ node --check extension/background.js # 扩展改完先过语法（popup.js 同�
 51. Release batch: ps1 preflights, CODEMAP-4 rewritten, update tests.
 52. Peer check (peercheck*.go): exe allowlist + Authenticode cache, default on, live switch.
 53. Token removed (#45): backend, settings, popup, background; storage kept for session mirror.
+54. Recheck round (#46): peer consts/cache, fallback cancel-first, arrival ref, docs sync.
 ## 8. 剩下未动的（有意延后）
 
 - ~~`Remove`/`Cancel` 在 binding 线程同步 `waitStopped(3s)`~~：已修——等删改走后台 goroutine，`Cancel` 用代际 guard 防误删（`manager.go:Cancel/Remove`）。

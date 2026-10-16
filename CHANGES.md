@@ -429,6 +429,18 @@
 - Popup keeps version line + refused-error display; manifest keeps storage
   (ownDownloads session mirror still uses it). Net -439 lines.
 
+### 46. Recheck fixes round (UNRELEASED, self-fixed after read-only audit)
+- Peer: WTD_STATEACTION_CLOSE=2 (was 5, leaked handles), empty-table panic
+  guard, revocation-off documented, single-Stat cache with normalized capped
+  keys, exe path buffer + error wraps, dup comments merged.
+- Extension: failure fallback cancels the original first (was: double
+  browser download); toggle reads fresh policy (was: stale-cache double
+  flip). New cancel-before-download regression test (node 22 total).
+- Frontend: arrival race via dialogOpenRef; NewTaskDialog resets on all
+  initials; runSelected in-flight guard; dead clearFailedTasks wrapper out.
+- Docs: README 4-setting table + peer-check security section; PRIVACY
+  cookie scope + notifications/session rows; Draft comment fixed.
+
 ## TODO (user requested, work later)
 
 - Detached ask-location popup WITHOUT v3 migration (backup plan).
