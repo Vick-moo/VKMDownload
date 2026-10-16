@@ -70,7 +70,31 @@ export const api = {
   setConfig: (cfg: Config): Promise<void> => SetConfig(cfg),
   pickDirectory: (): Promise<string> => PickDirectory(),
   clipboardProbe: (): Promise<Record<string, string>> => ClipboardProbe(),
+  /**
+   * Browser-pairing token. The Go methods (GetApiToken/RegenerateApiToken)
+   * exist, but the generated wailsjs bindings have not been regenerated yet,
+   * so they are resolved through the runtime instead of a static import: a
+   * static import would break the whole bundle until regeneration. Callers
+   * get a plain error they can show.
+   */
+  getApiToken: (): Promise<string> => callOptionalTokenApi("GetApiToken"),
+  regenerateApiToken: (): Promise<string> =>
+    callOptionalTokenApi("RegenerateApiToken"),
 };
+
+/** Resolves an optional token binding, or rejects with a showable message. */
+function callOptionalTokenApi(name: string): Promise<string> {
+  const w = window as unknown as {
+    go?: { main?: { App?: Record<string, unknown> } };
+  };
+  const fn = w.go?.main?.App?.[name];
+  if (typeof fn !== "function") {
+    return Promise.reject(
+      new Error(`当前后端不支持配对接口（${name}），请更新后端后再试`),
+    );
+  }
+  return (fn as () => Promise<string>)();
+}
 
 /** Event names emitted by the Go side. */
 export const EVENTS = {

@@ -6,6 +6,7 @@ import { NewTaskDialog } from "./components/NewTaskDialog";
 import { SettingsPage } from "./components/SettingsPage";
 import { Sidebar } from "./components/Sidebar";
 import { TaskList } from "./components/TaskList";
+import { filterLabel } from "./filterLabel";
 import { formatSpeed } from "./format";
 import type { Config, Filter, SortDir, SortKey, TaskView, UpdateInfo } from "./types";
 import { extFilter, fileExt, filterExt, taskLabel } from "./types";
@@ -17,24 +18,6 @@ import {
   IconPlus,
   IconTrash,
 } from "./components/Icons";
-
-/** Names a filter for the bulk-delete button and its confirmation. */
-function filterLabel(filter: Filter): string {
-  switch (filter) {
-    case "all":
-      return "全部";
-    case "active":
-      return "下载中";
-    case "completed":
-      return "已完成";
-    case "failed":
-      return "失败";
-    default: {
-      const ext = filterExt(filter);
-      return ext ? `${ext} 文件` : "当前列表";
-    }
-  }
-}
 
 function App(): JSX.Element {
   const [tasks, setTasks] = useState<TaskView[]>([]);
@@ -74,11 +57,32 @@ function App(): JSX.Element {
   const [deleting, setDeleting] = useState(false);
   const [pendingURL, setPendingURL] = useState("");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  /** Where the sidebar width is remembered between sessions. */
+  const SIDEBAR_W_KEY = "vkmdownload.sidebar-width";
+  function loadSidebarWidth(): number {
+    try {
+      const raw = localStorage.getItem(SIDEBAR_W_KEY);
+      if (raw) {
+        const n = Number(raw);
+        if (Number.isFinite(n)) return Math.max(180, Math.min(420, n));
+      }
+    } catch {
+      // Storage can be unavailable; the width simply will not persist.
+    }
+    return 224;
+  }
   // The sidebar width lives here, not inside Sidebar, because the grid column
   // that sizes it is defined on .shell. Setting a width on the sidebar element
   // instead would leave the grid track at its old size and the two columns
   // would overlap.
-  const [sidebarWidth, setSidebarWidth] = useState(224);
+  const [sidebarWidth, setSidebarWidth] = useState(loadSidebarWidth);
+  useEffect(() => {
+    try {
+      localStorage.setItem(SIDEBAR_W_KEY, String(sidebarWidth));
+    } catch {
+      // Storage can be unavailable; the width simply will not persist.
+    }
+  }, [sidebarWidth, SIDEBAR_W_KEY]);
 
   /** The extension the sidebar is filtering by, or "" for a status view. */
   const extActive = filterExt(filter);
@@ -98,21 +102,88 @@ function App(): JSX.Element {
     }
   }, []);
 
+  // A short-lived line under the toolbar. The bulk actions have nothing else to
+  // report through: "start all" on an empty list looks identical to a click
+  // that did nothing.
+  const [notice, setNotice] = useState("");
+  const noticeTimer = useRef<number | null>(null);
+  const flash = useCallback((message: string) => {
+    setNotice(message);
+    if (noticeTimer.current !== null) window.clearTimeout(noticeTimer.current);
+    noticeTimer.current = window.setTimeout(() => setNotice(""), 5000);
+  }, []);
+  useEffect(
+    () => () => {
+      if (noticeTimer.current !== null) window.clearTimeout(noticeTimer.current);
+    },
+    [],
+  );
+
+  // The newest release announced so far. Both the startup check and the
+  // backend event report it; without dedupe an offline-then-online startup
+  // paints the banner twice for one release, and without the event the
+  // banner never appears when the startup check ran before the network did.
+  const seenUpdateVersion = useRef<string | null>(null);
+  const noteUpdate = useCallback((info: UpdateInfo | null | undefined) => {
+    if (!info || !info.available || !info.version) return;
+    if (seenUpdateVersion.current === info.version) return;
+    seenUpdateVersion.current = info.version;
+    setUpdate(info);
+  }, []);
+
+  /** One link arrival, however it reached the app. */
+  interface Arrival {
+    url: string;
+    filename: string;
+    referer: string;
+    cookie: string;
+    userAgent: string;
+    /** True when an intercepted download is asking where to go. */
+    ask: boolean;
+  }
+  // Arrivals that came in while the dialog was already open. Closing the
+  // dialog drains the queue instead of dropping them on the floor.
+  const arrivalQueue = useRef<Arrival[]>([]);
+  const applyArrival = useCallback((a: Arrival) => {
+    setPendingURL(a.url);
+    setDialogURL(a.url);
+    setDialogFilename(a.filename);
+    setDialogReferer(a.referer);
+    setDialogCookie(a.cookie);
+    setDialogUserAgent(a.userAgent);
+    setDialogAsk(a.ask);
+    setDialogOpen(true);
+    // The user is in another app; pull the question in front of it.
+    void api.bringToFront().catch(() => {});
+  }, []);
+  // A captured link either opens the dialog for confirmation or waits its
+  // turn: overwriting the dialog would silently discard what the user already
+  // typed there.
+  const handleArrival = useCallback(
+    (a: Arrival) => {
+      if (dialogOpen) {
+        arrivalQueue.current.push(a);
+        flash("收到新链接，先处理当前对话框");
+        return;
+      }
+      applyArrival(a);
+    },
+    [dialogOpen, applyArrival, flash],
+  );
+
   useEffect(() => {
     void api
       .getConfig()
       .then((c) => setConfig(c))
       .catch(() => setConfig(null));
     // Asked once: the version cannot change while the app is running.
-    // This direct check is the only trigger on purpose: the backend also
-    // emits update:available, but an event fired before this subscription
-    // exists would be missed silently, and two triggers can paint the
-    // banner twice for one release.
+    // This direct check complements the update:available event below: an
+    // event fired before the subscription exists would be missed silently
+    // (e.g. offline at startup), and noteUpdate dedupes by version so the
+    // two triggers never paint the banner twice for one release.
     void api
       .checkUpdate()
-      .then((info) => {
-        if (info && info.available) setUpdate(info);
-      })
+      .then((info) => noteUpdate(info))
       .catch(() => {
         // Offline is not an error worth surfacing.
       });
@@ -124,7 +195,7 @@ function App(): JSX.Element {
         // A missing version is not worth surfacing; the footer just stays empty.
       });
     void reload();
-  }, [reload]);
+  }, [reload, noteUpdate]);
 
   // A single set of subscriptions drives every list update. Progress events
   // arrive several times a second per task, so they patch one entry in place
@@ -157,19 +228,18 @@ function App(): JSX.Element {
       on<string>(EVENTS.removed, (id) =>
         setTasks((prev) => prev.filter((t) => t.id !== id)),
       ),
-      // A captured link either opens the dialog for confirmation or is acted
-      // on by the Go side, depending on the settings.
+      // A captured link opens the dialog for confirmation; one that arrives
+      // while the dialog is already open waits its turn instead of
+      // overwriting what the user already typed.
       on<string>(EVENTS.clipboardURL, (url) => {
-        setPendingURL(url);
-        setDialogURL(url);
-        setDialogFilename("");
-        setDialogReferer("");
-        setDialogCookie("");
-        setDialogUserAgent("");
-        setDialogAsk(false);
-        setDialogOpen(true);
-        // The user is in another app; pull the question in front of it.
-        void api.bringToFront().catch(() => {});
+        handleArrival({
+          url,
+          filename: "",
+          referer: "",
+          cookie: "",
+          userAgent: "",
+          ask: false,
+        });
       }),
       // Ask-location arrivals (extension or clipboard): nothing is created
       // yet. The dialog collects the placement; closing it abandons the
@@ -177,21 +247,44 @@ function App(): JSX.Element {
       on<{ url: string; filename: string; referer: string; cookie: string; userAgent: string }>(
         EVENTS.locationAsk,
         (req) => {
-          setPendingURL(req.url);
-          setDialogURL(req.url);
-          setDialogFilename(req.filename ?? "");
-          setDialogReferer(req.referer ?? "");
-          setDialogCookie(req.cookie ?? "");
-          setDialogUserAgent(req.userAgent ?? "");
-          setDialogAsk(true);
-          setDialogOpen(true);
-          // The user is in the browser; pull the question in front of it.
-          void api.bringToFront().catch(() => {});
+          handleArrival({
+            url: req.url,
+            filename: req.filename ?? "",
+            referer: req.referer ?? "",
+            cookie: req.cookie ?? "",
+            userAgent: req.userAgent ?? "",
+            ask: true,
+          });
         },
       ),
+      // Files dragged onto the window. The backend emits one event per path;
+      // a dropped path is not itself a download, so only an http(s) link
+      // found inside it opens the dialog — anything else is ignored aloud
+      // rather than failing silently.
+      on<string>(EVENTS.filesDropped, (text) => {
+        const raw = typeof text === "string" ? text : String(text ?? "");
+        const m = /https?:\/\/\S+/i.exec(raw);
+        if (!m) {
+          flash("拖入的内容里没有可识别的下载链接，已忽略");
+          return;
+        }
+        handleArrival({
+          url: m[0],
+          filename: "",
+          referer: "",
+          cookie: "",
+          userAgent: "",
+          ask: false,
+        });
+      }),
+      // A release announced after startup (e.g. the startup check ran while
+      // offline). Deduped by version against the startup check.
+      on<UpdateInfo>(EVENTS.updateAvailable, (info) => {
+        noteUpdate(info);
+      }),
     ];
     return () => offs.forEach((off) => off());
-  }, []);
+  }, [handleArrival, noteUpdate]);
 
   const visible = useMemo(() => {
     let list = tasks;
@@ -203,35 +296,66 @@ function App(): JSX.Element {
       list = tasks.filter((t) => t.status === "completed");
     } else if (filter === "failed") {
       list = tasks.filter((t) => t.status === "failed");
+    } else if (filter === "canceled") {
+      list = tasks.filter((t) => t.status === "canceled");
     } else if (extActive) {
       list = tasks.filter((t) => fileExt(taskLabel(t)) === extActive);
     }
     return list;
   }, [tasks, filter, extActive]);
 
-  // Every extension present in the list, with how many tasks carry it. Built
-  // from the tasks rather than from a fixed table, so a format nobody thought
-  // to enumerate still gets a button.
-  const extCounts = useMemo(() => {
-    const counts = new Map<string, number>();
+  // One pass over the tasks produces the extension list, the totals and the
+  // sidebar counts together. Progress events rewrite the array several times
+  // a second, and a separate scan per derived value used to mean a full walk
+  // per value on every tick.
+  const summary = useMemo(() => {
+    const exts = new Map<string, number>();
+    let activeCount = 0;
+    let totalSpeed = 0;
+    let active = 0;
+    let completed = 0;
+    let failed = 0;
+    let canceled = 0;
     for (const t of tasks) {
+      // Every extension present in the list, with how many tasks carry it.
+      // Built from the tasks rather than from a fixed table, so a format
+      // nobody thought to enumerate still gets a button.
       const e = fileExt(taskLabel(t));
-      if (e) counts.set(e, (counts.get(e) ?? 0) + 1);
+      if (e) exts.set(e, (exts.get(e) ?? 0) + 1);
+      if (t.status === "downloading") {
+        activeCount += 1;
+        active += 1;
+        totalSpeed += t.speed || 0;
+      } else if (t.status === "queued") {
+        active += 1;
+      } else if (t.status === "completed") {
+        completed += 1;
+      } else if (t.status === "failed") {
+        failed += 1;
+      } else if (t.status === "canceled") {
+        canceled += 1;
+      }
     }
-    return [...counts.entries()]
-      .map(([ext, count]) => ({ ext, count }))
-      .sort((a, b) => b.count - a.count || a.ext.localeCompare(b.ext));
-  }, [tasks]);
-
-  const stats = useMemo(() => {
-    const active = tasks.filter((t) => t.status === "downloading");
     return {
-      activeCount: active.length,
-      totalSpeed: active.reduce((s, t) => s + (t.speed || 0), 0),
-      total: tasks.length,
-      failed: tasks.filter((t) => t.status === "failed").length,
+      extCounts: [...exts.entries()]
+        .map(([ext, count]) => ({ ext, count }))
+        .sort((a, b) => b.count - a.count || a.ext.localeCompare(b.ext)),
+      stats: {
+        activeCount,
+        totalSpeed,
+        total: tasks.length,
+        failed,
+      },
+      sidebarCounts: {
+        all: tasks.length,
+        active,
+        completed,
+        failed,
+        canceled,
+      },
     };
   }, [tasks]);
+  const { extCounts, stats } = summary;
 
   /** Cycles the sort: a new column starts descending, the same column flips. */
   const onSort = useCallback(
@@ -264,22 +388,34 @@ function App(): JSX.Element {
     setDialogOpen(true);
   }, [pendingURL]);
 
-  // A short-lived line under the toolbar. The bulk actions have nothing else to
-  // report through: "start all" on an empty list looks identical to a click
-  // that did nothing.
-  const [notice, setNotice] = useState("");
-  const noticeTimer = useRef<number | null>(null);
-  const flash = useCallback((message: string) => {
-    setNotice(message);
-    if (noticeTimer.current !== null) window.clearTimeout(noticeTimer.current);
-    noticeTimer.current = window.setTimeout(() => setNotice(""), 5000);
-  }, []);
-  useEffect(
-    () => () => {
-      if (noticeTimer.current !== null) window.clearTimeout(noticeTimer.current);
-    },
-    [],
+  // Drop selected ids that no longer exist (deleted elsewhere, list
+  // reloaded): without this the toolbar keeps acting on ghosts.
+  useEffect(() => {
+    setSelected((prev) => {
+      if (prev.size === 0) return prev;
+      const alive = new Set(tasks.map((t) => t.id));
+      let dropped = false;
+      const next = new Set<string>();
+      prev.forEach((id) => {
+        if (alive.has(id)) next.add(id);
+        else dropped = true;
+      });
+      return dropped ? next : prev;
+    });
+  }, [tasks]);
+
+  /** Which list the delete confirmation currently covers. */
+  const [deleteMode, setDeleteMode] = useState<"visible" | "selected">(
+    "visible",
   );
+  // Selected-delete and the Delete key share one confirmation: a single key
+  // press can remove as many rows as the toolbar button, so it asks first
+  // the same way. runSelected still reports through the notice line.
+  const requestDeleteSelected = useCallback(() => {
+    if (selected.size === 0) return;
+    setDeleteMode("selected");
+    setConfirmDeleteOpen(true);
+  }, [selected.size]);
 
   // Bulk verbs over the current selection. Per-task calls are settled
   // individually so one bad row cannot abort the rest; the notice reports
@@ -431,8 +567,9 @@ function App(): JSX.Element {
       const typing = tag === "INPUT" || tag === "TEXTAREA";
       if (e.key === "n" && (e.ctrlKey || e.metaKey)) {
         e.preventDefault();
-        setDialogURL("");
-        setDialogOpen(true);
+        // Same entry as the toolbar button: a pending captured link wins in
+        // both, and both leave the clearing to the dialog's onClose.
+        onNewTask();
       }
       if (e.key === "Escape" && settingsOpen) setSettingsOpen(false);
       if (e.key === "Escape" && dialogOpen) setDialogOpen(false);
@@ -446,20 +583,24 @@ function App(): JSX.Element {
           void api.pauseTask(id).then(reload);
         else if (t.status === "paused") void api.resumeTask(id).then(reload);
       }
-      // Delete removes the selected tasks.
+      // Delete removes the selected tasks, through the same confirmation
+      // as the toolbar button.
       if (e.key === "Delete" && !typing && selected.size > 0) {
         e.preventDefault();
-        void Promise.all(
-          [...selected].map((id) => api.removeTask(id, false)),
-        ).then(() => {
-          setSelected(new Set());
-          void reload();
-        });
+        requestDeleteSelected();
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [settingsOpen, dialogOpen, selected, tasks, reload]);
+  }, [
+    settingsOpen,
+    dialogOpen,
+    selected,
+    tasks,
+    reload,
+    onNewTask,
+    requestDeleteSelected,
+  ]);
 
   const hasTasks = tasks.length > 0;
 
@@ -469,7 +610,7 @@ function App(): JSX.Element {
       style={{ "--sidebar-w": `${sidebarWidth}px` } as React.CSSProperties}
     >
       <Sidebar
-        tasks={tasks}
+        counts={summary.sidebarCounts}
         filter={filter}
         extCounts={extCounts}
         activeCount={stats.activeCount}
@@ -502,6 +643,21 @@ function App(): JSX.Element {
                   onClick={() => void startUpdateNow()}
                 >
                   立即更新
+                </button>
+              ) : null}
+              {!updating && update.url ? (
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={() => {
+                    void api.openReleasePage(update.url).catch((e) =>
+                      flash(
+                        `打开发布页失败：${e instanceof Error ? e.message : String(e)}`,
+                      ),
+                    );
+                  }}
+                >
+                  去发布页看看
                 </button>
               ) : null}
               <button
@@ -602,11 +758,13 @@ function App(): JSX.Element {
                 <button
                   type="button"
                   className="btn btn--danger"
-                  onClick={() =>
-                    selected.size > 0
-                      ? void runSelected("remove")
-                      : setConfirmDeleteOpen(true)
-                  }
+                  onClick={() => {
+                    if (selected.size > 0) requestDeleteSelected();
+                    else {
+                      setDeleteMode("visible");
+                      setConfirmDeleteOpen(true);
+                    }
+                  }}
                   title={
                     selected.size > 0
                       ? `删除选中的 ${selected.size} 条记录，下好的文件不动，没下完的半成品会一起清理`
@@ -662,6 +820,15 @@ function App(): JSX.Element {
                 <p className="empty__hint">
                   换个筛选条件看看，或点左上角「全部」。
                 </p>
+                <div className="empty__actions">
+                  <button
+                    type="button"
+                    className="btn"
+                    onClick={() => setFilter("all")}
+                  >
+                    回到全部
+                  </button>
+                </div>
               </div>
             ) : (
               <TaskList
@@ -673,6 +840,7 @@ function App(): JSX.Element {
                 onSelect={onSelect}
                 groupByType={filter === "all"}
                 onChanged={handleChanged}
+                onError={flash}
               />
             )}
           </>
@@ -693,7 +861,10 @@ function App(): JSX.Element {
           setPendingURL("");
           setDialogAsk(false);
           // A captured link that the user declined must not come back on the
-          // next poll.
+          // next poll. Links that arrived while the dialog was open were
+          // queued instead of overwriting it; the next one opens now.
+          const next = arrivalQueue.current.shift();
+          if (next) applyArrival(next);
         }}
         onCreated={() => void reload()}
         onLocateTask={(id) => {
@@ -719,15 +890,29 @@ function App(): JSX.Element {
       ) : null}
 
       {confirmDeleteOpen ? (
-        <ConfirmDialog
-          title="删除这些记录？"
-          message={`将从列表里删除${filter === "all" ? "全部" : filterLabel(filter)} ${visible.length} 条记录。`}
-          detail="只删除列表记录。下好的文件会保留；没下完的半成品和续传记录会一起删掉，同链接重下从头开始。"
-          confirmLabel={`删除 ${visible.length} 条`}
-          busy={deleting}
-          onConfirm={() => void onDeleteVisible()}
-          onCancel={() => setConfirmDeleteOpen(false)}
-        />
+        deleteMode === "selected" ? (
+          <ConfirmDialog
+            title="删除选中记录？"
+            message={`将从列表里删除选中的 ${selected.size} 条记录。`}
+            detail="只删除列表记录。下好的文件会保留；没下完的半成品和续传记录会一起删掉，同链接重下从头开始。"
+            confirmLabel={`删除 ${selected.size} 条`}
+            onConfirm={() => {
+              setConfirmDeleteOpen(false);
+              void runSelected("remove");
+            }}
+            onCancel={() => setConfirmDeleteOpen(false)}
+          />
+        ) : (
+          <ConfirmDialog
+            title="删除这些记录？"
+            message={`将从列表里删除${filter === "all" ? "全部" : filterLabel(filter)} ${visible.length} 条记录。`}
+            detail="只删除列表记录。下好的文件会保留；没下完的半成品和续传记录会一起删掉，同链接重下从头开始。"
+            confirmLabel={`删除 ${visible.length} 条`}
+            busy={deleting}
+            onConfirm={() => void onDeleteVisible()}
+            onCancel={() => setConfirmDeleteOpen(false)}
+          />
+        )
       ) : null}
     </div>
   );

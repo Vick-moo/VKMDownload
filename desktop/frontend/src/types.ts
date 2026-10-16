@@ -27,7 +27,7 @@ export type TaskStatus =
  * The status views: every filter that is not an extension. Kept separate so a
  * lookup table keyed by status cannot be indexed with an extension filter.
  */
-export type StatusFilter = "all" | "active" | "completed" | "failed";
+export type StatusFilter = "all" | "active" | "completed" | "failed" | "canceled";
 
 /**
  * Sidebar filter.

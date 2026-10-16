@@ -3,7 +3,7 @@ import type { JSX } from "react";
 import logoMark from "../assets/logo.png";
 import { formatSpeed } from "../format";
 import { extFilter } from "../types";
-import type { Filter, StatusFilter, TaskView } from "../types";
+import type { Filter, StatusFilter } from "../types";
 import {
   IconAlert,
   IconCheck,
@@ -11,6 +11,7 @@ import {
   IconDownload,
   IconInbox,
   IconSettings,
+  IconX,
 } from "./Icons";
 
 /** Status entries shown in the sidebar. */
@@ -23,10 +24,20 @@ const STATUS_NAV: Array<{
   { key: "active", label: "下载中", icon: <IconDownload size={18} /> },
   { key: "completed", label: "已完成", icon: <IconCheck size={18} /> },
   { key: "failed", label: "失败", icon: <IconAlert size={18} /> },
+  { key: "canceled", label: "已取消", icon: <IconX size={18} /> },
 ];
 
+/** Per-status task counts, computed by the parent in the same pass as the rest. */
+export interface SidebarCounts {
+  all: number;
+  active: number;
+  completed: number;
+  failed: number;
+  canceled: number;
+}
+
 interface Props {
-  tasks: TaskView[];
+  counts: SidebarCounts;
   filter: Filter;
   /** Every extension present in the list, with how many tasks carry it. */
   extCounts: Array<{ ext: string; count: number }>;
@@ -52,7 +63,7 @@ interface Props {
  * user who wants their PDFs does not want the spreadsheets too.
  */
 export function Sidebar({
-  tasks,
+  counts,
   filter,
   extCounts,
   activeCount,
@@ -105,18 +116,9 @@ export function Sidebar({
     window.addEventListener("mouseup", onUp);
   }
 
-  const counts = {
-    all: tasks.length,
-    active: tasks.filter(
-      (t) => t.status === "downloading" || t.status === "queued",
-    ).length,
-    completed: tasks.filter((t) => t.status === "completed").length,
-    failed: tasks.filter((t) => t.status === "failed").length,
-  };
-
-  // The extension list is built by the parent and passed in: it is derived from
-  // the same tasks the list is rendered from, so computing it twice would be
-  // two chances to disagree.
+  // The counts come from the parent, which derives them in the same pass as
+  // the extension list and the totals — counting them here again would be a
+  // second (and third, and fourth) full scan on every progress tick.
 
   return (
     <nav

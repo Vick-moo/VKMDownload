@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import type { JSX } from "react";
 
 type Props = {
@@ -30,8 +31,26 @@ export function ConfirmDialog({
   onConfirm,
   onCancel,
 }: Props): JSX.Element {
+  // Esc dismisses like a cancel click; while busy the action is already
+  // running, so the dialog stays put instead of stranding the result.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && !busy) onCancel();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [busy, onCancel]);
+
   return (
-    <div className="overlay" role="dialog" aria-modal="true" aria-label={title}>
+    <div
+      className="overlay"
+      role="dialog"
+      aria-modal="true"
+      aria-label={title}
+      onClick={(e) => {
+        if (e.target === e.currentTarget && !busy) onCancel();
+      }}
+    >
       <div className="modal modal--confirm">
         <div className="modal__head">
           <h2 className="modal__title">{title}</h2>

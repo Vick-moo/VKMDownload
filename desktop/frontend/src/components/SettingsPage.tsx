@@ -3,6 +3,7 @@ import type { JSX } from "react";
 import { main } from "../../wailsjs/go/models";
 import { api } from "../api";
 import type { Config, OrganizeGroup, UpdateStatus } from "../types";
+import { ConfirmDialog } from "./ConfirmDialog";
 import { IconFolder } from "./Icons";
 
 interface Props {
@@ -11,6 +12,13 @@ interface Props {
   version: string;
   onSaved: (cfg: Config) => void;
 }
+
+/**
+ * The editable shape. `apiAuthRequired` exists on the Go Config but the
+ * generated TS model has not been regenerated yet, so it is declared here so
+ * the switch survives until save and travels with the SetConfig payload.
+ */
+type Draft = Config & { apiAuthRequired?: boolean };
 
 /** A labelled switch row. */
 function Switch({
@@ -61,8 +69,16 @@ export function SettingsPage({
   version,
   onSaved,
 }: Props): JSX.Element {
-  const [draft, setDraft] = useState<Config | null>(config);
+  const [draft, setDraft] = useState<Draft | null>(config);
   const [status, setStatus] = useState("");
+  // Short-lived notices (radio changes, copy confirmations) share the status
+  // line with the save confirmation.
+  const noteTimer = useRef<number | null>(null);
+  function note(msg: string) {
+    setStatus(msg);
+    if (noteTimer.current !== null) window.clearTimeout(noteTimer.current);
+    noteTimer.current = window.setTimeout(() => setStatus(""), 2600);
+  }
   // Tabbed categories, Chrome-tabs style: one concern per tab instead of a
   // long scroll. Sections stay mounted (hidden) so draft edits and the
   // update poller survive switching.
@@ -74,6 +90,48 @@ export function SettingsPage({
   const [updMsg, setUpdMsg] = useState("");
   const [updBusy, setUpdBusy] = useState(false);
   const pollTimer = useRef<number | null>(null);
+
+  // Browser pairing. The token bindings exist on the backend, but the
+  // generated wailsjs bindings have not been regenerated yet, so they are
+  // reached through the runtime (see api.ts): when they are missing the row
+  // explains instead of breaking.
+  const [apiToken, setApiToken] = useState<string | null>(null);
+  const [tokenShown, setTokenShown] = useState(false);
+  const [tokenMsg, setTokenMsg] = useState("");
+  const [regenOpen, setRegenOpen] = useState(false);
+
+  // Loaded when the tab opens rather than with the page: most visits never
+  // touch pairing, and a backend without the bindings would otherwise print
+  // an error on every entry to settings.
+  useEffect(() => {
+    if (tab !== "浏览器扩展") return;
+    let live = true;
+    setTokenMsg("");
+    void api
+      .getApiToken()
+      .then((t) => {
+        if (live) setApiToken(t);
+      })
+      .catch((e) => {
+        if (live) {
+          setApiToken(null);
+          setTokenMsg(e instanceof Error ? e.message : String(e));
+        }
+      });
+    return () => {
+      live = false;
+    };
+  }, [tab]);
+
+  async function copyToken() {
+    if (!apiToken) return;
+    try {
+      await navigator.clipboard.writeText(apiToken);
+      note("配对口令已复制");
+    } catch {
+      setTokenMsg("复制失败：请手动选中上面的口令复制");
+    }
+  }
 
   useEffect(() => {
     setDraft(config);
@@ -104,6 +162,7 @@ export function SettingsPage({
   useEffect(
     () => () => {
       if (pollTimer.current !== null) window.clearTimeout(pollTimer.current);
+      if (noteTimer.current !== null) window.clearTimeout(noteTimer.current);
     },
     [],
   );
@@ -224,7 +283,7 @@ export function SettingsPage({
   const TABS = ["下载", "浏览器扩展", "计划下载", "剪贴板", "完成后", "窗口", "软件更新"];
 
   /** Applies a partial change to the draft. */
-  function patch(p: Partial<Config>) {
+  function patch(p: Partial<Draft>) {
     // Object.assign onto a fresh instance rather than {...d, ...p}: spreading
     // a generated model class drops its prototype methods, and the result no
     // longer typechecks as a Config.
@@ -233,13 +292,26 @@ export function SettingsPage({
 
   async function save() {
     if (!draft) return;
+    // An empty group would organise nothing and confuse the matcher: stop
+    // before the backend ever sees it, and say which row is at fault.
+    if (draft.organizeEnabled) {
+      const bad = draft.organizeGroups.findIndex(
+        (g) => !(g.name || "").trim() || (g.exts ?? []).length === 0,
+      );
+      if (bad >= 0) {
+        setTab("下载");
+        note(
+          `第 ${bad + 1} 个分组还没填完整：文件夹名和扩展名都不能为空，填好或删掉它再保存`,
+        );
+        return;
+      }
+    }
     try {
       await api.setConfig(draft as never);
       onSaved(draft);
-      setStatus("已保存");
-      window.setTimeout(() => setStatus(""), 1600);
+      note("已保存");
     } catch (e) {
-      setStatus(e instanceof Error ? e.message : String(e));
+      note(e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -328,6 +400,29 @@ export function SettingsPage({
             style={{ width: 88 }}
             value={draft.connections}
             onChange={(e) => patch({ connections: Number(e.target.value) || 1 })}
+          />
+        </label>
+
+        <label className="setting">
+          <span className="setting__text">
+            <span className="setting__title">最小分片大小</span>
+            <span className="setting__hint">
+              小于此大小的文件不再拆成多连接，拆了也快不了。单位
+              KB；填 0 表示用后端默认（1024 KB）。改完下个任务生效。
+            </span>
+          </span>
+          <input
+            type="number"
+            min={0}
+            max={1048576}
+            step={64}
+            style={{ width: 110 }}
+            value={Math.round((draft.minSegmentSize ?? 0) / 1024)}
+            onChange={(e) =>
+              patch({
+                minSegmentSize: Math.max(0, Number(e.target.value) || 0) * 1024,
+              })
+            }
           />
         </label>
 
@@ -702,16 +797,21 @@ export function SettingsPage({
             <input
               type="number"
               min={0}
-              max={1024}
-              step={1}
-              style={{ width: 88 }}
-              value={Math.round(draft.extensionMinSizeKb / 1024)}
+              max={1048576}
+              step={64}
+              style={{ width: 110 }}
+              value={draft.extensionMinSizeKb}
               onChange={(e) =>
-                patch({ extensionMinSizeKb: Math.max(0, Number(e.target.value) || 0) * 1024 })
+                patch({
+                  extensionMinSizeKb: Math.max(
+                    0,
+                    Math.round(Number(e.target.value) || 0),
+                  ),
+                })
               }
               disabled={!draft.extensionEnabled}
             />
-            <span className="field__suffix">MB</span>
+            <span className="field__suffix">KB</span>
           </span>
         </label>
 
@@ -733,6 +833,60 @@ export function SettingsPage({
             disabled={!draft.extensionEnabled}
           />
         </label>
+
+        <h4 className="settings-subsection__title">浏览器配对</h4>
+
+        <p className="settings-section__note">
+          扩展填入这里的口令后才能接管下载。口令默认掩码显示；重新生成后旧口令立即失效，已配对的扩展需要重新填写。
+        </p>
+
+        <div className="setting">
+          <span className="setting__text">
+            <span className="setting__title">配对口令</span>
+            <span className="setting__hint" style={{ wordBreak: "break-all" }}>
+              {tokenMsg ||
+                (apiToken
+                  ? tokenShown
+                    ? apiToken
+                    : "••••••••••"
+                  : "正在获取…")}
+            </span>
+          </span>
+          <span className="field__row" style={{ flex: "0 0 auto" }}>
+            <button
+              type="button"
+              className="btn"
+              disabled={!apiToken}
+              onClick={() => setTokenShown((v) => !v)}
+            >
+              {tokenShown ? "隐藏" : "显示"}
+            </button>
+            <button
+              type="button"
+              className="btn"
+              disabled={!apiToken}
+              onClick={() => void copyToken()}
+            >
+              复制
+            </button>
+            <button
+              type="button"
+              className="btn"
+              disabled={!apiToken}
+              onClick={() => setRegenOpen(true)}
+            >
+              重新生成
+            </button>
+          </span>
+        </div>
+
+        <Switch
+          title="要求扩展配对"
+          hint="开启后扩展每次连接都必须携带配对口令。对应后端 ApiAuthRequired，随设置一起保存。"
+          checked={!!draft.apiAuthRequired}
+          disabled={!draft.extensionEnabled}
+          onChange={(v) => patch({ apiAuthRequired: v })}
+        />
       </section>
 
       <section className="settings-section" hidden={tab !== "计划下载"}>
@@ -798,31 +952,56 @@ export function SettingsPage({
           onChange={(v) => patch({ clipboardWatch: v })}
         />
 
+        {/* The three outcomes are mutually exclusive, like a radio group: the
+            backend resolves them in AskLocation {" > "} Confirm {" > "}
+            AutoStart order, so the switches mirror that priority instead of
+            letting two contradictory options stay on together. */}
         <Switch
           title="识别到链接时直接开始下载"
-          hint="开启后不再询问，复制完链接就开始下。"
+          hint="开启后不再询问，复制完链接就开始下；同时会关掉下面的弹窗确认。"
           checked={draft.clipboardAutoStart}
           disabled={!draft.clipboardWatch}
           nested
-          onChange={(v) => patch({ clipboardAutoStart: v })}
+          onChange={(v) => {
+            if (v) {
+              patch({ clipboardAutoStart: true, clipboardConfirm: false });
+              note("已开启直接下载，弹窗确认已关闭（与后端优先级一致）");
+            } else {
+              patch({ clipboardAutoStart: false });
+            }
+          }}
         />
 
         <Switch
           title="识别到链接时先弹窗确认"
-          hint="开启后会先问你要不要下载。与上一项同时开启时，以弹窗为准。"
+          hint="开启后会先问你要不要下载；同时会关掉上面的直接下载。"
           checked={draft.clipboardConfirm}
           disabled={!draft.clipboardWatch}
           nested
-          onChange={(v) => patch({ clipboardConfirm: v })}
+          onChange={(v) => {
+            if (v) {
+              patch({ clipboardConfirm: true, clipboardAutoStart: false });
+              note("已开启弹窗确认，直接下载已关闭（与后端优先级一致）");
+            } else {
+              patch({ clipboardConfirm: false });
+            }
+          }}
         />
 
         <Switch
           title="只加入列表，不自动开始"
           hint="复制链接后任务进入列表并保持排队，由你决定何时开始。"
-          checked={draft.clipboardWatch && !draft.clipboardAutoStart}
+          checked={
+            draft.clipboardWatch &&
+            !draft.clipboardAutoStart &&
+            !draft.clipboardConfirm
+          }
           disabled={!draft.clipboardWatch}
           nested
-          onChange={() => patch({ clipboardAutoStart: false })}
+          onChange={() => {
+            patch({ clipboardAutoStart: false, clipboardConfirm: false });
+            note("已切换为只加入列表");
+          }}
         />
 
         <label className="setting">
@@ -922,6 +1101,28 @@ export function SettingsPage({
           anyone reporting a problem is asked for is this number. */}
       {version ? (
         <p className="settings__version">VKMDownload v{version}</p>
+      ) : null}
+
+      {regenOpen ? (
+        <ConfirmDialog
+          title="重新生成配对口令？"
+          message="旧口令会立即失效，已配对的扩展需要重新填写才能继续接管。"
+          confirmLabel="重新生成"
+          onConfirm={() => {
+            setRegenOpen(false);
+            void api
+              .regenerateApiToken()
+              .then((t) => {
+                setApiToken(t);
+                setTokenShown(true);
+                note("配对口令已重新生成，旧口令已失效");
+              })
+              .catch((e) =>
+                setTokenMsg(e instanceof Error ? e.message : String(e)),
+              );
+          }}
+          onCancel={() => setRegenOpen(false)}
+        />
       ) : null}
     </div>
   );

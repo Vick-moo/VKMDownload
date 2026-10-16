@@ -1,4 +1,4 @@
-import { memo } from "react";
+import { memo, useState } from "react";
 import type { JSX } from "react";
 import { api } from "../api";
 import {
@@ -11,6 +11,7 @@ import {
 } from "../format";
 import { STATUS_LABEL, STATUS_TONE, urlTail } from "../types";
 import type { TaskStatus, TaskView } from "../types";
+import { ConfirmDialog } from "./ConfirmDialog";
 import {
   IconAlert,
   IconCheck,
@@ -26,6 +27,8 @@ interface Props {
   selected: boolean;
   onSelect: (id: string, additive: boolean) => void;
   onChanged: () => void;
+  /** Reports a failed row action to the toolbar notice line. */
+  onError: (message: string) => void;
 }
 
 /** Statuses that carry a progress bar worth showing. */
@@ -48,7 +51,9 @@ export const TaskRow = memo(function TaskRow({
   selected,
   onSelect,
   onChanged,
+  onError,
 }: Props): JSX.Element {
+  const [confirmRemove, setConfirmRemove] = useState(false);
   const pct =
     task.size > 0 ? Math.min(100, (task.downloaded / task.size) * 100) : 0;
 
@@ -66,10 +71,13 @@ export const TaskRow = memo(function TaskRow({
     try {
       await fn();
     } catch (e) {
-      // Surfacing this in the row would fight with the row's own status, so it
-      // goes to the console; the task status already reflects the failure.
+      // The row keeps its state for a retry; the notice line says what
+      // happened so a dead click does not look like a working one.
       console.error(e);
+      onError(`操作失败：${e instanceof Error ? e.message : String(e)}`);
     }
+    // Full reload, never an optimistic patch: the row is cheap to re-read
+    // and a guessed state is how rows get stuck showing the wrong thing.
     onChanged();
   }
 
@@ -209,20 +217,33 @@ export const TaskRow = memo(function TaskRow({
           <IconFolder size={16} />
         </button>
 
-        {/* No separate ✕: it did exactly what the trash button does — remove
-            the row, keep finished files, drop unfinished partials — so two
-            buttons for one action only invited the question of how they
-            differed. */}
+        {/* The row trash asks first, exactly like the toolbar delete: one
+            click removes the record, and "which click deletes what" should
+            never be a question the user has to ask. */}
         <button
           type="button"
           className="icon-btn"
           aria-label="从列表移除"
           title="从列表移除（下好的文件不动，没下完的半成品会一起删）"
-          onClick={() => void run(() => api.removeTask(task.id, false))}
+          onClick={() => setConfirmRemove(true)}
         >
           <IconTrash size={16} />
         </button>
       </div>
+
+      {confirmRemove ? (
+        <ConfirmDialog
+          title="移除这条记录？"
+          message={`将从列表里移除「${task.name || urlTail(task.url)}」。`}
+          detail="只删除列表记录。下好的文件会保留；没下完的半成品和续传记录会一起删掉，同链接重下从头开始。"
+          confirmLabel="移除"
+          onConfirm={() => {
+            setConfirmRemove(false);
+            void run(() => api.removeTask(task.id, false));
+          }}
+          onCancel={() => setConfirmRemove(false)}
+        />
+      ) : null}
     </div>
   );
 });

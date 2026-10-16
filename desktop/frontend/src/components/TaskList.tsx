@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { JSX } from "react";
+import { DEFAULT_WIDTHS, MIN_WIDTHS, layoutWidths } from "../columns";
 import { formatBytes, formatWhen } from "../format";
 import {
   STATUS_LABEL,
@@ -22,6 +23,8 @@ interface Props {
   /** Grouping is only meaningful in the unfiltered view. */
   groupByType: boolean;
   onChanged: () => void;
+  /** Reports a failed row action to the toolbar notice line. */
+  onError: (message: string) => void;
 }
 
 interface Column {
@@ -44,24 +47,6 @@ const COLUMNS: Column[] = [
   { key: "progress", label: "进度", center: true },
   { key: "speed", label: "速度 / 分片", center: true },
 ];
-
-/**
- * Preferred column widths in pixels, in the same order as COLUMNS plus the
- * action track.
- *
- * These are *preferences*, not fixed sizes: when they do not fit the available
- * width every column shrinks in proportion down to MIN_WIDTHS, and when there is
- * room to spare the name column takes it. That is what keeps the list free of a
- * horizontal scrollbar at any window size.
- */
-const DEFAULT_WIDTHS = [280, 76, 124, 96, 120, 140];
-
-/**
- * Smallest a column may be. Their total plus the padding and gaps is the
- * narrowest the list can render; below that the columns would overlap, so the
- * window's own minimum width is what actually guarantees this fits.
- */
-const MIN_WIDTHS = [140, 62, 104, 78, 96, 112];
 
 /** Where the column widths are remembered between sessions. */
 const WIDTHS_KEY = "vkmdownload.column-widths";
@@ -149,6 +134,7 @@ export function TaskList({
   onSelect,
   groupByType,
   onChanged,
+  onError,
 }: Props): JSX.Element {
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
   // Preferred widths, in the same order as COLUMNS plus the action track.
@@ -169,52 +155,6 @@ export function TaskList({
       // Storage can be unavailable; the widths simply will not persist.
     }
   }, [prefs]);
-
-  /**
-   * Distributes the available width over the columns' preferred widths.
-   *
-   * The total never exceeds the container, which is what keeps the list free of
-   * a horizontal scrollbar.
-   */
-  /**
-   * Returns the widths to render, in column order.
-   *
-   * `prefs` is kept balanced against the available width, so in the steady state
-   * this returns it unchanged. The two branches below are the exceptions: the
-   * window was resized past what the preferences fit, or a drag has pushed the
-   * total over the container.
-   *
-   * Balancing up front is what stops a column jumping when a divider is merely
-   * clicked, or when a drag is released. There is no surplus to reallocate at
-   * those moments because there is no surplus — and reallocating one was what
-   * made the whole row appear to snap back to a default.
-   */
-  function layoutWidths(preference: number[], available: number): number[] {
-    const floor = MIN_WIDTHS.reduce((a, b) => a + b, 0);
-    const space = Math.max(available, floor);
-    const out = [...preference];
-    const total = out.reduce((a, b) => a + b, 0);
-
-    if (total === space) return out;
-
-    if (total < space) {
-      // Room to spare: the name column takes it, since it carries the most text
-      // and shrinking it is the last thing anyone wants.
-      out[0] += space - total;
-      return out;
-    }
-
-    // Too wide: everything shrinks in proportion, but never below its minimum.
-    const need = total - space;
-    const shrinkable = out.reduce((sum, w, i) => sum + (w - MIN_WIDTHS[i]), 0);
-    if (shrinkable <= 0) return [...MIN_WIDTHS];
-    const share = Math.min(need, shrinkable);
-    for (let i = 0; i < out.length; i += 1) {
-      const room = out[i] - MIN_WIDTHS[i];
-      if (room > 0) out[i] -= (share * room) / shrinkable;
-    }
-    return out;
-  }
 
   // Keep the preferences balanced against the space available, so rendering is a
   // no-op in the steady state. The name column absorbs the difference, for the
@@ -249,6 +189,17 @@ export function TaskList({
   const COL_GAPS = 5 * COL_GAP;
   /** Width of the draggable strip straddling a boundary. */
   const HANDLE_WIDTH = 12;
+  /**
+   * Widest a single column may grow while dragging, as a share of the
+   * container. It used to be a fixed 560px, which stopped making sense on
+   * very narrow or very wide windows; a share scales with both.
+   */
+  const MAX_COL_SHARE = 0.6;
+  /** Floor used before the first measure, when `avail` is still 0. */
+  const MAX_COL_FALLBACK = 560;
+  // Mirrors `avail` for the drag handler below, which runs outside renders.
+  const availRef = useRef(avail);
+  availRef.current = avail;
 
   /**
    * Left offset of the drag handle for the boundary after column `i`.
@@ -308,18 +259,22 @@ export function TaskList({
       // the render, the persist and the blink with it.
       setPrefs((prev) => {
         let d = delta;
+        const cap =
+          availRef.current > 0
+            ? Math.max(320, Math.floor(availRef.current * MAX_COL_SHARE))
+            : MAX_COL_FALLBACK;
         if (d > 0) {
           let room = 0;
           for (let k = index + 1; k < startPrefs.length; k += 1) {
             room += Math.max(startPrefs[k] - MIN_WIDTHS[k], 0);
           }
-          d = Math.min(d, room, Math.max(560 - startPrefs[index], 0));
+          d = Math.min(d, room, Math.max(cap - startPrefs[index], 0));
         } else {
           let room = 0;
           for (let k = index; k >= 0; k -= 1) {
             room += Math.max(startPrefs[k] - MIN_WIDTHS[k], 0);
           }
-          d = -Math.min(-d, room, Math.max(560 - startPrefs[index + 1], 0));
+          d = -Math.min(-d, room, Math.max(cap - startPrefs[index + 1], 0));
         }
         if (d === 0) return prev;
         const next = [...startPrefs];
@@ -445,6 +400,7 @@ export function TaskList({
         selected={selected.has(t.id)}
         onSelect={onSelect}
         onChanged={onChanged}
+        onError={onError}
       />
     );
   }
