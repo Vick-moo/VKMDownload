@@ -358,6 +358,60 @@
   review clock restarted.
 - #37 commits pushed to main; no GitHub release yet.
 
+### 39. Engine correctness batch (UNRELEASED)
+- fetchOnce commits actual written bytes (was: whole block), restoring the
+  split/outstanding invariant. Regression: TestCommitPartialKeepsClaimOutstanding.
+- Size<0 barred from segmented path (was: fake-success empty file).
+- Segmented completion always verifies known length; VerifySize now only
+  controls extra checks.
+- Disk write errors (PathError/SyscallError/ShortWrite) no longer retried.
+- Sidecar watermark advances only on successful save (+saveFails counter).
+- Limiter bucket scales with rate (small limits actually limit now).
+- debugFile closed in Downloader.Close; ChunkSize honored on segmented path;
+  NoRange branch made explicit error. 9 new tests in repair_test.go.
+
+### 40. Backend persistence batch (UNRELEASED)
+- tasks.json persists manual/referer/cookie/userAgent (restart no longer
+  kills private tasks or mis-organizes manual ones).
+- paused/failed count as plan-intervened (no more surprise shutdown/sound).
+- organize falls back to copy+remove cross-volume, uniqueDest (1) suffix,
+  failures surface in task.Error.
+- Optional pairing auth: ApiToken (auto-generated) + ApiAuthRequired
+  (default off); Bearer guard on /add + settings POST.
+- /add field caps (URL/Referer 8KB, filename 255 rune); content-layer
+  duplicate re-check in insert critical section + pickDuplicateVictim.
+- saveMu + fsync; corrupt tasks.json preserved as tasks.json.corrupt-*;
+  completed only flipped on IsNotExist; seq reseeded from loaded IDs;
+  clipboard URL trim shared helper; debugLog mutex; StartPlanSelected
+  counts real resumes; log URLs redacted to host+path. 15 new tests.
+
+### 41. Frontend UX batch (UNRELEASED)
+- files:dropped wired (drag a link opens the dialog); update:available
+  subscribed (offline-start banner no longer lost) + release-page button.
+- Dialog arrivals queue instead of overwriting; selected + keyboard delete
+  unified behind ConfirmDialog; selected pruned against live tasks.
+- canceled filter/sidebar entry; clipboard switches made mutually exclusive;
+  minSegmentSize setting added; min-size now raw KB input; empty organize
+  rows blocked with a hint; per-tick scans merged to one pass.
+- Column first-frame guard, width cap proportional, sidebar width persisted;
+  ConfirmDialog Esc/mask close; empty-filter back button; row delete confirm;
+  row errors flash. vitest harness: 22 tests (format/columns/filterLabel).
+
+### 42. Extension no-loss batch (UNRELEASED, needs browser reload)
+- Recognizes pending (no longer fake-success); POST-before-cancel ordering;
+  completed browser items left alone; fallback uses fresh filename.
+- ownDownloads mirrored in chrome.storage.session (best-effort: manifest
+  keeps 4 permissions for the pending store review); fallback try/catch.
+- Pairing token field in popup (Bearer header, 403 shows pairing hint);
+  fresh policy on status; selection-text CJK punctuation stripped.
+- node:test suite: 22 tests (decision + manifest contract locks).
+
+### 43. Release + docs batch (UNRELEASED)
+- release.ps1 preflights: existing tag / dirty tree / version-replace hits.
+- CODEMAP section 4 rewritten to actual throttle/flush behavior, dup entry
+  merged, section 6 covers extension + release flow, handover order fixed.
+- CHANGES TODO deduped. update_test.go: offline-silence + allowlist tests.
+
 ## TODO (user requested, work later)
 
 - Detached ask-location popup WITHOUT v3 migration (backup plan).
@@ -385,11 +439,5 @@
 
 - Multi-select + multi-edit tasks in the list. Bulk start/stop/remove DONE (2026-10-15, CHANGES #12). Batch field editing (connections/destination) still open.
 
-
-### 3. restart turns never-started queued into paused (pending)
-- New tasks with AutoStart off are queued by design (manager.go Start).
-- But loadTasks (manager.go:1167) rewrites queued to paused on restart.
-- Harmless: Resume still starts them. Only slightly imprecise semantics.
-- User informed; leaving as-is until user decides.
 ## 2026-10-14 — 0.2.4（已发布）
 - 见 `release-notes-0.2.4.md`。

@@ -33,6 +33,15 @@ $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
 $repo = 'Vick-moo/VKMDownload'
 
+# --------------------------------------------------------------- 预检 ---
+
+# 缺一即停：tag 已存在 / 工作区不干净 / 版本号替换无命中。
+# 只做检查，不动下面的发版主流程。
+git rev-parse --verify "v$Version" 2>$null | Out-Null
+if ($LASTEXITCODE -eq 0) { throw "tag v$Version 已存在，先确认版本号是否重复。" }
+$dirty = git status --porcelain 2>$null
+if ($dirty) { throw "工作区不干净，先提交或暂存再发版。`n$dirty" }
+
 # --------------------------------------------------------------- 版本号 ---
 
 $desktop = Join-Path $root 'desktop'
@@ -42,15 +51,18 @@ $utf8 = New-Object System.Text.UTF8Encoding($false)
 
 Write-Host "版本 -> $Version" -ForegroundColor Cyan
 
+$hits = 0
 foreach ($file in @($appGo, $wailsJson)) {
     $text = [System.IO.File]::ReadAllText($file, $utf8)
     $updated = $text -replace 'const appVersion = "[^"]*"', "const appVersion = `"$Version`""
     $updated = $updated -replace '"productVersion": "[^"]*"', "`"productVersion`": `"$Version`""
     if ($updated -ne $text) {
+        $hits++
         [System.IO.File]::WriteAllText($file, $updated, $utf8)
         Write-Host "  已更新 $(Split-Path $file -Leaf)" -ForegroundColor DarkGray
     }
 }
+if ($hits -eq 0) { throw "版本号替换零命中：app.go / wails.json 里没找到可替换的版本字段。" }
 
 # ---------------------------------------------------------------- 构建 ---
 

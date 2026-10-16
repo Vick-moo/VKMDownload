@@ -41,10 +41,9 @@
 | `manager.go` | `Manager` 状态机：Start/Pause/Resume/Cancel/Remove、批量操作、计划下载、`Stats`、`loadTasks/saveTasks` | 任务卡住、暂停变取消、批量卡死、计数对不上 |
 | `update.go` | 更新检查：`CheckUpdate` binding、`isNewerVersion` 对比、`checkUpdateOnce` 启动通知、`OpenReleasePage` | 更新横幅不出现、版本号比错 |
 | `tray.go` | 托盘图标（fyne.io/systray，自带消息循环）：显示窗口/退出，左键恢复 | 关窗口窗口丢失、托盘无图标、托盘退出后进程残留 |
-| `config.go` | 设置结构（含 `AskLocation`、`Organize*`、`UpdateStatus` 相关）+ `organizeTarget` 落点计算 | 设置不生效、整理落点不对 |
+| `config.go` | 设置结构、默认值、`normalize`（`MaxConcurrent`/`RefreshRate`/`ResumeFlush*` 校验）+ `organizeTarget` 落点计算 | 设置不生效、默认值异常、整理落点不对 |
 | `app.go` | Wails 生命周期、binding、剪贴板轮询、托盘关闭语义、quitFlag 退出意图 | 启动崩溃、关不掉窗口、剪贴板重复建任务 |
 | `api.go` | 回环端点 `/ping` `/settings` `/add`、`apiGuard`、`sanitizeSuggestedName` | 扩展连不上、文件名越界 |
-| `config.go` | 设置结构、默认值、`normalize`（含 `MaxConcurrent` 校验） | 设置不生效、默认值异常 |
 
 ### 前端与扩展
 
@@ -55,7 +54,7 @@
 | `frontend/src/components/TaskList.tsx` | 列表 + 列宽记忆（键 `vkmdownload.column-widths`） |
 | `frontend/src/components/NewTaskDialog.tsx` | 新建任务输入（前端无路径净化，靠后端） |
 | `frontend/src/components/SettingsPage.tsx` | 设置页 |
-| `extension/background.js` | `findApp` 端口扫描 18888–18898、`handOver` 先删后送、`nameFromUrl` |
+| `extension/background.js` | `findApp` 端口扫描 18888–18898、`handOver` 先 POST 后 cancel（曾先删后送）、`nameFromUrl` |
 | \extension/manifest.json\ | 权限只留四项（downloads/contextMenus/notifications/cookies）；storage 已因无调用移除 |
 
 ## 3. 改某功能该看哪
@@ -75,7 +74,17 @@
 ## 4. 关键流程速查
 
 - **下载梯**：`download.go:Download` → 有 sidecar 则 `segmented+if-range` → 可分片则 `segmented` → 兜底 `single`。`ErrIfRangeIgnored` 表示换策略，不是传输失败。
-- **进度节流**：`250ms / 1MiB` 先到先发（`download.go:newTracker`），`emit` 内先落盘 sidecar 再回调。
+- **进度节流（上报与落盘两套独立节流）**：上报看 `manager.go:refreshInterval` 把
+  `config.go:RefreshRate` 映射成引擎 `ProgressInterval`——fast 250ms（默认，未知值回落）、
+  medium 650ms、slow 1000ms，只管数字刷新频率，不管传输速度；`SetConfig` 经 livedl 注册表
+  live 推送到正在跑的任务（`Downloader.SetProgressInterval`，tracker 每块读 atomic 值）。
+  `download.go:progressTracker.add` 里上报按"每 interval 或每 `ProgressBytes`（默认 1 MiB，
+  此处被 `run()` 设成 `ResumeFlushKB`）先到先发"。
+  落盘（sidecar 续传记录）另有三旋钮，任一命中即写：`SaveInterval`（时间，来自
+  `ResumeFlushMs`，`ResumeFlushByTime` 关时传 -1 禁用）、`SaveBytes`（字节，来自
+  `ResumeFlushKB`，`ResumeFlushBySize` 关时传 -1 禁用）、`SavePercent`（占总长的百分比，
+  来自 `ResumeFlushPct`，0 即关，总长未知时自动失效）。顺序注意：`add()` 在锁外先 `save()`
+  再 `emit()` 回调——落盘不在 `emit` 内，慢磁盘卡不住回调。
 - **发布顺序**：`publish` 先 `Sync+Close` → `moveFile` → `track.finish()` → 删 sidecar。删早了会被 `finish` 复活。
 - **任务持久化**：`tasks.json`（GUI 意图）与 sidecar（引擎真相）分离，索引坏了不影响续传。
 - **扩展握手**：扩展轮询 `127.0.0.1:18888–18898/ping`，认 `app=="VKMDownload"`；每次拦截前 GET `/settings` 取策略。应用必须先启动。
@@ -102,6 +111,18 @@ go test -race ./...                  # 并发正确性（推荐）
 VKMDOWNLOAD_DIAGNOSE=1 go test ./internal/engine -run Diagnose -v
 cd desktop && go test ./...          # 后端测试
 cd desktop && wails build            # 产出 build/bin/VKMDownload.exe
+node --check extension/background.js # 扩展改完先过语法（popup.js 同理）
+```
+
+扩展打包有两条线，别混：GitHub release 附带的 `VKMDownload-extension.zip`
+由 `scripts/release.ps1` 自动打（`extension/` 原样装进 zip，手工写正斜杠条目，
+解压直得 `extension` 目录）；商店包是另一回事——`manifest.json` 版本号 +1 后
+单独打 zip，去 Partner Center 替换提交（见 CHANGES #38）。发版一条命令：
+
+```powershell
+.\scripts\release.ps1 -Version 0.2.6            # 构建+打包+建 release+传文件
+.\scripts\release.ps1 -Version 0.2.6 -Draft     # 先草稿，看一眼再发布
+.\scripts\release.ps1 -Version 0.2.6 -SkipBuild # 调试脚本时跳过构建
 ```
 
 ## 7. 已修好的坑（历史记录，备查）
@@ -152,6 +173,11 @@ cd desktop && wails build            # 产出 build/bin/VKMDownload.exe
 44. Flush rows native (plain .setting rows, no cards).
 45. Concurrent same-URL guard (inflight claim in Start) + ext size wait 1.5s.
 46. Ext 1.0.2 store update submitted (replaced package, review pending).
+47. Engine batch: commit actual bytes, Size<0 barred, forced size check, no-retry writes, save-on-success watermark, scaled limiter.
+48. Backend batch: persisted manual/cookie, plan intervened, cross-volume organize, pairing auth (off by default), field caps, saveMu, corrupt backup.
+49. Frontend batch: drop wired, update event, arrival queue, delete confirm, canceled view, pairing UI, vitest 22.
+50. Extension batch: pending recognized, POST-before-cancel, session mirror, pairing token, node:test 22.
+51. Release batch: ps1 preflights, CODEMAP-4 rewritten, update tests.
 ## 8. 剩下未动的（有意延后）
 
 - ~~`Remove`/`Cancel` 在 binding 线程同步 `waitStopped(3s)`~~：已修——等删改走后台 goroutine，`Cancel` 用代际 guard 防误删（`manager.go:Cancel/Remove`）。
