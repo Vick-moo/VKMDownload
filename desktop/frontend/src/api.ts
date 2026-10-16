@@ -21,7 +21,6 @@ import {
   PauseTask,
   StartUpdate,
   UpdateProgress,
-  ClearFailedTasks,
   PickDirectory,
   PlanRunning,
   RemoveTask,
@@ -57,7 +56,6 @@ export const api = {
   removeTask: (id: string, deleteFiles: boolean): Promise<void> =>
     RemoveTask(id, deleteFiles),
   removeTasks: (ids: string[]): Promise<number> => RemoveTasks(ids),
-  clearFailedTasks: (): Promise<number> => ClearFailedTasks(),
   startAllTasks: (): Promise<number> => StartAllTasks(),
   stopAllTasks: (): Promise<number> => StopAllTasks(),
   startPlan: (): Promise<number> => StartPlan(),

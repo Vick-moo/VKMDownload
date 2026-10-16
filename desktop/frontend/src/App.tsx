@@ -55,6 +55,8 @@ function App(): JSX.Element {
   /** Generation counter for list reloads; see reload below. */
   const reloadGen = useRef(0);
   const [deleting, setDeleting] = useState(false);
+  // Guards runSelected against double submission (double-click, key repeat).
+  const bulkBusyRef = useRef(false);
   const [pendingURL, setPendingURL] = useState("");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   /** Where the sidebar width is remembered between sessions. */
@@ -144,6 +146,9 @@ function App(): JSX.Element {
   // Arrivals that came in while the dialog was already open. Closing the
   // dialog drains the queue instead of dropping them on the floor.
   const arrivalQueue = useRef<Arrival[]>([]);
+  // Mirrors dialogOpen for event handlers: two arrivals landing in the same
+  // tick would both read the still-false state and overwrite each other.
+  const dialogOpenRef = useRef(false);
   const applyArrival = useCallback((a: Arrival) => {
     setPendingURL(a.url);
     setDialogURL(a.url);
@@ -152,6 +157,7 @@ function App(): JSX.Element {
     setDialogCookie(a.cookie);
     setDialogUserAgent(a.userAgent);
     setDialogAsk(a.ask);
+    dialogOpenRef.current = true;
     setDialogOpen(true);
     // The user is in another app; pull the question in front of it.
     void api.bringToFront().catch(() => {});
@@ -161,14 +167,14 @@ function App(): JSX.Element {
   // typed there.
   const handleArrival = useCallback(
     (a: Arrival) => {
-      if (dialogOpen) {
+      if (dialogOpenRef.current) {
         arrivalQueue.current.push(a);
         flash("收到新链接，先处理当前对话框");
         return;
       }
       applyArrival(a);
     },
-    [dialogOpen, applyArrival, flash],
+    [applyArrival, flash],
   );
 
   useEffect(() => {
@@ -425,6 +431,10 @@ function App(): JSX.Element {
     async (action: "resume" | "pause" | "remove") => {
       const ids = [...selected];
       if (ids.length === 0) return;
+      // One batch at a time: without this, double-clicking (or keyboard
+      // repeat) submits the same ids twice and the counts lie.
+      if (bulkBusyRef.current) return;
+      bulkBusyRef.current = true;
       const verbs = { resume: "继续", pause: "暂停", remove: "删除" } as const;
       let ok = 0;
       await Promise.all(
@@ -440,6 +450,7 @@ function App(): JSX.Element {
         }),
       );
       if (action === "remove") setSelected(new Set());
+      bulkBusyRef.current = false;
       void reload();
       flash(ok > 0 ? `已${verbs[action]} ${ok}/${ids.length} 个` : `${verbs[action]}失败`);
     },
@@ -572,7 +583,10 @@ function App(): JSX.Element {
         onNewTask();
       }
       if (e.key === "Escape" && settingsOpen) setSettingsOpen(false);
-      if (e.key === "Escape" && dialogOpen) setDialogOpen(false);
+      if (e.key === "Escape" && dialogOpen) {
+        dialogOpenRef.current = false;
+        setDialogOpen(false);
+      }
       // Space toggles pause on a single selected task.
       if (e.key === " " && !typing && selected.size === 1) {
         e.preventDefault();
@@ -857,6 +871,7 @@ function App(): JSX.Element {
         fromAsk={dialogAsk}
         config={config}
         onClose={() => {
+          dialogOpenRef.current = false;
           setDialogOpen(false);
           setPendingURL("");
           setDialogAsk(false);

@@ -13,9 +13,9 @@ interface Props {
 }
 
 /**
- * The editable shape. `apiAuthRequired` exists on the Go Config but the
- * generated TS model has not been regenerated yet, so it is declared here so
- * the switch survives until save and travels with the SetConfig payload.
+ * The editable shape. `verifyPeerProcess` is declared optional so the switch
+ * survives until save even against a generated TS model that predates the
+ * Go Config field; current models already include it, making this harmless.
  */
 type Draft = Config & { verifyPeerProcess?: boolean };
 

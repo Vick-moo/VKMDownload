@@ -73,7 +73,7 @@ export function NewTaskDialog({
     setConns(config?.connections ?? 8);
     // Focus lands on the field the user most likely wants.
     window.setTimeout(() => urlRef.current?.focus(), 30);
-  }, [open, initialURL, config]);
+  }, [open, initialURL, initialFilename, initialReferer, initialCookie, initialUserAgent, fromAsk, config]);
 
   useEffect(() => {
     if (!open) return;
