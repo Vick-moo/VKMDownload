@@ -174,11 +174,12 @@ node --check extension/background.js # 扩展改完先过语法（popup.js 同�
 45. Concurrent same-URL guard (inflight claim in Start) + ext size wait 1.5s.
 46. Ext 1.0.2 store update submitted (replaced package, review pending).
 47. Engine batch: commit actual bytes, Size<0 barred, forced size check, no-retry writes, save-on-success watermark, scaled limiter.
-48. Backend batch: persisted manual/cookie, plan intervened, cross-volume organize, pairing auth (off by default), field caps, saveMu, corrupt backup.
+48. Backend batch: persisted manual/cookie, plan intervened, cross-volume organize, pairing auth (later removed in #45), field caps, saveMu, corrupt backup.
 49. Frontend batch: drop wired, update event, arrival queue, delete confirm, canceled view, pairing UI, vitest 22.
-50. Extension batch: pending recognized, POST-before-cancel, session mirror, pairing token, node:test 22.
+50. Extension batch: pending recognized, POST-before-cancel, session mirror, node:test 21 (token cases removed in #45).
 51. Release batch: ps1 preflights, CODEMAP-4 rewritten, update tests.
 52. Peer check (peercheck*.go): exe allowlist + Authenticode cache, default on, live switch.
+53. Token removed (#45): backend, settings, popup, background; storage kept for session mirror.
 ## 8. 剩下未动的（有意延后）
 
 - ~~`Remove`/`Cancel` 在 binding 线程同步 `waitStopped(3s)`~~：已修——等删改走后台 goroutine，`Cancel` 用代际 guard 防误删（`manager.go:Cancel/Remove`）。

@@ -422,6 +422,13 @@
 - 8 new tests (allowlist, admit/reject/signature/fail-open, end-to-end
   200/403, cache, real-sig manual-only after a Defender false positive).
 
+### 45. Pairing token removed everywhere (UNRELEASED)
+- Peer check made the token redundant (same-user malware reads both copies),
+  so it is gone: backend fields/bindings/guard, settings pairing section,
+  popup token box, background Bearer + pairError paths, PRIVACY row.
+- Popup keeps version line + refused-error display; manifest keeps storage
+  (ownDownloads session mirror still uses it). Net -439 lines.
+
 ## TODO (user requested, work later)
 
 - Detached ask-location popup WITHOUT v3 migration (backup plan).
