@@ -259,7 +259,10 @@ func TestResumeThenPauseDoesNotPanic(t *testing.T) {
 		time.Sleep(15 * time.Millisecond)
 	}
 
-	time.Sleep(400 * time.Millisecond)
+	waitFor(t, "the transfer to settle", 15*time.Second, func() bool {
+		v, ok := find(app.mgr, task.ID)
+		return ok && v.Status != StatusDownloading && v.Status != StatusQueued
+	})
 	t.Logf("survived; final status=%s", mustFind(t, app.mgr, task.ID).Status)
 }
 
@@ -292,7 +295,10 @@ func TestConcurrentResumeDoesNotPanic(t *testing.T) {
 		}()
 	}
 	wg.Wait()
-	time.Sleep(400 * time.Millisecond)
+	waitFor(t, "the transfer to settle", 15*time.Second, func() bool {
+		v, ok := find(app.mgr, task.ID)
+		return ok && v.Status != StatusDownloading && v.Status != StatusQueued
+	})
 	t.Logf("survived; final status=%s", mustFind(t, app.mgr, task.ID).Status)
 }
 
@@ -344,7 +350,16 @@ func TestResumePauseOnTaskWithMissingFile(t *testing.T) {
 		_ = app.mgr.Resume(task.ID)
 		_ = app.mgr.Remove(task.ID, false)
 	}
-	time.Sleep(500 * time.Millisecond)
+	// Removal drops the record synchronously; the wait below is for the
+	// detached transfer goroutine to exit.
+	waitFor(t, "transfers to settle", 15*time.Second, func() bool {
+		for _, v := range app.mgr.List() {
+			if v.Status == StatusDownloading || v.Status == StatusQueued {
+				return false
+			}
+		}
+		return true
+	})
 
 	// No task may remain, and the process must still be alive.
 	if _, ok := find(app.mgr, task.ID); ok {
@@ -386,7 +401,14 @@ func TestResumePauseOnMissingFileConcurrently(t *testing.T) {
 		}()
 	}
 	wg.Wait()
-	time.Sleep(500 * time.Millisecond)
+	waitFor(t, "transfers to settle", 15*time.Second, func() bool {
+		for _, v := range app.mgr.List() {
+			if v.Status == StatusDownloading || v.Status == StatusQueued {
+				return false
+			}
+		}
+		return true
+	})
 	t.Log("survived concurrent resume/pause/cancel on a missing target")
 }
 
@@ -1259,10 +1281,16 @@ func TestRemoveDropsUnfinishedPartials(t *testing.T) {
 	tk.mu.Lock()
 	tk.view.Status = StatusCompleted
 	tk.mu.Unlock()
+	// Removal never touches a finished file (not even from the detached
+	// cleanup goroutine), so once the record is gone the assertion below is
+	// stable without waiting.
 	if err := app.mgr.Remove(tv2.ID, false); err != nil {
 		t.Fatalf("Remove: %v", err)
 	}
-	time.Sleep(500 * time.Millisecond)
+	waitFor(t, "the record to be dropped", 10*time.Second, func() bool {
+		_, ok := find(app.mgr, tv2.ID)
+		return !ok
+	})
 	if _, err := os.Stat(tv2.Dest); err != nil {
 		t.Errorf("finished file removed with its record: %v", err)
 	}

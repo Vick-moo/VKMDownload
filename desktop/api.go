@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -90,6 +91,12 @@ func (a *App) startLocalAPI(ctx context.Context) {
 
 // apiGuard rejects callers that are not browser extensions and answers the
 // preflight requests that follow from that.
+//
+// When the loopback credential is enforced (ApiAuthRequired), every
+// non-preflight request must also carry Authorization: Bearer <ApiToken>.
+// The token is shown in the app's settings so the user can hand it to the
+// extension; without it, anything else on the machine that can speak HTTP
+// could drive the endpoint once past the Origin check.
 func (a *App) apiGuard(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
@@ -115,14 +122,55 @@ func (a *App) apiGuard(next http.Handler) http.Handler {
 
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
+		// Bearer enforcement lives behind the switch: off keeps the
+		// historical posture (loopback + Origin check), on requires the
+		// token on every real request.
+		if a.apiAuthRequired() && !a.checkApiToken(r) {
+			http.Error(w, "missing or invalid api token", http.StatusUnauthorized)
+			return
+		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// apiAuthRequired reports whether the loopback credential is enforced.
+func (a *App) apiAuthRequired() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.cfg.ApiAuthRequired && a.cfg.ApiToken != ""
+}
+
+// checkApiToken compares the request's Authorization header against the
+// configured token with a constant-time compare.
+func (a *App) checkApiToken(r *http.Request) bool {
+	const prefix = "Bearer "
+	got := r.Header.Get("Authorization")
+	if len(got) <= len(prefix) || got[:len(prefix)] != prefix {
+		return false
+	}
+	a.mu.Lock()
+	want := a.cfg.ApiToken
+	a.mu.Unlock()
+	if want == "" {
+		return false
+	}
+	return subtleCompare(got[len(prefix):], want)
+}
+
+// subtleCompare is a length-revealing constant-time string comparison: a
+// plain == bails on the first differing byte, which leaks the token
+// prefix-by-prefix to timing.
+func subtleCompare(a, b string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
 }
 
 // apiPing lets the extension find the app without guessing.
@@ -238,6 +286,22 @@ func (a *App) apiAdd(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "url is required"})
 		return
 	}
+	// Field caps: URL and Referer are attacker-influenced strings that would
+	// otherwise live unbounded in task memory, the index file and the log;
+	// Filename is capped in runes (255, the common filesystem limit) because
+	// a longer name cannot be created on disk anyway.
+	if len(req.URL) > 8<<10 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "url is too large"})
+		return
+	}
+	if len(req.Referer) > 8<<10 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "referer is too large"})
+		return
+	}
+	if len([]rune(req.Filename)) > 255 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "filename is too long"})
+		return
+	}
 	// Bounds on the replayed credentials: a normal browser Cookie header is a
 	// few KB. Without a cap a caller could stuff megabytes into task memory
 	// (the /add body limit alone would allow 1 MiB of it).
@@ -257,8 +321,10 @@ func (a *App) apiAdd(w http.ResponseWriter, r *http.Request) {
 		// The reply stays 200 with no id so the extension does not fall back
 		// to a browser download of something the user is about to place.
 		fn := sanitizeSuggestedName(req.Filename)
+		// The URL is logged desensitised (host+path): query strings carry
+		// session tokens and single-use signatures that must not land on disk.
 		a.debugLog("extension asked %s (origin=%q ua=%q cookie=%dB)",
-			req.URL, r.Header.Get("Origin"), r.Header.Get("User-Agent"), len(req.Cookie))
+			logURL(req.URL), r.Header.Get("Origin"), r.Header.Get("User-Agent"), len(req.Cookie))
 		a.emit("location:ask", map[string]string{
 			"url":       req.URL,
 			"filename":  fn,
@@ -285,7 +351,7 @@ func (a *App) apiAdd(w http.ResponseWriter, r *http.Request) {
 		// twice. Answer 200 with the existing record instead.
 		var dup *duplicateError
 		if errors.As(err, &dup) {
-			a.debugLog("extension duplicate %s (existing %s)", req.URL, dup.ID)
+			a.debugLog("extension duplicate %s (existing %s)", logURL(req.URL), dup.ID)
 			writeJSON(w, http.StatusOK, map[string]any{
 				"duplicate": true,
 				"id":        task.ID,
@@ -302,7 +368,7 @@ func (a *App) apiAdd(w http.ResponseWriter, r *http.Request) {
 	// say where they came from — which made it impossible to tell a bug from
 	// something else on the machine calling the endpoint.
 	a.debugLog("extension added %s (origin=%q ua=%q cookie=%dB)",
-		req.URL, r.Header.Get("Origin"), r.Header.Get("User-Agent"), len(req.Cookie))
+		logURL(req.URL), r.Header.Get("Origin"), r.Header.Get("User-Agent"), len(req.Cookie))
 	writeJSON(w, http.StatusOK, map[string]any{"id": task.ID, "name": task.Name})
 }
 

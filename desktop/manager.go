@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -13,6 +14,7 @@ import (
 	"path/filepath"
 	"runtime/debug"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -33,7 +35,13 @@ import (
 // so a hot loop can never fill the disk.
 const debugLogMaxBytes = 2 << 20
 
+// debugLogMu serialises log writes: concurrent task goroutines otherwise
+// interleave partial lines and race the rotation check.
+var debugLogMu sync.Mutex
+
 func (a *App) debugLog(format string, args ...any) {
+	debugLogMu.Lock()
+	defer debugLogMu.Unlock()
 	dir := a.dataDir()
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return
@@ -197,6 +205,11 @@ type Manager struct {
 	// While depth > 0, saveTasks only marks dirty; batch flushes once.
 	saveDirty bool
 	saveDepth int
+
+	// saveMu serialises index writes: concurrent settlers (completion,
+	// failure, probe fill) otherwise interleave a read-modify-write and drop
+	// each other's updates. m.mu is never held across it.
+	saveMu sync.Mutex
 
 	// planRunning is set while a plan is working through its tasks.
 	planRunning bool
@@ -463,6 +476,23 @@ func (m *Manager) waitUnfinished(url, dest string, timeout time.Duration) *task 
 	}
 }
 
+// matchSameContent is the predicate behind findSameContent, shared with the
+// insertion check in Start so both layers agree on what "same file" means.
+func matchSameContent(v TaskView, url, name string, size int64) bool {
+	host := urlHost(url)
+	if host == "" || name == "" {
+		return false
+	}
+	// Identical URLs are the first layer's business (same link to
+	// another folder is allowed); this layer is only for different
+	// URLs pointing at the same file.
+	return v.URL != url &&
+		v.Status != StatusCompleted &&
+		v.Name != "" && v.Name == name &&
+		urlHost(v.URL) == host &&
+		(size <= 0 || v.Size <= 0 || v.Size == size)
+}
+
 // findSameContent returns an unfinished task that is most likely the same
 // file under a different URL: same host, same filename, and compatible size.
 // (Sizes are compatible when either side is unknown — a row that never
@@ -471,11 +501,6 @@ func (m *Manager) waitUnfinished(url, dest string, timeout time.Duration) *task 
 // matches. excludeID skips one task, for the post-probe check of the newcomer
 // itself.
 func (m *Manager) findSameContent(url, name string, size int64, excludeID string) *task {
-	host := urlHost(url)
-	if host == "" || name == "" {
-		return nil
-	}
-
 	m.mu.Lock()
 	ids := append([]string(nil), m.order...)
 	m.mu.Unlock()
@@ -490,20 +515,28 @@ func (m *Manager) findSameContent(url, name string, size int64, excludeID string
 		}
 		t.mu.Lock()
 		v := t.view
-		// Identical URLs are the first layer's business (same link to
-		// another folder is allowed); this layer is only for different
-		// URLs pointing at the same file.
-		match := v.URL != url &&
-			v.Status != StatusCompleted &&
-			v.Name != "" && v.Name == name &&
-			urlHost(v.URL) == host &&
-			(size <= 0 || v.Size <= 0 || v.Size == size)
+		match := matchSameContent(v, url, name, size)
 		t.mu.Unlock()
 		if match {
 			return t
 		}
 	}
 	return nil
+}
+
+// logURL renders a URL safe for the log: host+path only. Query strings and
+// fragments routinely carry session tokens, single-use signatures and file
+// ids — persisting them to disk turns the log into a credential store.
+func logURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return "(invalid-url)"
+	}
+	p := u.EscapedPath()
+	if p == "" {
+		p = "/"
+	}
+	return u.Host + p
 }
 
 // urlHost returns the lower-cased hostname without a www. prefix, or "".
@@ -692,6 +725,22 @@ func (m *Manager) Start(req StartRequest) (TaskView, error) {
 	}
 
 	m.mu.Lock()
+	// Re-check the content layer inside the insertion critical section: the
+	// synchronous check above raced with a concurrent add carrying the same
+	// host+name, and both would have inserted (the url+dest inflight guard
+	// does not cover different URLs for the same file).
+	if !needsProbe {
+		for _, other := range m.tasks {
+			other.mu.Lock()
+			v := other.view
+			dup := matchSameContent(v, url, name, 0)
+			other.mu.Unlock()
+			if dup {
+				m.mu.Unlock()
+				return v, &duplicateError{ID: v.ID, Status: v.Status, Name: v.Name}
+			}
+		}
+	}
 	m.tasks[id] = t
 	m.order = append([]string{id}, m.order...)
 	m.mu.Unlock()
@@ -709,12 +758,47 @@ func (m *Manager) Start(req StartRequest) (TaskView, error) {
 	return snapshot(t), nil
 }
 
+// pickDuplicateVictim decides which of two same-content tasks goes: the
+// later-created one, so a probe that merely returned later cannot evict the
+// task the user added first. Created is an RFC3339Nano stamp, so string order
+// is time order; an exact tie (same nanosecond) falls back to the id sequence
+// suffix, where the larger seq is the later add. It returns "" when neither
+// side is strictly later, in which case the caller keeps both rather than
+// guessing.
+func pickDuplicateVictim(mine, other TaskView) string {
+	switch {
+	case other.Created > mine.Created:
+		return other.ID
+	case mine.Created > other.Created:
+		return mine.ID
+	}
+	mSeq, mOK := parseTaskSeq(mine.ID)
+	oSeq, oOK := parseTaskSeq(other.ID)
+	switch {
+	case mOK && oOK && oSeq > mSeq:
+		return other.ID
+	case mOK && oOK && mSeq > oSeq:
+		return mine.ID
+	default:
+		return ""
+	}
+}
+
+// untouchedTask reports whether the task never really started: still paused
+// with nothing downloaded. Only such a task may be removed as a duplicate;
+// anything the user already started is left alone.
+func untouchedTask(t *task) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.view.Status == StatusPaused && t.view.Downloaded == 0
+}
+
 // fillProbedName resolves the server filename and size for a task added
 // without one, then runs the content-based duplicate check. It never blocks
 // Start and never fails it: any probe failure leaves the row as created. A
-// probed duplicate removes the newcomer only while it is still untouched
-// (paused with nothing downloaded); a task the user already started is left
-// alone, and so is anything whose row already vanished.
+// probed duplicate removes the later-created task only while it is still
+// untouched (paused with nothing downloaded); a task the user already started
+// is left alone, and so is anything whose row already vanished.
 func (m *Manager) fillProbedName(id, url string, req StartRequest) {
 	pn, ps := m.probeName(url, req)
 	if pn == "" && ps <= 0 {
@@ -739,17 +823,32 @@ func (m *Manager) fillProbedName(id, url string, req StartRequest) {
 	if name == "" {
 		return
 	}
-	if dup := m.findSameContent(url, name, size, id); dup != nil {
-		v := snapshot(dup)
-		t.mu.Lock()
-		untouched := t.view.Status == StatusPaused && t.view.Downloaded == 0
-		t.mu.Unlock()
-		if !untouched {
-			return
-		}
-		m.app.debugLog("duplicate of %s (%s), removing newcomer %s", v.ID, v.Name, id)
-		_ = m.Remove(id, false)
+	m.resolveDuplicate(id, url, name, size)
+}
+
+// resolveDuplicate removes the later-created of two same-content tasks, when
+// the victim is still untouched. It is split out of fillProbedName so the
+// victim choice is testable without the network probe in the way.
+func (m *Manager) resolveDuplicate(id, url, name string, size int64) {
+	t := m.get(id)
+	if t == nil {
+		return
 	}
+	dup := m.findSameContent(url, name, size, id)
+	if dup == nil {
+		return
+	}
+	dv := snapshot(dup)
+	victim := pickDuplicateVictim(snapshot(t), dv)
+	if victim == "" {
+		return
+	}
+	vt := m.get(victim)
+	if vt == nil || !untouchedTask(vt) {
+		return
+	}
+	m.app.debugLog("duplicate of %s (%s), removing %s", dv.ID, dv.Name, victim)
+	_ = m.Remove(victim, false)
 }
 
 // startRun launches the transfer goroutine for t, honouring MaxConcurrent.
@@ -938,6 +1037,11 @@ func (m *Manager) Pause(id string) error {
 	return nil
 }
 
+// errUpdating rejects starts while an update is being applied. It is a
+// sentinel so callers (notably StartPlanSelected) can tell a freeze apart
+// from a task that merely refused the resume.
+var errUpdating = errors.New("正在更新，稍后再试")
+
 // Resume restarts a paused, failed or cancelled task from its partial data.
 func (m *Manager) Resume(id string) error {
 	t := m.get(id)
@@ -958,7 +1062,7 @@ func (m *Manager) Resume(id string) error {
 	frozen := m.updating
 	m.mu.Unlock()
 	if frozen {
-		return fmt.Errorf("正在更新，稍后再试")
+		return errUpdating
 	}
 
 	// The spawn (and the MaxConcurrent gate) lives in startRun: it creates
@@ -1255,6 +1359,8 @@ func (m *Manager) StartPlanSelected(ids []string) (int, error) {
 		return 0, fmt.Errorf("没有选中的任务")
 	}
 
+	covered := 0
+	var frozenErr error
 	m.batch(func() {
 		for _, v := range m.List() {
 			if !want[v.ID] {
@@ -1262,26 +1368,45 @@ func (m *Manager) StartPlanSelected(ids []string) (int, error) {
 			}
 			switch v.Status {
 			case StatusPaused, StatusFailed, StatusCanceled, StatusQueued:
-				_ = m.Resume(v.ID)
+				// Counted at the successful resume, not by re-reading the
+				// status afterwards: a resume refused (frozen for update, or
+				// the task moved on) must not be covered.
+				if err := m.Resume(v.ID); err == nil {
+					covered++
+				} else if frozenErr == nil && errors.Is(err, errUpdating) {
+					frozenErr = err
+				}
 			}
 		}
 	})
 
-	covered := 0
-	for _, v := range m.List() {
-		if want[v.ID] && (v.Status == StatusDownloading || v.Status == StatusQueued) {
-			covered++
-		}
-	}
 	if covered == 0 {
 		m.mu.Lock()
 		m.planRunning = false
 		m.mu.Unlock()
+		// A freeze is not an empty selection: propagate it so the caller can
+		// tell "try later" apart from "nothing to download".
+		if frozenErr != nil {
+			return 0, frozenErr
+		}
 		return 0, fmt.Errorf("选中的任务没有可下载的")
 	}
 
 	go m.watchPlanSelected(want)
 	return covered, nil
+}
+
+// intervenedStatus reports whether a settled task means the user stepped in:
+// a cancelled, paused or failed task means the plan did not run to
+// completion, so the end-of-plan actions (sound, shutdown) must be skipped.
+func intervenedStatus(s TaskStatus) bool {
+	return s == StatusCanceled || s == StatusPaused || s == StatusFailed
+}
+
+// statsIntervened is the aggregate form of intervenedStatus for the global
+// watcher, which only has counts to look at.
+func statsIntervened(stats map[string]int64) bool {
+	return stats["canceled"] > 0 || stats["paused"] > 0 || stats["failed"] > 0
 }
 
 // watchPlanSelected waits until every planned task has settled, then finishes
@@ -1300,11 +1425,14 @@ func (m *Manager) watchPlanSelected(want map[string]bool) {
 				intervened = true
 				continue
 			}
-			switch snapshot(t).Status {
+			st := snapshot(t).Status
+			switch st {
 			case StatusDownloading, StatusQueued:
 				done = false
-			case StatusCanceled:
-				intervened = true
+			default:
+				if intervenedStatus(st) {
+					intervened = true
+				}
 			}
 		}
 		if done {
@@ -1335,6 +1463,10 @@ func (m *Manager) PlanRunning() bool {
 // It polls rather than being notified: every path that can end a transfer —
 // completion, failure, cancellation, removal — would otherwise have to remember
 // to poke the plan, and the one that forgot would leave it hanging forever.
+//
+// Only transferring and queued tasks keep the watch alive: paused, failed and
+// cancelled tasks already settled, so they never block it — but they do mark
+// the plan as intervened in finishPlan, which skips the end actions.
 func (m *Manager) watchPlan() {
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
@@ -1354,14 +1486,11 @@ func (m *Manager) finishPlan() {
 	m.planRunning = false
 	m.mu.Unlock()
 
-	// A plan that ends with cancelled tasks did not run to completion: the
-	// user intervened. Firing the end-of-plan actions anyway — especially a
-	// machine shutdown — would punish cancelling.
-	intervened := false
-	if stats := m.Stats(); stats["canceled"] > 0 {
-		intervened = true
-	}
-	m.finishPlanEnd(intervened)
+	// A plan that ends with cancelled, paused or failed tasks did not run to
+	// completion: the user intervened (or something broke). Firing the
+	// end-of-plan actions anyway — especially a machine shutdown — would
+	// punish cancelling.
+	m.finishPlanEnd(statsIntervened(m.Stats()))
 }
 
 // finishPlanEnd emits plan:done and runs the configured end actions, unless
@@ -1369,7 +1498,7 @@ func (m *Manager) finishPlan() {
 func (m *Manager) finishPlanEnd(intervened bool) {
 	if intervened {
 		m.app.emit("plan:done", nil)
-		m.app.debugLog("plan finished with cancellations: end actions skipped")
+		m.app.debugLog("plan finished as intervened (paused/failed/canceled present): end actions skipped")
 		return
 	}
 
@@ -1566,13 +1695,21 @@ func (m *Manager) run(t *task, ctx context.Context, cancel context.CancelFunc, d
 
 	// Organize: automatic arrivals with a matching extension move into their
 	// group folder now that the final name is known. Manual tasks skip this —
-	// the user already placed them. A failed move keeps the file where it
-	// landed and only logs: the download itself succeeded.
+	// the user already placed them.
 	// (cfg is the settings snapshot taken above for the engine options.)
 	if !manual && cfg.OrganizeEnabled {
 		if dst := organizeTarget(cfg.OrganizeGroups,
 			cfg.OrganizeDir, name); dst != "" && dst != res.Path {
-			if err := moveIntoPlace(res.Path, dst); err != nil {
+			if dst, err := moveIntoPlace(res.Path, dst); err != nil {
+				// Surfaced on the task, not just the log: the download
+				// itself succeeded, so the task stays completed — but a
+				// log-only failure left users hunting a file that was never
+				// where the UI said it was.
+				t.mu.Lock()
+				if t.generation == gen {
+					t.view.Error = "整理失败，已保留在原位置：" + err.Error()
+				}
+				t.mu.Unlock()
 				m.app.debugLog("organize %s: %v", res.Path, err)
 			} else {
 				t.mu.Lock()
@@ -1602,15 +1739,73 @@ func (m *Manager) run(t *task, ctx context.Context, cancel context.CancelFunc, d
 	_ = m.saveTasks()
 }
 
-// moveIntoPlace moves a finished file into its group folder. Source and
-// destination always share a volume (one is inside the other's directory),
-// so MkdirAll plus Rename is atomic and sufficient — no cross-volume copy
-// path is needed.
-func moveIntoPlace(src, dst string) error {
+// moveIntoPlace moves a finished file into its group folder and returns the
+// path it landed at. A Rename is tried first; when source and destination
+// turn out to be on different volumes (a picked group Dir on another drive)
+// it falls back to copy+remove. An occupied destination is never overwritten:
+// the name grows a " (1)" suffix until it is free.
+func moveIntoPlace(src, dst string) (string, error) {
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return "", err
+	}
+	dst = uniqueDest(dst)
+	// Any rename failure falls through to the copy below — cross-volume
+	// (EXDEV / Windows syscall error) or otherwise. A successful copy+remove
+	// leaves the same end state a rename would have, so classifying the errno
+	// buys nothing.
+	if err := os.Rename(src, dst); err == nil {
+		return dst, nil
+	}
+	if err := copyFile(src, dst); err != nil {
+		return "", err
+	}
+	if err := os.Remove(src); err != nil {
+		// The bytes are safe at dst; report the leftover rather than failing.
+		return dst, fmt.Errorf("已复制到 %s，但源文件删除失败：%v", dst, err)
+	}
+	return dst, nil
+}
+
+// uniqueDest appends " (n)" before the extension until the path is free.
+// A non-NotExist stat error (permissions, transient I/O) is treated as
+// "occupied" so an unreadable file is never silently overwritten; the loop is
+// capped so a persistently failing stat cannot spin forever — the caller
+// surfaces the resulting rename/copy error on the task.
+func uniqueDest(dst string) string {
+	if _, err := os.Stat(dst); os.IsNotExist(err) {
+		return dst
+	}
+	ext := filepath.Ext(dst)
+	base := strings.TrimSuffix(dst, ext)
+	cand := dst
+	for i := 1; i <= 10000; i++ {
+		cand = fmt.Sprintf("%s (%d)%s", base, i, ext)
+		if _, err := os.Stat(cand); os.IsNotExist(err) {
+			return cand
+		}
+	}
+	return cand
+}
+
+// copyFile duplicates src to dst, flushing before returning so the caller can
+// remove the source knowing the bytes are stable.
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
 		return err
 	}
-	return os.Rename(src, dst)
+	defer in.Close()
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		_ = out.Close()
+		return err
+	}
+	// Best effort on Windows, same rationale as saveTasks.
+	_ = out.Sync()
+	return out.Close()
 }
 
 // fail records a task failure with a message meant for a human.
@@ -1712,6 +1907,23 @@ func (m *Manager) Stats() map[string]int64 {
 	return out
 }
 
+// persistedTask is the on-disk form of a task: the TaskView the UI shows plus
+// the creation-time fields the view does not carry. The view alone used to be
+// persisted, so manual placement, referer, cookie and userAgent were silently
+// dropped on every restart — a resumed download then arrived without the
+// credentials it started with.
+//
+// NOTE: cookie is stored in PLAINTEXT in tasks.json (it must be replayable
+// verbatim on resume). Anyone with read access to the data directory can lift
+// the browser session it came from.
+type persistedTask struct {
+	TaskView
+	Manual    bool   `json:"manual"`
+	Referer   string `json:"referer,omitempty"`
+	Cookie    string `json:"cookie,omitempty"`
+	UserAgent string `json:"userAgent,omitempty"`
+}
+
 // saveTasks writes the task index so the list survives a restart.
 //
 // The engine's sidecar beside each partial file stays the source of truth for
@@ -1728,19 +1940,61 @@ func (m *Manager) saveTasks() error {
 	}
 	m.mu.Unlock()
 
+	// Serialised against concurrent settlers; m.mu is not held across it.
+	m.saveMu.Lock()
+	defer m.saveMu.Unlock()
+
 	path := filepath.Join(m.app.dataDir(), "tasks.json")
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	b, err := json.MarshalIndent(m.List(), "", "  ")
+	b, err := json.MarshalIndent(m.persistedList(), "", "  ")
 	if err != nil {
 		return err
 	}
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o644); err != nil {
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(b); err != nil {
+		_ = f.Close()
+		return err
+	}
+	// Flush to stable storage before the rename, so a crash cannot leave a
+	// truncated tasks.json behind. Best effort on Windows: Sync is honoured
+	// where the OS supports it.
+	_ = f.Sync()
+	if err := f.Close(); err != nil {
 		return err
 	}
 	return os.Rename(tmp, path)
+}
+
+// persistedList snapshots every task into its on-disk form.
+func (m *Manager) persistedList() []persistedTask {
+	m.mu.Lock()
+	ids := append([]string(nil), m.order...)
+	m.mu.Unlock()
+
+	out := make([]persistedTask, 0, len(ids))
+	for _, id := range ids {
+		t := m.get(id)
+		if t == nil {
+			continue
+		}
+		t.mu.Lock()
+		out = append(out, persistedTask{
+			TaskView:  t.view,
+			Manual:    t.manual,
+			Referer:   t.referer,
+			Cookie:    t.cookie,
+			UserAgent: t.userAgent,
+		})
+		t.mu.Unlock()
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Created > out[j].Created })
+	return out
 }
 
 // batch runs fn with index writes coalesced: every saveTasks inside only
@@ -1772,32 +2026,76 @@ func (m *Manager) batch(fn func()) {
 // bytes are still on disk, but nothing is running, so "paused" is the only
 // honest status to report.
 func (m *Manager) loadTasks() {
-	b, err := os.ReadFile(filepath.Join(m.app.dataDir(), "tasks.json"))
+	dir := m.app.dataDir()
+	path := filepath.Join(dir, "tasks.json")
+	b, err := os.ReadFile(path)
 	if err != nil {
 		return
 	}
-	var list []TaskView
+	var list []persistedTask
 	if err := json.Unmarshal(b, &list); err != nil {
+		// Keep the evidence: a corrupt index is renamed aside (never deleted)
+		// so the failure stays diagnosable, and the app starts empty rather
+		// than refusing to start.
+		kept := fmt.Sprintf("tasks.json.corrupt-%s", time.Now().Format("20060102-150405.000"))
+		_ = os.Rename(path, filepath.Join(dir, kept))
+		m.app.debugLog("tasks.json corrupt (%v), moved to %s", err, kept)
+		m.app.emit("tasks:corrupt", kept)
 		return
 	}
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	seen := map[string]bool{}
 	for i := range list {
-		v := list[i]
+		p := list[i]
+		v := p.TaskView
+		if v.ID == "" || seen[v.ID] {
+			m.app.debugLog("tasks.json: skipping duplicate/empty id %q", v.ID)
+			continue
+		}
+		seen[v.ID] = true
 		if v.Status == StatusDownloading || v.Status == StatusQueued {
 			v.Status = StatusPaused
 		}
 		v.Speed, v.ETA = 0, 0
-		// A completed task whose file has since been moved or deleted must not
-		// keep claiming to be complete.
+		// A completed task whose file has since vanished must not keep
+		// claiming to be complete. Only a missing file flips it: any other
+		// stat error (permissions, transient I/O) leaves the record alone,
+		// so a flaky disk cannot mass-fail the library.
 		if v.Status == StatusCompleted {
-			if _, statErr := os.Stat(v.Dest); statErr != nil {
+			if _, statErr := os.Stat(v.Dest); os.IsNotExist(statErr) {
 				v.Status = StatusFailed
 				v.Error = "文件已被移动或删除"
 			}
 		}
-		m.tasks[v.ID] = &task{view: v}
+		m.tasks[v.ID] = &task{
+			view:      v,
+			manual:    p.Manual,
+			referer:   p.Referer,
+			cookie:    p.Cookie,
+			userAgent: p.UserAgent,
+		}
 		m.order = append(m.order, v.ID)
+		// Re-seed the id counter past anything on disk: ids are
+		// t<millis>-<seq>, and a counter reset to zero would eventually mint
+		// a colliding id for a task created in the same millisecond.
+		if n, ok := parseTaskSeq(v.ID); ok && n > m.seq {
+			m.seq = n
+		}
 	}
+}
+
+// parseTaskSeq extracts the sequence suffix from an id of the form
+// t<millis>-<seq> minted by Start.
+func parseTaskSeq(id string) (int64, bool) {
+	i := strings.LastIndex(id, "-")
+	if i < 0 || !strings.HasPrefix(id, "t") {
+		return 0, false
+	}
+	n, err := strconv.ParseInt(strings.TrimSpace(id[i+1:]), 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return n, true
 }
