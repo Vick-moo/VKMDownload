@@ -132,6 +132,12 @@ type Config struct {
 	// posture, and turning a hard requirement on silently would cut off an
 	// extension that does not know the token yet.
 	ApiAuthRequired bool `json:"apiAuthRequired"`
+	// VerifyPeerProcess, when true, makes the loopback endpoint confirm the
+	// calling process is a genuine signed browser (see peercheck.go) before
+	// honouring a request. On by default: unlike the token it needs no
+	// setup, and it closes the forged-Origin hole for everything except an
+	// attacker already injected into the browser itself.
+	VerifyPeerProcess bool `json:"verifyPeerProcess"`
 }
 
 // OrganizeGroup maps filename extensions (without the dot, any case) to one
@@ -182,6 +188,7 @@ func DefaultConfig() Config {
 		ExtensionEnabled:   true,
 		ExtensionMinSizeKB: 1024,
 		ExtensionSkipHosts: "",
+		VerifyPeerProcess:  true,
 
 		// Off by default: sorting is a surprise until the user asks for it.
 		OrganizeEnabled: false,

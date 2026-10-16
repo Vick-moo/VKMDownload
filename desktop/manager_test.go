@@ -28,6 +28,9 @@ func newTestApp(t *testing.T) *App {
 	dir := t.TempDir()
 
 	a := NewAppWithDataDir(filepath.Join(dir, "config"))
+	// Tests speak loopback HTTP directly; they are not browsers, so the
+	// peer check stays off unless a test enables it explicitly.
+	a.cfg.VerifyPeerProcess = false
 	// The manager emits events through the app's emitter. Without a window the
 	// real one would abort the process, so it is replaced with a no-op; the
 	// download path being exercised is otherwise identical.

@@ -412,6 +412,16 @@
   merged, section 6 covers extension + release flow, handover order fixed.
 - CHANGES TODO deduped. update_test.go: offline-silence + allowlist tests.
 
+### 44. Peer process verification (UNRELEASED, default on)
+- Loopback now confirms the caller is a genuine signed browser (TCP owner
+  PID + exe allowlist + Authenticode, cached per exe) before honoring /add
+  and /settings. Forged Origin curl is rejected; failures logged with exe.
+- Settings switch (top of extension section) with ms cost in the hint
+  (~1ms per download, ~300ms once per new browser exe). Reads live config:
+  toggle applies instantly, no restart. Lookup infra failures fail open.
+- 8 new tests (allowlist, admit/reject/signature/fail-open, end-to-end
+  200/403, cache, real-sig manual-only after a Defender false positive).
+
 ## TODO (user requested, work later)
 
 - Detached ask-location popup WITHOUT v3 migration (backup plan).

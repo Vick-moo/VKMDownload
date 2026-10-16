@@ -18,7 +18,7 @@ interface Props {
  * generated TS model has not been regenerated yet, so it is declared here so
  * the switch survives until save and travels with the SetConfig payload.
  */
-type Draft = Config & { apiAuthRequired?: boolean };
+type Draft = Config & { apiAuthRequired?: boolean; verifyPeerProcess?: boolean };
 
 /** A labelled switch row. */
 function Switch({
@@ -783,6 +783,14 @@ export function SettingsPage({
           hint="总开关。关闭后浏览器恢复自己下载，扩展仍然装着但不再拦截。"
           checked={draft.extensionEnabled}
           onChange={(v) => patch({ extensionEnabled: v })}
+        />
+
+        <Switch
+          title="验证浏览器身份"
+          hint="开着时，每次接管先确认对方是正版签名的浏览器，不是冒充的程序。默认开；每次下载约多花 1 毫秒（首次认出某个浏览器时约 300 毫秒，只一次）。改完立刻生效，不用重启。关了就是秒接，但本机任何程序都能冒充扩展下发任务。"
+          checked={draft.verifyPeerProcess ?? true}
+          disabled={!draft.extensionEnabled}
+          onChange={(v) => patch({ verifyPeerProcess: v })}
         />
 
         <label className="setting">

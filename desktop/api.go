@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -135,6 +136,15 @@ func (a *App) apiGuard(next http.Handler) http.Handler {
 			http.Error(w, "missing or invalid api token", http.StatusUnauthorized)
 			return
 		}
+		// Peer verification likewise reads its switch live, so toggling it
+		// applies to the very next download with no restart.
+		if a.peerCheckRequired() {
+			if ok, exe := a.checkPeerProcess(r); !ok {
+				http.Error(w, "caller is not a recognized browser"+exeSuffix(exe),
+					http.StatusForbidden)
+				return
+			}
+		}
 		next.ServeHTTP(w, r)
 	})
 }
@@ -171,6 +181,15 @@ func subtleCompare(a, b string) bool {
 		return false
 	}
 	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
+}
+
+// exeSuffix names the rejected caller for the user, so a legitimate new
+// browser only needs its exe name reported once to earn an allowlist entry.
+func exeSuffix(exe string) string {
+	if exe == "" {
+		return ""
+	}
+	return " (" + filepath.Base(exe) + ")"
 }
 
 // apiPing lets the extension find the app without guessing.

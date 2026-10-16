@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -627,4 +628,166 @@ func TestDebugLogConcurrent(t *testing.T) {
 		}(i)
 	}
 	wg.Wait()
+}
+
+// stubPeer swaps the OS-touching peer primitives for fakes. Fake exe paths
+// never exist on disk, so the trust cache always misses and the stubbed
+// verdict is used.
+func stubPeer(t *testing.T, exe string, trust bool, tableErr error) {
+	t.Helper()
+	oldTable, oldImage, oldTrust := tcpOwnerOfPort, processImageOf, verifyTrustOf
+	tcpOwnerOfPort = func(uint16) (uint32, error) { return 4242, tableErr }
+	processImageOf = func(uint32) (string, error) { return exe, nil }
+	verifyTrustOf = func(string) bool { return trust }
+	t.Cleanup(func() { tcpOwnerOfPort, processImageOf, verifyTrustOf = oldTable, oldImage, oldTrust })
+}
+
+func peerReq() *http.Request {
+	return &http.Request{RemoteAddr: "127.0.0.1:54321"}
+}
+
+func TestPeerCheckDefaultOn(t *testing.T) {
+	if !DefaultConfig().VerifyPeerProcess {
+		t.Fatal("VerifyPeerProcess must default on")
+	}
+}
+
+func TestPeerAllowlistTable(t *testing.T) {
+	for _, exe := range []string{"brave.exe", "chrome.exe", "msedge.exe", "opera.exe", "vivaldi.exe", "msedge_beta.exe"} {
+		if !allowedBrowserExes[exe] {
+			t.Errorf("%s should be allowed", exe)
+		}
+	}
+	for _, exe := range []string{"curl.exe", "notepad.exe", "python.exe", "chrome-updater.exe"} {
+		if allowedBrowserExes[exe] {
+			t.Errorf("%s should not be allowed", exe)
+		}
+	}
+}
+
+func TestPeerCheckAdmitsSignedBrowser(t *testing.T) {
+	app := newTestApp(t)
+	stubPeer(t, `C:\fakepair-vkm\brave.exe`, true, nil)
+	ok, detail := app.checkPeerProcess(peerReq())
+	if !ok || detail != "" {
+		t.Fatalf("brave+trusted = %v %q, want true", ok, detail)
+	}
+}
+
+func TestPeerCheckRejectsUnknownExe(t *testing.T) {
+	app := newTestApp(t)
+	stubPeer(t, `C:\fakepair-vkm\curl.exe`, true, nil)
+	ok, detail := app.checkPeerProcess(peerReq())
+	if ok {
+		t.Fatal("curl.exe must be rejected")
+	}
+	if detail == "" {
+		t.Fatal("rejection should name the exe")
+	}
+}
+
+func TestPeerCheckRejectsBadSignature(t *testing.T) {
+	app := newTestApp(t)
+	stubPeer(t, `C:\fakepair-vkm\brave.exe`, false, nil)
+	if ok, _ := app.checkPeerProcess(peerReq()); ok {
+		t.Fatal("untrusted brave.exe must be rejected")
+	}
+}
+
+func TestPeerCheckFailOpenOnLookupError(t *testing.T) {
+	app := newTestApp(t)
+	stubPeer(t, "", false, errPeerCheckUnsupported)
+	if ok, _ := app.checkPeerProcess(peerReq()); !ok {
+		t.Fatal("infrastructure failure must fail open, not lock the user out")
+	}
+}
+
+func TestPeerGuardEndToEnd(t *testing.T) {
+	app := newTestApp(t)
+	app.cfg.VerifyPeerProcess = true
+	base := startAPI(t, app)
+
+	stubPeer(t, `C:\fakepair-vkm\chrome.exe`, true, nil)
+	resp := postJSON(t, base+"/add", "chrome-extension://abc", `{"url":"http://127.0.0.1:1/peer.bin"}`)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("signed browser got %d, want 200", resp.StatusCode)
+	}
+
+	stubPeer(t, `C:\fakepair-vkm\curl.exe`, true, nil)
+	resp = postJSON(t, base+"/add", "chrome-extension://abc", `{"url":"http://127.0.0.1:1/peer2.bin"}`)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("curl.exe got %d, want 403", resp.StatusCode)
+	}
+}
+
+func TestVerifyFileTrustReal(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Authenticode only exists on Windows")
+	}
+	// Manual-only: calling WinVerifyTrust from a fresh unsigned test binary
+	// trips Defender SmartScreen (seen 2026-10-16: two block dialogs).
+	// Run with VKMDOWNLOAD_MANUAL_SIGTEST=1 when needed.
+	if os.Getenv("VKMDOWNLOAD_MANUAL_SIGTEST") == "" {
+		t.Skip("set VKMDOWNLOAD_MANUAL_SIGTEST=1 to run")
+	}
+	notepad := filepath.Join(os.Getenv("SystemRoot"), "System32", "notepad.exe")
+	if _, err := os.Stat(notepad); err != nil {
+		t.Skip("no notepad to verify against")
+	}
+	if !verifyFileTrust(notepad) {
+		t.Fatal("Microsoft-signed notepad.exe must verify")
+	}
+	if verifyFileTrust(filepath.Join(t.TempDir(), "nope.exe")) {
+		t.Fatal("missing file must not verify")
+	}
+}
+
+func TestPeerTrustCacheHonored(t *testing.T) {
+	app := newTestApp(t)
+	// A real file named like an allowed browser, so the cache (keyed on
+	// mtime+size) engages. None of this exists outside the temp dir.
+	exe := filepath.Join(t.TempDir(), "brave.exe")
+	if err := os.WriteFile(exe, []byte("v1"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	oldTable, oldImage, oldTrust := tcpOwnerOfPort, processImageOf, verifyTrustOf
+	tcpOwnerOfPort = func(uint16) (uint32, error) { return 4242, nil }
+	processImageOf = func(uint32) (string, error) { return exe, nil }
+	verifyTrustOf = func(string) bool { return true }
+	t.Cleanup(func() { tcpOwnerOfPort, processImageOf, verifyTrustOf = oldTable, oldImage, oldTrust })
+	if ok, _ := app.checkPeerProcess(peerReq()); !ok {
+		t.Fatal("trusted brave.exe must pass and populate the cache")
+	}
+	// Flip the stub: a cache hit must still admit without consulting it.
+	// Fresh .exe files in Temp may be briefly unreadable while Defender
+	// scans them, so poll for the warm cache instead of asserting at once.
+	consulted := false
+	verifyTrustOf = func(string) bool {
+		consulted = true
+		return false
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		consulted = false
+		ok, _ := app.checkPeerProcess(peerReq())
+		if !ok {
+			t.Fatal("warm cache must admit")
+		}
+		if !consulted {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("cache never warmed: verifier consulted every time")
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	// Change the file: mtime/size key breaks, the (now false) stub rules.
+	if err := os.WriteFile(exe, []byte("v2-longer"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if ok, _ := app.checkPeerProcess(peerReq()); ok {
+		t.Fatal("changed binary must re-verify")
+	}
 }
