@@ -30,6 +30,13 @@
       color: #7ba9ff; font: inherit; font-weight: 600;
     }
     button:hover { background: rgba(76, 141, 255, 0.14); }
+    .pair { display: flex; gap: 6px; margin-top: 10px; }
+    .pair input {
+      flex: 1; min-width: 0; padding: 7px 9px; border-radius: 8px;
+      border: 1px solid #262c3a; background: #14171f;
+      color: #e6e9f0; font: inherit; font-size: 12px;
+    }
+    .pair button { width: auto; padding: 7px 12px; white-space: nowrap; }
     .hint { margin: 10px 0 0; font-size: 11px; color: #7c8699; }
   </style>
 </head>
@@ -45,6 +52,11 @@
   </div>
 
   <button id="toggle" type="button">…</button>
+
+  <div class="pair">
+    <input id="token" type="password" placeholder="配对 token（App 设置→浏览器配对）" autocomplete="off" />
+    <button id="saveToken" type="button">保存</button>
+  </div>
 
   <p class="hint" id="hint"></p>
 

@@ -9,6 +9,15 @@ const dot = document.getElementById("dot");
 const state = document.getElementById("state");
 const toggle = document.getElementById("toggle");
 const hint = document.getElementById("hint");
+const tokenInput = document.getElementById("token");
+const saveToken = document.getElementById("saveToken");
+
+/**
+ * The last minSizeKb the app reported, so the optimistic repaint after a
+ * toggle keeps showing the real limit instead of a hard-coded 0 ("take
+ * everything") until the fresh status answer arrives.
+ */
+let lastMinSizeKb = 0;
 
 /** Paints one state, so the places that report it agree. */
 function render(status, enabled) {
@@ -18,6 +27,8 @@ function render(status, enabled) {
 
   toggle.disabled = !running;
   toggle.textContent = enabled ? "暂停接管下载" : "恢复接管下载";
+
+  if (typeof status.minSizeKb === "number") lastMinSizeKb = status.minSizeKb;
 
   if (!running) {
     hint.textContent = "启动 VKMDownload 后，下载会交给它。";
@@ -31,15 +42,31 @@ function render(status, enabled) {
   }
 }
 
+/** The pairing failure text the background forwards (see PAIR_HINT there). */
+function showPairError(result) {
+  if (result && result.pairError) {
+    hint.textContent = result.error || "配对失败：去 App 设置→浏览器配对复制 token";
+    return true;
+  }
+  return false;
+}
+
 async function refresh() {
   try {
     const status = await chrome.runtime.sendMessage("status");
     if (!status) throw new Error("no response");
+    if (showPairError(status)) return;
     render(status, status.enabled);
   } catch {
     dot.className = "dot dot--off";
     state.textContent = "无法联系扩展后台";
     toggle.disabled = true;
+  }
+  try {
+    const got = await chrome.storage.local.get("apiToken");
+    if (got && typeof got.apiToken === "string") tokenInput.value = got.apiToken;
+  } catch {
+    // Storage unavailable: the pairing box simply stays empty.
   }
 }
 
@@ -51,8 +78,26 @@ toggle.addEventListener("click", async () => {
     void refresh();
     return;
   }
-  render({ running: true, minSizeKb: 0 }, result.enabled);
+  if (showPairError(result)) {
+    toggle.disabled = false;
+    return;
+  }
+  render({ running: true, minSizeKb: lastMinSizeKb }, result.enabled);
   void refresh();
+});
+
+saveToken.addEventListener("click", async () => {
+  const token = (tokenInput.value || "").trim();
+  try {
+    if (token) {
+      await chrome.storage.local.set({ apiToken: token });
+    } else {
+      await chrome.storage.local.remove("apiToken");
+    }
+    hint.textContent = token ? "配对 token 已保存。" : "已清除配对 token（恢复免配对模式）。";
+  } catch {
+    hint.textContent = "保存失败：扩展存储不可用。";
+  }
 });
 
 void refresh();
