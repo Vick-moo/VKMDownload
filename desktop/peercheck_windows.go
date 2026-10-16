@@ -95,11 +95,16 @@ func verifyFileTrust(path string) bool {
 	}
 	type wintrustData struct {
 		cbStruct         uint32
+		_                uint32 // pad: pointers below need 8-alignment
+		policyCallback   unsafe.Pointer
+		sipClientData    unsafe.Pointer
 		uiChoice         uint32
 		revocationChecks uint32
 		unionChoice      uint32
+		_2               uint32 // pad: union holds a pointer
 		fileOrCatOrBlob  unsafe.Pointer
 		stateAction      uint32
+		_3               uint32 // pad: HANDLE below
 		stateData        syscall.Handle
 		urlReference     *uint16
 		provFlags        uint32
@@ -107,7 +112,7 @@ func verifyFileTrust(path string) bool {
 	}
 	var fiSizeCheck fileInfo
 	var wdSizeCheck wintrustData
-	if unsafe.Sizeof(fiSizeCheck) != 32 || unsafe.Sizeof(wdSizeCheck) != 56 {
+	if unsafe.Sizeof(fiSizeCheck) != 32 || unsafe.Sizeof(wdSizeCheck) != 80 {
 		return false
 	}
 	fi := fileInfo{filePath: path16}
