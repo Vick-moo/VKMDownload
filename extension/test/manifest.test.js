@@ -12,10 +12,10 @@ const manifest = JSON.parse(
 );
 
 describe("manifest", () => {
-  it("declares exactly the four permissions the code uses", () => {
+  it("declares exactly the five permissions the code uses", () => {
     assert.deepEqual(
       [...manifest.permissions].sort(),
-      ["contextMenus", "cookies", "downloads", "notifications"],
+      ["contextMenus", "cookies", "downloads", "notifications", "storage"],
     );
   });
 

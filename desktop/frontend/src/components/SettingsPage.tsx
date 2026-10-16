@@ -837,8 +837,16 @@ export function SettingsPage({
         <h4 className="settings-subsection__title">浏览器配对</h4>
 
         <p className="settings-section__note">
-          扩展填入这里的口令后才能接管下载。口令默认掩码显示；重新生成后旧口令立即失效，已配对的扩展需要重新填写。
+          给 App 和扩展之间加一道口令，防本机其他程序乱发下载任务。默认关闭，不填口令也能用；打开后扩展必须填入口令才能接管。
         </p>
+
+        <Switch
+          title="要求扩展配对"
+          hint="打开后，扩展每次连接都必须带口令；关着时不填也能用。"
+          checked={!!draft.apiAuthRequired}
+          disabled={!draft.extensionEnabled}
+          onChange={(v) => patch({ apiAuthRequired: v })}
+        />
 
         <div className="setting">
           <span className="setting__text">
@@ -880,13 +888,6 @@ export function SettingsPage({
           </span>
         </div>
 
-        <Switch
-          title="要求扩展配对"
-          hint="开启后扩展每次连接都必须携带配对口令。对应后端 ApiAuthRequired，随设置一起保存。"
-          checked={!!draft.apiAuthRequired}
-          disabled={!draft.extensionEnabled}
-          onChange={(v) => patch({ apiAuthRequired: v })}
-        />
       </section>
 
       <section className="settings-section" hidden={tab !== "计划下载"}>

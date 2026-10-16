@@ -11,6 +11,14 @@ const toggle = document.getElementById("toggle");
 const hint = document.getElementById("hint");
 const tokenInput = document.getElementById("token");
 const saveToken = document.getElementById("saveToken");
+const pairStatus = document.getElementById("pairStatus");
+const ver = document.getElementById("ver");
+
+/** Shows whether a pairing token is stored: the feature's on/off signal. */
+function paintPair(paired) {
+  pairStatus.textContent = paired ? "已配对" : "未配对（免配对模式）";
+  pairStatus.className = `pair-status${paired ? "" : " pair-status--off"}`;
+}
 
 /**
  * The last minSizeKb the app reported, so the optimistic repaint after a
@@ -64,9 +72,16 @@ async function refresh() {
   }
   try {
     const got = await chrome.storage.local.get("apiToken");
-    if (got && typeof got.apiToken === "string") tokenInput.value = got.apiToken;
+    const paired = Boolean(got && typeof got.apiToken === "string" && got.apiToken);
+    if (paired) tokenInput.value = got.apiToken;
+    paintPair(paired);
   } catch {
     // Storage unavailable: the pairing box simply stays empty.
+  }
+  try {
+    ver.textContent = `扩展 v${chrome.runtime.getManifest().version}`;
+  } catch {
+    // Unbranded contexts (tests): leave the version line blank.
   }
 }
 
@@ -95,6 +110,7 @@ saveToken.addEventListener("click", async () => {
       await chrome.storage.local.remove("apiToken");
     }
     hint.textContent = token ? "配对 token 已保存。" : "已清除配对 token（恢复免配对模式）。";
+    paintPair(Boolean(token));
   } catch {
     hint.textContent = "保存失败：扩展存储不可用。";
   }

@@ -13,6 +13,7 @@ download them itself.
 | Download URL, file name, referrer | To start the download in the desktop app | `http://127.0.0.1` (your own machine only) |
 | Browser cookies for the download URL | Some hosts require a login; without the browser's cookies the desktop app looks like a stranger and gets rejected | `http://127.0.0.1` (your own machine only) |
 | Browser user-agent string | Some hosts/WAFs refuse non-browser clients | `http://127.0.0.1` (your own machine only) |
+| Pairing token (only if you enable pairing) | Proves the handover comes from your own extension | Extension's own local storage only, never leaves the machine |
 
 ## What it does NOT do
 
