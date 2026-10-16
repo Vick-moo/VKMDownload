@@ -152,38 +152,6 @@ async function findApp() {
   return null;
 }
 
-/** The pairing token the user copied from the app, or "" when unpaired. */
-async function apiToken() {
-  try {
-    if (
-      typeof chrome !== "undefined" &&
-      chrome.storage &&
-      chrome.storage.local
-    ) {
-      const got = await chrome.storage.local.get("apiToken");
-      const token = got && got.apiToken;
-      return typeof token === "string" ? token.trim() : "";
-    }
-  } catch {
-    // Storage unavailable: stay unauthenticated (backward compatible).
-  }
-  return "";
-}
-
-/**
- * The Authorization header for app mutations, or nothing when unpaired.
- *
- * No token means no header, so an app that knows no pairing keeps working
- * exactly as before.
- */
-async function authHeaders() {
-  const token = await apiToken();
-  return token ? { Authorization: `Bearer ${token}` } : {};
-}
-
-/** Shown whenever the app answers 401/403 to a paired request. */
-const PAIR_HINT = "配对失败：去 App 设置→浏览器配对复制 token";
-
 /** Hands one download to the app. */
 async function handOver(payload) {
   const base = await findApp();
@@ -194,13 +162,16 @@ async function handOver(payload) {
   try {
     const response = await fetch(`${base}/add`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", ...(await authHeaders()) },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
     const body = await response.json().catch(() => ({}));
 
-    if (response.status === 401 || response.status === 403) {
-      return { ok: false, pairError: true, error: body.error || PAIR_HINT };
+    // The app's peer check can refuse even a well-formed handover (unknown
+    // caller): surface its reason verbatim instead of the generic
+    // "not running" line.
+    if (response.status === 403) {
+      return { ok: false, refused: true, error: body.error || "HTTP 403" };
     }
     if (!response.ok) {
       return { ok: false, error: body.error || `HTTP ${response.status}` };
@@ -253,7 +224,7 @@ function report(result, fallbackName) {
     title: succeeded ? "已交给 VKMDownload" : "VKMDownload 没有响应",
     message: succeeded
       ? fallbackName || result.name || "已加入下载队列"
-      : result.pairError
+      : result.refused
         ? result.error
         : `${result.error} · 请先启动 VKMDownload`,
     priority: succeeded ? 0 : 2,
@@ -587,14 +558,12 @@ if (
         try {
           const response = await fetch(`${base}/settings`, {
             method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              ...(await authHeaders()),
-            },
+            headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ enabled }),
           });
-          if (response.status === 401 || response.status === 403) {
-            sendResponse({ pairError: true, error: PAIR_HINT });
+          if (response.status === 403) {
+            const body = await response.json().catch(() => ({}));
+            sendResponse({ refused: true, error: body.error || "HTTP 403" });
             return;
           }
           if (!response.ok) {
@@ -633,10 +602,8 @@ if (typeof globalThis !== "undefined") {
       pickUrl,
       handOver,
       getPolicy,
-      apiToken,
       trackOwn,
       ownDownloads,
-      PAIR_HINT,
       resetForTest() {
         apiBase = null;
         policyCache = { at: 0, value: null };

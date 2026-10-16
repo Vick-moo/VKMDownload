@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -93,11 +92,11 @@ func (a *App) startLocalAPI(ctx context.Context) {
 // apiGuard rejects callers that are not browser extensions and answers the
 // preflight requests that follow from that.
 //
-// When the loopback credential is enforced (ApiAuthRequired), every
-// non-preflight request must also carry Authorization: Bearer <ApiToken>.
-// The token is shown in the app's settings so the user can hand it to the
-// extension; without it, anything else on the machine that can speak HTTP
-// could drive the endpoint once past the Origin check.
+// When the loopback peer check is enforced (VerifyPeerProcess), every
+// non-preflight request must come from a genuine signed browser process.
+// The Origin header alone is self-reported and costs an attacker nothing to
+// forge; without the peer check, anything else on the machine that can speak
+// HTTP could drive the endpoint once past it.
 func (a *App) apiGuard(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
@@ -129,13 +128,6 @@ func (a *App) apiGuard(next http.Handler) http.Handler {
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
-		// Bearer enforcement lives behind the switch: off keeps the
-		// historical posture (loopback + Origin check), on requires the
-		// token on every real request.
-		if a.apiAuthRequired() && !a.checkApiToken(r) {
-			http.Error(w, "missing or invalid api token", http.StatusUnauthorized)
-			return
-		}
 		// Peer verification likewise reads its switch live, so toggling it
 		// applies to the very next download with no restart.
 		if a.peerCheckRequired() {
@@ -147,40 +139,6 @@ func (a *App) apiGuard(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
-}
-
-// apiAuthRequired reports whether the loopback credential is enforced.
-func (a *App) apiAuthRequired() bool {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return a.cfg.ApiAuthRequired && a.cfg.ApiToken != ""
-}
-
-// checkApiToken compares the request's Authorization header against the
-// configured token with a constant-time compare.
-func (a *App) checkApiToken(r *http.Request) bool {
-	const prefix = "Bearer "
-	got := r.Header.Get("Authorization")
-	if len(got) <= len(prefix) || got[:len(prefix)] != prefix {
-		return false
-	}
-	a.mu.Lock()
-	want := a.cfg.ApiToken
-	a.mu.Unlock()
-	if want == "" {
-		return false
-	}
-	return subtleCompare(got[len(prefix):], want)
-}
-
-// subtleCompare is a length-revealing constant-time string comparison: a
-// plain == bails on the first differing byte, which leaks the token
-// prefix-by-prefix to timing.
-func subtleCompare(a, b string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
 }
 
 // exeSuffix names the rejected caller for the user, so a legitimate new

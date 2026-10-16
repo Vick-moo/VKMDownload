@@ -1,8 +1,6 @@
 package main
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -123,15 +121,6 @@ type Config struct {
 	ResumeFlushByTime bool `json:"resumeFlushByTime"`
 	ResumeFlushByPct  bool `json:"resumeFlushByPct"`
 
-	// ApiToken is the bearer credential the browser extension presents to the
-	// loopback endpoint. Generated randomly on first start and persisted.
-	ApiToken string `json:"apiToken"`
-	// ApiAuthRequired, when true, makes the loopback endpoint reject every
-	// non-preflight request without a matching Authorization header. Off by
-	// default: loopback plus the extension-Origin check is the historical
-	// posture, and turning a hard requirement on silently would cut off an
-	// extension that does not know the token yet.
-	ApiAuthRequired bool `json:"apiAuthRequired"`
 	// VerifyPeerProcess, when true, makes the loopback endpoint confirm the
 	// calling process is a genuine signed browser (see peercheck.go) before
 	// honouring a request. On by default: unlike the token it needs no
@@ -302,33 +291,6 @@ func (c *Config) normalize() {
 			c.ResumeFlushMs = 250
 		}
 	}
-	c.ApiToken = strings.TrimSpace(c.ApiToken)
-	// ApiAuthRequired defaults to false via the zero value; no clamp needed.
-}
-
-// newApiToken mints a random 256-bit bearer token for the loopback endpoint.
-func newApiToken() string {
-	var b [32]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		// randomness failure must not leave the token empty-but-valid;
-		// callers treat "" as "no credential configured".
-		return ""
-	}
-	return hex.EncodeToString(b[:])
-}
-
-// ensureApiToken fills in a missing token. Called on startup and on every
-// read path that hands the token out, so an old config from before the field
-// existed converges without user action.
-func ensureApiToken(cfg *Config) bool {
-	if strings.TrimSpace(cfg.ApiToken) != "" {
-		return false
-	}
-	if tok := newApiToken(); tok != "" {
-		cfg.ApiToken = tok
-		return true
-	}
-	return false
 }
 
 // normalizeOrganizeGroups cleans the group table: names are trimmed and must

@@ -3,7 +3,6 @@ import type { JSX } from "react";
 import { main } from "../../wailsjs/go/models";
 import { api } from "../api";
 import type { Config, OrganizeGroup, UpdateStatus } from "../types";
-import { ConfirmDialog } from "./ConfirmDialog";
 import { IconFolder } from "./Icons";
 
 interface Props {
@@ -18,7 +17,7 @@ interface Props {
  * generated TS model has not been regenerated yet, so it is declared here so
  * the switch survives until save and travels with the SetConfig payload.
  */
-type Draft = Config & { apiAuthRequired?: boolean; verifyPeerProcess?: boolean };
+type Draft = Config & { verifyPeerProcess?: boolean };
 
 /** A labelled switch row. */
 function Switch({
@@ -91,47 +90,6 @@ export function SettingsPage({
   const [updBusy, setUpdBusy] = useState(false);
   const pollTimer = useRef<number | null>(null);
 
-  // Browser pairing. The token bindings exist on the backend, but the
-  // generated wailsjs bindings have not been regenerated yet, so they are
-  // reached through the runtime (see api.ts): when they are missing the row
-  // explains instead of breaking.
-  const [apiToken, setApiToken] = useState<string | null>(null);
-  const [tokenShown, setTokenShown] = useState(false);
-  const [tokenMsg, setTokenMsg] = useState("");
-  const [regenOpen, setRegenOpen] = useState(false);
-
-  // Loaded when the tab opens rather than with the page: most visits never
-  // touch pairing, and a backend without the bindings would otherwise print
-  // an error on every entry to settings.
-  useEffect(() => {
-    if (tab !== "浏览器扩展") return;
-    let live = true;
-    setTokenMsg("");
-    void api
-      .getApiToken()
-      .then((t) => {
-        if (live) setApiToken(t);
-      })
-      .catch((e) => {
-        if (live) {
-          setApiToken(null);
-          setTokenMsg(e instanceof Error ? e.message : String(e));
-        }
-      });
-    return () => {
-      live = false;
-    };
-  }, [tab]);
-
-  async function copyToken() {
-    if (!apiToken) return;
-    try {
-      await navigator.clipboard.writeText(apiToken);
-      note("配对口令已复制");
-    } catch {
-      setTokenMsg("复制失败：请手动选中上面的口令复制");
-    }
-  }
 
   useEffect(() => {
     setDraft(config);
@@ -842,59 +800,6 @@ export function SettingsPage({
           />
         </label>
 
-        <h4 className="settings-subsection__title">浏览器配对</h4>
-
-        <p className="settings-section__note">
-          给 App 和扩展之间加一道口令，防本机其他程序乱发下载任务。默认关闭，不填口令也能用；打开后扩展必须填入口令才能接管。
-        </p>
-
-        <Switch
-          title="要求扩展配对"
-          hint="打开后，扩展每次连接都必须带口令；关着时不填也能用。"
-          checked={!!draft.apiAuthRequired}
-          disabled={!draft.extensionEnabled}
-          onChange={(v) => patch({ apiAuthRequired: v })}
-        />
-
-        <div className="setting">
-          <span className="setting__text">
-            <span className="setting__title">配对口令</span>
-            <span className="setting__hint" style={{ wordBreak: "break-all" }}>
-              {tokenMsg ||
-                (apiToken
-                  ? tokenShown
-                    ? apiToken
-                    : "••••••••••"
-                  : "正在获取…")}
-            </span>
-          </span>
-          <span className="field__row" style={{ flex: "0 0 auto" }}>
-            <button
-              type="button"
-              className="btn"
-              disabled={!apiToken}
-              onClick={() => setTokenShown((v) => !v)}
-            >
-              {tokenShown ? "隐藏" : "显示"}
-            </button>
-            <button
-              type="button"
-              className="btn"
-              disabled={!apiToken}
-              onClick={() => void copyToken()}
-            >
-              复制
-            </button>
-            <button
-              type="button"
-              className="btn"
-              disabled={!apiToken}
-              onClick={() => setRegenOpen(true)}
-            >
-              重新生成
-            </button>
-          </span>
-        </div>
 
       </section>
 
@@ -1112,27 +1017,6 @@ export function SettingsPage({
         <p className="settings__version">VKMDownload v{version}</p>
       ) : null}
 
-      {regenOpen ? (
-        <ConfirmDialog
-          title="重新生成配对口令？"
-          message="旧口令会立即失效，已配对的扩展需要重新填写才能继续接管。"
-          confirmLabel="重新生成"
-          onConfirm={() => {
-            setRegenOpen(false);
-            void api
-              .regenerateApiToken()
-              .then((t) => {
-                setApiToken(t);
-                setTokenShown(true);
-                note("配对口令已重新生成，旧口令已失效");
-              })
-              .catch((e) =>
-                setTokenMsg(e instanceof Error ? e.message : String(e)),
-              );
-          }}
-          onCancel={() => setRegenOpen(false)}
-        />
-      ) : null}
     </div>
   );
 }

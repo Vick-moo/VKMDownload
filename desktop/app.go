@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -107,10 +106,6 @@ func (a *App) startup(ctx context.Context) {
 
 	a.mu.Lock()
 	a.cfg = loadConfig(a.configPath())
-	// A config from before the token field has none: mint one now so the
-	// loopback credential always exists on disk, even while enforcement stays
-	// off until the user opts in. The immediate write below persists it.
-	ensureApiToken(&a.cfg)
 	a.mu.Unlock()
 
 	// Write the settings back immediately. A fresh install otherwise has no
@@ -259,44 +254,6 @@ func (a *App) SetConfig(cfg Config) error {
 		a.mgr.pumpQueue()
 	}
 	return nil
-}
-
-// GetApiToken returns the loopback endpoint's bearer credential, minting and
-// persisting one when the config predates the field. The front-end shows it
-// so the user can hand it to the browser extension.
-func (a *App) GetApiToken() string {
-	a.mu.Lock()
-	if ensureApiToken(&a.cfg) {
-		cfgToSave := a.cfg
-		a.mu.Unlock()
-		if err := saveConfig(a.configPath(), cfgToSave); err != nil {
-			a.debugLog("persisting api token: %v", err)
-		}
-		a.mu.Lock()
-		tok := a.cfg.ApiToken
-		a.mu.Unlock()
-		return tok
-	}
-	tok := a.cfg.ApiToken
-	a.mu.Unlock()
-	return tok
-}
-
-// RegenerateApiToken replaces the loopback credential and persists it. The
-// old token stops working at once; the extension must be given the new one.
-func (a *App) RegenerateApiToken() (string, error) {
-	tok := newApiToken()
-	if tok == "" {
-		return "", fmt.Errorf("生成令牌失败，请重试")
-	}
-	a.mu.Lock()
-	a.cfg.ApiToken = tok
-	cfgToSave := a.cfg
-	a.mu.Unlock()
-	if err := saveConfig(a.configPath(), cfgToSave); err != nil {
-		return "", err
-	}
-	return tok, nil
 }
 
 // PickDirectory opens a folder chooser and returns the selection.

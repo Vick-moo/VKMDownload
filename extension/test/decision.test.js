@@ -18,12 +18,11 @@ const ext = globalThis.__vkmExt;
 if (!ext) throw new Error("background.js did not publish __vkmExt hooks");
 
 /** Installs a minimal chrome stub; search/storage behaviour per test. */
-function stubChrome({ token, searchImpl } = {}) {
-  const localData = token === undefined ? {} : { apiToken: token };
+function stubChrome({ searchImpl } = {}) {
   globalThis.chrome = {
     storage: {
       local: {
-        get: async () => ({ ...localData }),
+        get: async () => ({}),
         set: async () => {},
         remove: async () => {},
       },
@@ -166,30 +165,17 @@ describe("handOver", () => {
     assert.deepEqual(result, { ok: true, duplicate: true, name: "f.zip" });
   });
 
-  it("attaches Bearer token when paired, omits it when not", async () => {
-    stubChrome({ token: "secret-token" });
-    let calls = stubFetch({ name: "f.zip" });
-    await ext.handOver({ url: "https://example.com/a.zip" });
-    assert.equal(calls.find((c) => c.url.endsWith("/add")).opts.headers.Authorization, "Bearer secret-token");
-
-    ext.resetForTest();
-    stubChrome();
-    calls = stubFetch({ name: "f.zip" });
-    await ext.handOver({ url: "https://example.com/b.zip" });
-    assert.equal("Authorization" in calls.find((c) => c.url.endsWith("/add")).opts.headers, false);
-  });
-
-  it("reports 403 as a pairing failure", async () => {
+  it("reports a peer-check 403 with the app's reason", async () => {
     stubChrome();
     globalThis.fetch = async (url) => {
       if (String(url).endsWith("/ping")) {
         return { ok: true, status: 200, json: async () => ({ app: "VKMDownload" }) };
       }
-      return { ok: false, status: 403, json: async () => ({}) };
+      return { ok: false, status: 403, json: async () => ({ error: "caller is not a recognized browser (evil.exe)" }) };
     };
     const result = await ext.handOver({ url: "https://example.com/f.zip" });
     assert.equal(result.ok, false);
-    assert.equal(result.pairError, true);
-    assert.match(result.error, /配对失败/);
+    assert.equal(result.refused, true);
+    assert.match(result.error, /not a recognized browser/);
   });
 });
