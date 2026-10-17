@@ -182,6 +182,7 @@ node --check extension/background.js # 扩展改完先过语法（popup.js 同�
 53. Token removed (#45): backend, settings, popup, background; storage kept for session mirror.
 54. Recheck round (#46): peer consts/cache, fallback cancel-first, arrival ref, docs sync.
 55. Optimization round (#47): engine reserve 16MiB/prealloc/live splits/emit backpressure; desktop pumpQueue snapshot, countByStatus, bulk-remove waiter, host cache, probe semaphore, startup reorder + conditional config write + tasks:loaded; third_party/systray fork (-364KiB, desktop/go.mod replace); frontend sort fingerprint cache, one-pass groups, debounced localStorage, ref key handler.
+56. 0.2.6 hardening (#48): bgWait test-teardown tracking, queued survives restart, startRun second-launch guard + Cancel gates/name re-read, update-notes dialog + tasks:loaded moved to domReady + update timeouts, extension size handover and JSON 403, release preflights (unpushed/version/test dir), version 0.2.6.
 ## 8. 剩下未动的（有意延后）
 
 - ~~`Remove`/`Cancel` 在 binding 线程同步 `waitStopped(3s)`~~：已修——等删改走后台 goroutine，`Cancel` 用代际 guard 防误删（`manager.go:Cancel/Remove`）。

@@ -3,6 +3,29 @@
 > 每次改完代码都在这里记一笔：日期、改了什么、为什么改。
 > 发版 / push 前看这份文件写 release notes。
 
+## 2026-10-18 — 0.2.6（待发布）
+
+### 48. 稳定性收尾批：测试基建、重启语义、并发防护、更新说明与大小交接（UNRELEASED）
+- 测试基建：Windows 下 `TempDir` 清理的假报警根治。`Manager` 新增 `bgWait`/`goBg`，把传输 goroutine、删除/取消的 settle waiter、文件名探测、计划 watcher 全部纳入跟踪；`newTestApp` 在 `t.TempDir()` 之后注册 `t.Cleanup(WaitBackground)`，按 LIFO 在清目录前先等后台静默。为什么改：此前清理瞬间仍有 goroutine 持着 `tasks.json` 或半成品在写，"directory not empty" 间歇性地把无关测试拖红，真 bug 反而淹在噪声里。验收：desktop 全量连跑 3 次 0 失败；engine 82 过；扩展 27/27；`tsc` 0 错；vitest 22/22。
+- 重启语义：`loadTasks` 只把 `downloading` 折回 `paused`，`queued` 保持排队；`startup` 在 `Run` 之后补一次 `pumpQueue`，重启后继续等并发位，有空位就开跑。为什么改：排队任务本来就是"用户要下、只是在等槽位"，以前一并改写成暂停，等于重启后静默取消了用户的排队意图，得手动全部开始。回归：`TestLoadTasksKeepsQueuedTasksQueued`。
+- 状态机加固——同一任务并发双启动的原子防护：`startRun` 在持有任务锁时发现状态已是 `downloading` 就放弃本次启动（`cancel()` 后返回），冻结与槽位已满两条分支也不再改写正在传输的任务。为什么改：双击恢复、两个 settle 点同时泵队列、`StartAll` 撞上刚释放的槽位，都会起第二个引擎写同一个半成品文件；第二次 `startRun` 还会覆盖 `cancel`/`done`，第一次 run 从此停不下来。回归：`TestStartRunRefusesASecondLaunch`。
+- 状态机加固——`Cancel` 拒绝已完成任务：直接返回"已完成的任务无法取消，直接删除即可"。为什么改：以前会把成品记录改成"已取消"，随后 `Remove(deleteFiles=true)` 判定 `wasComplete=false`，静默拒绝删除用户明确要删的文件，记录与实际行为对不上。回归：`TestCancelRefusesCompleted`。
+- 状态机加固——取消删半成品前重读文件名。为什么改：取消时文件名可能还没被探测或首个进度事件填上，旧快照拼出的路径是"`<目录>.part`"，永远匹配不到真实半成品，所谓"丢弃"其实留下了垃圾。
+- 状态机加固——`StartPlan` 在更新冻结时明确拒绝（返回 `errUpdating` 并复位 `planRunning`），计划 watcher 与选中计划 watcher 也纳入 `goBg` 跟踪。为什么改：冻结不是一份排队的工作，硬启动只会得到一个所有任务都拒绝启动、最后注定记成"介入"的 watcher，按钮提示也会撒谎。
+- 更新链路——新增"更新内容"弹窗：横幅与设置页两处「立即更新」都先看说明再确认下载。内容由后端 `ReleaseNotes(version)` 从 GitHub release 的 tag API 实拉，与发布页同源；版本号只允许数字与点（进 URL 前的白名单），响应体 1MiB 上限、请求 10 秒超时；同版本结果缓存在 `App` 里，重复打开不重复拉；离线或该版本没写说明时显示降级提示，不拦更新。为什么改：更新是用户点头才发生的动作，得先知道换来了什么；说明只能现拉——编译进包里的文字永远描述不了这个版本之后才发布的版本。
+- 更新链路——`tasks:loaded` 从 `startup` 挪到 `domReady`。为什么改：Wails 不缓冲事件，启动阶段 emit 时 JS 监听器还不存在，这条"恢复完成后刷一次"的通知从前端视角等于从未发出，首屏拿到空表时没人纠正。
+- 更新链路——自我更新下载加 10 分钟总超时。为什么改：默认 client 没有读超时，服务器中途断流会让状态永久停在"下载中"，而 `StartUpdate` 在该状态下拒绝重入——用户除了重启程序没有别的重试办法。
+- 更新链路——拉 `latest` release 的响应体同样限 1MiB；`OpenReleasePage` 改为解析 URL 后逐项校验（`https`、host `github.com`、路径在本项目 `releases/` 下），并拒绝含 `..` 的路径段。为什么改：字符串前缀校验挡不住 `releases/../../owner/repo` 这类拼接，所谓白名单形同虚设。
+- 扩展——回环 API 的拒绝理由（Origin 不合法、peer check 不通过）改用 JSON 返回。为什么改：扩展按 JSON 解析错误体，程序发纯文本时它只能退回兜底文案，通知里永远只显示"HTTP 403"，真正的原因（比如被拒的可执行文件名）全丢了。
+- 扩展——交接请求带上浏览器已知的 `totalBytes`（`onCreated` 先取一次，`downloads.search` 再刷新一次）。为什么改：扩展拦下的任务以前进列表显示 0B，必须手动开始才知道大小；浏览器本来就知道，顺手带过来即可，也不用额外发请求。
+- 扩展——测试 22 → 27：新增 `report` 的四种结果（pending / duplicate / 成功 / 拒绝）、`toggle` 的 403、策略缓存 3 秒 TTL、自启下载记录的上限与结算清理。为什么改：通知文案、开关错误路径、缓存过期和记录上限都是最容易悄悄回归的边界。
+- 端到端大小传递：`/add` 接收 `size`，`location:ask`（询问位置）事件也带 `size`，`StartRequest.Size` 落到任务行，前端从到达队列经 `dialogSize` 传到 `NewTaskDialog` 的 `initialSize`。为什么改：同一条信息在四个环节里丢一次就白传；现在暂停中的任务一出现就有真实大小，同内容查重也多了个可用信号。测试：`TestLocalAPIAddCarriesSizeBeforeStarting`、`TestLocalAPIAddAsksLocationWithSize`。
+- 发版脚本：预检改成"两处版本字段最终等于 `$Version`"，允许版本号提前提交（发布 commit 与 tag 的源码包保持一致）；`git fetch` 后拦截 `main` 上未 push 的 commit；扩展安装包打包时剔除 `test/`；构建沿用 `-trimpath`，产物不带构建机路径。为什么改：旧的"替换零命中即失败"会把提前提交版本的正常流程误判为失败；而未 push 的 commit 会让 tag 指向远端旧树，且出错时毫无提示。
+- 前端小修——手动「新建下载」补上 `dialogOpenRef`。为什么改：到达队列靠这个 ref 判断弹窗是否已被占用，漏设时剪贴板/扩展任务一到达就会覆盖用户正在输入的表单。
+- 前端小修——`ConfirmDialog` 与更新说明弹窗的 Esc 在捕获阶段 `stopImmediatePropagation`。为什么改：全局 Esc 还会关掉背后的设置页/新建弹窗，设置页上开着更新弹窗时一次按键关两层。
+- 前端小修——列宽防抖在 `TaskList` 卸载时兜底落盘。为什么改：切筛选或打开设置会卸载列表，挂起的 300ms 定时器随组件消失，整段拖拽的宽度改动全部白费。
+- 有意不做（附原因）：程序端不主动探测未知大小——探测请求会消耗一次性下载链接的 token，为了不显示 0B 而把链接烧掉不值，0B 只是难看；`formatWhen` 跨午夜的 60 秒缓存窗口——触发条件苛刻且 60 秒后自愈，记录在案不修。
+
 ## 2026-10-15 — 0.2.5（已发布，https://github.com/Vick-moo/VKMDownload/releases/tag/v0.2.5）
 
 ### 1. 托盘退出后进程残留（bug）
