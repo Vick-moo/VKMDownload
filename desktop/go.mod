@@ -40,3 +40,9 @@ require (
 )
 
 replace vkmdownload => ../
+
+// Local fork of fyne.io/systray v1.12.2 carrying exactly one patch: a
+// missing //go:build constraint on systray_notifier_unix.go, which dragged
+// godbus/dbus (Linux-only notification plumbing) into every Windows build for
+// ~364 KiB of dead binary. See third_party/systray/PATCH.md.
+replace fyne.io/systray => ../third_party/systray
