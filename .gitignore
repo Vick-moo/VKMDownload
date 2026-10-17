@@ -44,3 +44,5 @@ PRIVATE.md
 /extension.crx
 /extension.pem
 *.pem
+# Developer-only planning notes: kept on this machine, never pushed.
+/PLAN.md
