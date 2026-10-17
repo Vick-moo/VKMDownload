@@ -42,6 +42,19 @@ export function formatPercent(done: number, total: number): string {
   return `${Math.max(0, Math.min(100, pct)).toFixed(1)}%`;
 }
 
+/** Cached "today": the stamp is compared per rendered row, and rebuilding two
+ * Date objects per row per tick was pure allocation churn on large lists. */
+let todayString = "";
+let todayStamp = 0;
+function todayLabel(): string {
+  const now = Date.now();
+  if (todayString === "" || now - todayStamp > 60_000) {
+    todayStamp = now;
+    todayString = new Date().toDateString();
+  }
+  return todayString;
+}
+
 /** Formats an RFC3339 timestamp as a local, compact date-time. */
 export function formatWhen(iso: string): string {
   if (!iso) return "—";
@@ -57,7 +70,7 @@ export function formatWhen(iso: string): string {
   const pad = (n: number) => String(n).padStart(2, "0");
   const ymd = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
   // Today's date is redundant, so only the time is shown for recent items.
-  if (d.toDateString() === new Date().toDateString()) {
+  if (d.toDateString() === todayLabel()) {
     return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
   }
   return `${ymd} ${pad(d.getHours())}:${pad(d.getMinutes())}`;

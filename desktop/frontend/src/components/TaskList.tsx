@@ -80,6 +80,11 @@ function loadWidths(): number[] {
   return DEFAULT_WIDTHS;
 }
 
+/** Collator for the name column. One shared instance: building an ICU
+ * collator is expensive enough that doing it per comparison dwarfed the
+ * actual sort. */
+const nameCollator = new Intl.Collator("zh-Hans-CN", { numeric: true });
+
 /** Numeric value of a task for a sortable column. */
 function sortValue(t: TaskView, key: SortKey): number {
   switch (key) {
@@ -107,15 +112,64 @@ function sortValue(t: TaskView, key: SortKey): number {
   }
 }
 
-/** Extracts the extension keys present in a set of tasks, for the group header. */
-function groupExts(tasks: TaskView[], key: string): string[] {
-  const seen = new Set<string>();
-  for (const t of tasks) {
-    if (groupOf(taskLabel(t)) !== key) continue;
-    const e = fileExt(taskLabel(t));
-    if (e) seen.add(e);
+/**
+ * Sorts the list once per change instead of doing real work per comparison.
+ *
+ * The failed-pin used to be a second, stable re-sort pass after the main one;
+ * folding it in as the primary comparison term gives the same order (rows
+ * with equal pin fall through to the column compare) for half the sort calls.
+ */
+function sortTasks(tasks: TaskView[], key: SortKey, dir: number): TaskView[] {
+  const pinned = key === "added" && dir === -1;
+  const pin = (t: TaskView) => (pinned && t.status === "failed" ? 0 : 1);
+  const copy = [...tasks];
+  if (key === "name") {
+    // Name is textual; everything else is numeric or a timestamp.
+    copy.sort(
+      (a, b) =>
+        pin(a) - pin(b) || dir * nameCollator.compare(a.name, b.name),
+    );
+    return copy;
   }
-  return [...seen].sort();
+  // Precompute each row's key: the old comparator re-derived it (a Date parse,
+  // a division, an indexOf) for every one of the O(n log n) pairs.
+  const keys = new Map<string, number>();
+  for (const t of tasks) keys.set(t.id, sortValue(t, key));
+  copy.sort(
+    (a, b) =>
+      pin(a) - pin(b) ||
+      dir * ((keys.get(a.id) as number) - (keys.get(b.id) as number)),
+  );
+  return copy;
+}
+
+/**
+ * Cheap fingerprint of everything the active sort reads. A progress tick only
+ * moves downloaded/speed on rows whose position does not depend on them, so
+ * an unchanged fingerprint means the previous order still holds — and the
+ * re-sort (localeCompare over hundreds of rows, four times a second) can be
+ * skipped entirely.
+ */
+function orderFingerprint(tasks: TaskView[], key: SortKey): string | null {
+  if (key === "speed" || key === "progress") {
+    // These sorts read fields that change on every tick; no shortcut applies.
+    return null;
+  }
+  const parts: string[] = [];
+  for (const t of tasks) {
+    parts.push(
+      t.id,
+      t.status,
+      key === "name"
+        ? t.name
+        : key === "added"
+          ? t.createdAt
+          : key === "size"
+            ? String(t.size)
+            : "",
+    );
+  }
+  return parts.join("\u0000");
 }
 
 /**
@@ -148,12 +202,18 @@ export function TaskList({
   const prefsRef = useRef(prefs);
   prefsRef.current = prefs;
 
+  // Debounced persistence: the drag handler updates prefs on every mousemove,
+  // and a synchronous JSON stringify + write per frame made resizing columns
+  // feel exactly as heavy as it sounded.
   useEffect(() => {
-    try {
-      localStorage.setItem(WIDTHS_KEY, JSON.stringify(prefs));
-    } catch {
-      // Storage can be unavailable; the widths simply will not persist.
-    }
+    const id = window.setTimeout(() => {
+      try {
+        localStorage.setItem(WIDTHS_KEY, JSON.stringify(prefs));
+      } catch {
+        // Storage can be unavailable; the widths simply will not persist.
+      }
+    }, 300);
+    return () => window.clearTimeout(id);
   }, [prefs]);
 
   // Keep the preferences balanced against the space available, so rendering is a
@@ -317,38 +377,69 @@ export function TaskList({
 
 
 
+  // The previous sort result, reused when a tick cannot have changed the
+  // order (see orderFingerprint).
+  const sortedRef = useRef<{
+    key: SortKey;
+    dir: SortDir;
+    fp: string;
+    ids: string[];
+  } | null>(null);
+
   const sorted = useMemo(() => {
     const dir = sortDir === "asc" ? 1 : -1;
-    const copy = [...tasks];
-    // Name is textual; everything else is numeric or a timestamp.
-    if (sortKey === "name") {
-      copy.sort(
-        (a, b) =>
-          dir *
-          a.name.localeCompare(b.name, "zh-Hans-CN", { numeric: true }),
-      );
-    } else {
-      copy.sort((a, b) => dir * (sortValue(a, sortKey) - sortValue(b, sortKey)));
-    }
-
     // Failures float to the top only when the user has not asked for an
-    // explicit order, so an explicit sort is never overridden.
-    if (sortKey === "added" && sortDir === "desc") {
-      copy.sort((a, b) => {
-        const af = a.status === "failed" ? 0 : 1;
-        const bf = b.status === "failed" ? 0 : 1;
-        return af - bf;
-      });
+    // explicit order, so an explicit sort is never overridden (see
+    // sortTasks).
+    const fp = orderFingerprint(tasks, sortKey);
+    const prev = sortedRef.current;
+    if (
+      fp !== null &&
+      prev !== null &&
+      prev.key === sortKey &&
+      prev.dir === sortDir &&
+      prev.fp === fp
+    ) {
+      // Same rows and the same order-relevant fields: map the remembered
+      // order onto the fresh objects (so ticked rows still re-render) and
+      // skip the sort entirely.
+      const byId = new Map(tasks.map((t) => [t.id, t]));
+      const reused = prev.ids
+        .map((id) => byId.get(id))
+        .filter((t): t is TaskView => t !== undefined);
+      if (reused.length === tasks.length) {
+        return reused;
+      }
     }
-    return copy;
+    const result = sortTasks(tasks, sortKey, dir);
+    sortedRef.current =
+      fp === null
+        ? null
+        : { key: sortKey, dir: sortDir, fp, ids: result.map((t) => t.id) };
+    return result;
   }, [tasks, sortKey, sortDir]);
 
   const groups = useMemo(() => {
     if (!groupByType) return null;
-    return TYPE_GROUPS.map((g) => ({
-      group: g,
-      items: sorted.filter((t) => groupOf(taskLabel(t)) === g.key),
-    })).filter((b) => b.items.length > 0);
+    // One pass builds every bucket and its header extension list together;
+    // the old version re-scanned the whole list once per group.
+    const buckets = new Map(
+      TYPE_GROUPS.map((g) => [
+        g.key,
+        { group: g, items: [] as TaskView[], exts: new Set<string>() },
+      ]),
+    );
+    for (const t of sorted) {
+      const label = taskLabel(t);
+      const b = buckets.get(groupOf(label));
+      if (!b) continue;
+      b.items.push(t);
+      const e = fileExt(label);
+      if (e) b.exts.add(e);
+    }
+    return TYPE_GROUPS.map((g) => buckets.get(g.key)!)
+      .filter((b) => b.items.length > 0)
+      .map((b) => ({ group: b.group, items: b.items, exts: [...b.exts].sort() }));
   }, [sorted, groupByType]);
 
   function header() {
@@ -439,9 +530,8 @@ export function TaskList({
 
       <div className="list">
         {groups
-          ? groups.map(({ group, items }) => {
+          ? groups.map(({ group, items, exts }) => {
               const isCollapsed = collapsed[group.key] ?? false;
-              const exts = groupExts(items, group.key);
               return (
                 <section className="group" key={group.key}>
                   <button

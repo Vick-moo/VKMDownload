@@ -79,11 +79,16 @@ function App(): JSX.Element {
   // would overlap.
   const [sidebarWidth, setSidebarWidth] = useState(loadSidebarWidth);
   useEffect(() => {
-    try {
-      localStorage.setItem(SIDEBAR_W_KEY, String(sidebarWidth));
-    } catch {
-      // Storage can be unavailable; the width simply will not persist.
-    }
+    // Debounced: the sidebar drag updates this per frame; persisting per frame
+    // was pure JSON.stringify + disk churn.
+    const id = window.setTimeout(() => {
+      try {
+        localStorage.setItem(SIDEBAR_W_KEY, String(sidebarWidth));
+      } catch {
+        // Storage can be unavailable; the width simply will not persist.
+      }
+    }, 300);
+    return () => window.clearTimeout(id);
   }, [sidebarWidth, SIDEBAR_W_KEY]);
 
   /** The extension the sidebar is filtering by, or "" for a status view. */
@@ -283,6 +288,12 @@ function App(): JSX.Element {
           ask: false,
         });
       }),
+      // The backend finished restoring tasks.json after this page mounted:
+      // the initial listTasks can have seen an empty table while the
+      // restore was still running, and nothing else would ever correct it.
+      on<null>(EVENTS.tasksLoaded, () => {
+        void reload();
+      }),
       // A release announced after startup (e.g. the startup check ran while
       // offline). Deduped by version against the startup check.
       on<UpdateInfo>(EVENTS.updateAvailable, (info) => {
@@ -290,7 +301,7 @@ function App(): JSX.Element {
       }),
     ];
     return () => offs.forEach((off) => off());
-  }, [handleArrival, noteUpdate]);
+  }, [handleArrival, noteUpdate, reload]);
 
   const visible = useMemo(() => {
     let list = tasks;
@@ -571,9 +582,33 @@ function App(): JSX.Element {
     }
   }, [flash]);
 
+  // Latest values for the global key handler, which subscribes exactly once:
+  // re-subscribing per render (tasks changes on every progress tick) churned
+  // the listener on every frame that moved a progress bar.
+  const keyRef = useRef({
+    tasks,
+    selected,
+    settingsOpen,
+    dialogOpen,
+    onNewTask,
+    requestDeleteSelected,
+    reload,
+  });
+  keyRef.current = {
+    tasks,
+    selected,
+    settingsOpen,
+    dialogOpen,
+    onNewTask,
+    requestDeleteSelected,
+    reload,
+  };
+
   // Keyboard shortcuts from the design spec.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      const { tasks, selected, settingsOpen, dialogOpen, onNewTask, requestDeleteSelected, reload } =
+        keyRef.current;
       const tag = (e.target as HTMLElement | null)?.tagName;
       const typing = tag === "INPUT" || tag === "TEXTAREA";
       if (e.key === "n" && (e.ctrlKey || e.metaKey)) {
@@ -606,15 +641,7 @@ function App(): JSX.Element {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [
-    settingsOpen,
-    dialogOpen,
-    selected,
-    tasks,
-    reload,
-    onNewTask,
-    requestDeleteSelected,
-  ]);
+  }, []);
 
   const hasTasks = tasks.length > 0;
 

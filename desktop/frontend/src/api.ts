@@ -77,6 +77,7 @@ export const EVENTS = {
   done: "task:done",
   failed: "task:failed",
   removed: "task:removed",
+  tasksLoaded: "tasks:loaded",
   clipboardURL: "clipboard:url",
   filesDropped: "files:dropped",
   locationAsk: "location:ask",
