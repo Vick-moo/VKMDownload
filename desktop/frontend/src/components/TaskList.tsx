@@ -216,6 +216,22 @@ export function TaskList({
     return () => window.clearTimeout(id);
   }, [prefs]);
 
+  // Unmount flush for the debounced write above: switching a filter or
+  // opening settings unmounts this list, and the pending 300ms timer would
+  // die with it — taking the whole drag gesture's worth of width changes
+  // along. prefsRef (kept for the drag handler) already mirrors the latest
+  // widths, so the flush always writes the current value.
+  useEffect(
+    () => () => {
+      try {
+        localStorage.setItem(WIDTHS_KEY, JSON.stringify(prefsRef.current));
+      } catch {
+        // Storage can be unavailable; the widths simply will not persist.
+      }
+    },
+    [],
+  );
+
   // Keep the preferences balanced against the space available, so rendering is a
   // no-op in the steady state. The name column absorbs the difference, for the
   // same reason it takes the surplus above.

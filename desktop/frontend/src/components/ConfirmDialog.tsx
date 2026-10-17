@@ -33,12 +33,18 @@ export function ConfirmDialog({
 }: Props): JSX.Element {
   // Esc dismisses like a cancel click; while busy the action is already
   // running, so the dialog stays put instead of stranding the result.
+  // Captured and stopped on the window: the app's global Escape handler
+  // (which closes the settings page / new-task dialog behind this one)
+  // must not see the key, or one press closes both layers.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && !busy) onCancel();
+      if (e.key === "Escape" && !busy) {
+        e.stopImmediatePropagation();
+        onCancel();
+      }
     };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    window.addEventListener("keydown", onKey, { capture: true });
+    return () => window.removeEventListener("keydown", onKey, { capture: true });
   }, [busy, onCancel]);
 
   return (
