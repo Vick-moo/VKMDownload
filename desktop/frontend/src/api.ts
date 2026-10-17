@@ -19,6 +19,7 @@ import {
   OpenFile,
   OpenReleasePage,
   PauseTask,
+  ReleaseNotes,
   StartUpdate,
   UpdateProgress,
   PickDirectory,
@@ -46,6 +47,7 @@ export const api = {
   applyUpdate: (): Promise<void> => ApplyUpdate(),
   defaultOrganizeGroups: (): Promise<OrganizeGroup[]> => DefaultOrganizeGroups(),
   openReleasePage: (url: string): Promise<void> => OpenReleasePage(url),
+  releaseNotes: (version: string): Promise<string> => ReleaseNotes(version),
   listTasks: (): Promise<TaskView[]> => ListTasks(),
   newTask: (req: StartRequest): Promise<TaskView> => NewTask(req),
   findUnfinishedByURL: (url: string): Promise<string> =>

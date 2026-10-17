@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -107,16 +108,87 @@ func (a *App) checkUpdateOnce() {
 	})
 }
 
-// OpenReleasePage opens the release page in the system browser. The host is
-// allow-listed: a binding that opened any URL it was given would turn every
-// stored string into a potential lure.
-func (a *App) OpenReleasePage(url string) error {
-	u := strings.TrimSpace(url)
-	if !strings.HasPrefix(u, "https://github.com/"+updateRepo+"/releases/") {
+// OpenReleasePage opens the release page in the system browser. The URL is
+// parsed and every component checked — not string-prefix matched — because a
+// prefix test lets "releases/../../owner/repo" through: scheme and host are
+// pinned, the path must sit under this project's releases, and ".." segments
+// are refused outright.
+func (a *App) OpenReleasePage(raw string) error {
+	pu, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil ||
+		pu.Scheme != "https" || pu.Host != "github.com" ||
+		!strings.HasPrefix(pu.Path, "/"+updateRepo+"/releases/") ||
+		strings.Contains(pu.Path, "..") {
 		return fmt.Errorf("只允许打开本项目的发布页")
 	}
-	runtime.BrowserOpenURL(a.ctx, u)
+	runtime.BrowserOpenURL(a.ctx, raw)
 	return nil
+}
+
+// ReleaseNotes fetches the published notes for one version straight from the
+// GitHub release, so the "what's new" dialog answers from the same source the
+// update itself comes from — a release that ships without a notes file simply
+// shows the fallback text, never an error page. The version is digits and
+// dots only (validated below): it reaches a URL, so anything else is refused
+// outright. The body is the release's markdown, rendered as text by the
+// front-end.
+func (a *App) ReleaseNotes(version string) (string, error) {
+	v := strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(version, "v"), "V"))
+	if !safeVersion(v) {
+		return "", fmt.Errorf("版本号不合法")
+	}
+
+	a.updMu.Lock()
+	if a.notesVersion == v && a.notesBody != "" {
+		body := a.notesBody
+		a.updMu.Unlock()
+		return body, nil
+	}
+	a.updMu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		"https://api.github.com/repos/"+updateRepo+"/releases/tags/v"+v, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("发布说明拉取失败：HTTP %d", resp.StatusCode)
+	}
+
+	var rel struct {
+		Body string `json:"body"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&rel); err != nil {
+		return "", err
+	}
+
+	a.updMu.Lock()
+	a.notesVersion, a.notesBody = v, rel.Body
+	a.updMu.Unlock()
+	return rel.Body, nil
+}
+
+// safeVersion reports whether v is a plain dotted number like 0.2.6 — the
+// only shape allowed into a GitHub API URL.
+func safeVersion(v string) bool {
+	if v == "" {
+		return false
+	}
+	for _, r := range v {
+		if (r < '0' || r > '9') && r != '.' {
+			return false
+		}
+	}
+	return true
 }
 
 // ---------------------------------------------------------------- self-update
@@ -169,7 +241,10 @@ func fetchLatestRelease(ctx context.Context) (releaseAsset, error) {
 			Digest string `json:"digest"`
 		} `json:"assets"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&rel); err != nil {
+	// Bounded like every other remote body this app reads: a hijacked or
+	// broken connection must not be able to stream unbounded bytes into
+	// memory through the decoder.
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&rel); err != nil {
 		return out, err
 	}
 	out.tag, out.pageURL = rel.TagName, rel.HTMLURL
@@ -257,7 +332,15 @@ func (a *App) downloadUpdate(rel releaseAsset, staged string) {
 		a.updMu.Unlock()
 	}
 
-	req, err := http.NewRequest(http.MethodGet, rel.exeURL, nil)
+	// A hard ceiling on the whole transfer. The plain client has no read
+	// timeout, so a server that stalls mid-stream would otherwise park the
+	// updater in "downloading" forever — and StartUpdate refuses to reenter
+	// in that state, so the user could not even retry without restarting
+	// the app. Ten minutes is far more than an exe this size ever needs.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rel.exeURL, nil)
 	if err != nil {
 		fail(err)
 		return

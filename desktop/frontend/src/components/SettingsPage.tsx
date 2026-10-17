@@ -4,6 +4,7 @@ import { main } from "../../wailsjs/go/models";
 import { api } from "../api";
 import type { Config, OrganizeGroup, UpdateStatus } from "../types";
 import { IconFolder } from "./Icons";
+import { UpdateNotesDialog } from "./UpdateNotesDialog";
 
 interface Props {
   config: Config | null;
@@ -88,6 +89,9 @@ export function SettingsPage({
   const [upd, setUpd] = useState<UpdateStatus | null>(null);
   const [updMsg, setUpdMsg] = useState("");
   const [updBusy, setUpdBusy] = useState(false);
+  // The version whose "what's new" dialog is open; the actual download starts
+  // from the dialog's confirm, not straight from the button.
+  const [notesVer, setNotesVer] = useState<string | null>(null);
   const pollTimer = useRef<number | null>(null);
 
 
@@ -972,7 +976,7 @@ export function SettingsPage({
                 type="button"
                 className="btn btn--primary"
                 disabled={updBusy || upd.state === "downloading"}
-                onClick={startDl}
+                onClick={() => setNotesVer(upd.version)}
               >
                 {upd.state === "downloading" ? "下载中…" : "立即更新"}
               </button>
@@ -1015,6 +1019,18 @@ export function SettingsPage({
           anyone reporting a problem is asked for is this number. */}
       {version ? (
         <p className="settings__version">VKMDownload v{version}</p>
+      ) : null}
+
+      {notesVer ? (
+        <UpdateNotesDialog
+          version={notesVer}
+          current={version}
+          onClose={() => setNotesVer(null)}
+          onUpdate={() => {
+            setNotesVer(null);
+            void startDl();
+          }}
+        />
       ) : null}
 
     </div>

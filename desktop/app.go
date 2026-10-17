@@ -16,7 +16,7 @@ import (
 )
 
 // appVersion is what Version() reports and the browser extension displays.
-const appVersion = "0.2.5"
+const appVersion = "0.2.6"
 
 // App is the object exposed to the front-end. Every exported method becomes a
 // callable binding, so internal state is kept unexported.
@@ -38,9 +38,14 @@ type App struct {
 
 	mgr *Manager
 
-	// updMu guards upd, the self-update state machine in update.go.
+	// updMu guards upd, the self-update state machine in update.go, and the
+	// release-notes cache below.
 	updMu sync.Mutex
 	upd   UpdateStatus
+	// notesVersion/notesBody cache the last fetched release notes so opening
+	// the "what's new" dialog twice costs one network round trip.
+	notesVersion string
+	notesBody    string
 
 	// clipboard monitoring state
 	lastClip    string
@@ -142,11 +147,11 @@ func (a *App) startup(ctx context.Context) {
 	go a.checkUpdateOnce()
 
 	a.mgr.loadTasks()
-	// The front-end's initial listTasks can land while the restore is still
-	// running and see an empty table; this event tells it to reload once the
-	// real list exists.
-	a.emit("tasks:loaded", nil)
 	go a.mgr.Run(ctx)
+	// Tasks that were queued when the app closed resume waiting for a slot;
+	// without this pump they would display as queued while the queue stood
+	// still.
+	a.mgr.pumpQueue()
 
 	// The browser extension's endpoint. It lives and dies with the app's
 	// context rather than the window's, so closing the window to the tray does
@@ -159,6 +164,14 @@ func (a *App) startup(ctx context.Context) {
 // domReady runs after the front-end has loaded.
 func (a *App) domReady(ctx context.Context) {
 	_ = ctx
+	// The "restore finished" nudge lives here, not in startup: Wails buffers
+	// no events, and an emit from startup races the webview — it is gone
+	// before any JS listener exists. domReady fires after the page (and the
+	// React app's first effects, which subscribe) has loaded, so this is the
+	// first moment the event can actually be received. It covers the narrow
+	// case where the initial listTasks call slipped in before loadTasks
+	// finished and saw an empty table.
+	a.emit("tasks:loaded", nil)
 }
 
 // shutdown releases resources as the application exits.

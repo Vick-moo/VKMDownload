@@ -6,6 +6,7 @@ import { NewTaskDialog } from "./components/NewTaskDialog";
 import { SettingsPage } from "./components/SettingsPage";
 import { Sidebar } from "./components/Sidebar";
 import { TaskList } from "./components/TaskList";
+import { UpdateNotesDialog } from "./components/UpdateNotesDialog";
 import { filterLabel } from "./filterLabel";
 import { formatSpeed } from "./format";
 import type { Config, Filter, SortDir, SortKey, TaskView, UpdateInfo } from "./types";
@@ -37,6 +38,7 @@ function App(): JSX.Element {
   /** Browser credentials carried through the ask-location flow; never shown. */
   const [dialogCookie, setDialogCookie] = useState("");
   const [dialogUserAgent, setDialogUserAgent] = useState("");
+  const [dialogSize, setDialogSize] = useState(0);
   const [dialogAsk, setDialogAsk] = useState(false);
   /** From the binding; shown at the foot of the sidebar. */
   const [version, setVersion] = useState("");
@@ -50,6 +52,8 @@ function App(): JSX.Element {
   /** Set when the banner is dismissed mid-download: the staging keeps going
       in the backend, but the automatic restart is called off. */
   const updateCancelled = useRef(false);
+  /** The version whose "what's new" dialog is open, from the banner. */
+  const [updateNotesFor, setUpdateNotesFor] = useState<string | null>(null);
   /** The bulk-delete confirmation; the count in it comes from the live list. */
   const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
   /** Generation counter for list reloads; see reload below. */
@@ -145,6 +149,8 @@ function App(): JSX.Element {
     referer: string;
     cookie: string;
     userAgent: string;
+    /** Browser-known total size in bytes; 0 means unknown. */
+    size: number;
     /** True when an intercepted download is asking where to go. */
     ask: boolean;
   }
@@ -161,6 +167,7 @@ function App(): JSX.Element {
     setDialogReferer(a.referer);
     setDialogCookie(a.cookie);
     setDialogUserAgent(a.userAgent);
+    setDialogSize(a.size);
     setDialogAsk(a.ask);
     dialogOpenRef.current = true;
     setDialogOpen(true);
@@ -249,13 +256,14 @@ function App(): JSX.Element {
           referer: "",
           cookie: "",
           userAgent: "",
+          size: 0,
           ask: false,
         });
       }),
       // Ask-location arrivals (extension or clipboard): nothing is created
       // yet. The dialog collects the placement; closing it abandons the
       // download, which is what the user chose.
-      on<{ url: string; filename: string; referer: string; cookie: string; userAgent: string }>(
+      on<{ url: string; filename: string; referer: string; cookie: string; userAgent: string; size: string }>(
         EVENTS.locationAsk,
         (req) => {
           handleArrival({
@@ -264,6 +272,7 @@ function App(): JSX.Element {
             referer: req.referer ?? "",
             cookie: req.cookie ?? "",
             userAgent: req.userAgent ?? "",
+            size: Number(req.size) || 0,
             ask: true,
           });
         },
@@ -285,6 +294,7 @@ function App(): JSX.Element {
           referer: "",
           cookie: "",
           userAgent: "",
+          size: 0,
           ask: false,
         });
       }),
@@ -402,6 +412,10 @@ function App(): JSX.Element {
 
   const onNewTask = useCallback(() => {
     setDialogURL(pendingURL);
+    // Same ref the captured-link path sets: a clipboard capture or extension
+    // handover arriving while the user fills this manually-opened form must
+    // queue behind it, not reset it mid-typing.
+    dialogOpenRef.current = true;
     setDialogOpen(true);
   }, [pendingURL]);
 
@@ -681,7 +695,7 @@ function App(): JSX.Element {
                 <button
                   type="button"
                   className="btn btn--primary"
-                  onClick={() => void startUpdateNow()}
+                  onClick={() => setUpdateNotesFor(update.version)}
                 >
                   立即更新
                 </button>
@@ -895,6 +909,7 @@ function App(): JSX.Element {
         initialReferer={dialogReferer}
         initialCookie={dialogCookie}
         initialUserAgent={dialogUserAgent}
+        initialSize={dialogSize}
         fromAsk={dialogAsk}
         config={config}
         onClose={() => {
@@ -955,6 +970,18 @@ function App(): JSX.Element {
             onCancel={() => setConfirmDeleteOpen(false)}
           />
         )
+      ) : null}
+
+      {updateNotesFor ? (
+        <UpdateNotesDialog
+          version={updateNotesFor}
+          current={version}
+          onClose={() => setUpdateNotesFor(null)}
+          onUpdate={() => {
+            setUpdateNotesFor(null);
+            void startUpdateNow();
+          }}
+        />
       ) : null}
     </div>
   );
