@@ -38,8 +38,14 @@ func TestCommitPartialKeepsClaimOutstanding(t *testing.T) {
 	if got := seg.outstanding(); got != n-wn {
 		t.Fatalf("outstanding = %d, want %d after a partial commit", got, n-wn)
 	}
-	if m.splitLargest(1 << 10) {
-		t.Error("splitLargest split a segment with an outstanding claim")
+	// The claim must still fence the split: the tail may only take bytes past
+	// the claim's end, never the claimed-but-unwritten run itself.
+	if !m.splitLargest(1 << 10) {
+		t.Fatal("splitLargest refused to split past a partially-settled claim")
+	}
+	if tail := m.segs[1]; tail.Start < n {
+		t.Errorf("tail starts at %d, which overlaps the outstanding claim [%d,%d)",
+			tail.Start, seg.Next(), n)
 	}
 }
 

@@ -315,25 +315,59 @@ func TestSplitLargestPreservesCoverage(t *testing.T) {
 	}
 }
 
-// TestSplitLargestSkipsOutstandingClaims documents the rule that keeps a split
-// from cutting across an in-flight claim: a segment with uncommitted claimed
-// bytes is left alone until the claim is committed or handed back.
-func TestSplitLargestSkipsOutstandingClaims(t *testing.T) {
+// TestSplitLargestKeepsClaimsInsideTheHead pins the rule that keeps a split
+// from cutting across an in-flight claim: the tail starts past the highest
+// claim, so the claim always lands inside the head half. (An older rule
+// skipped claimed segments outright, which meant a split almost never fired
+// while workers were running.)
+func TestSplitLargestKeepsClaimsInsideTheHead(t *testing.T) {
 	m := newSegmentManager([]*Segment{{Start: 0, End: 1<<20 - 1}})
+	seg := m.segs[0]
 
 	// Claim a large run without committing it.
-	_, n, ok := m.reserve(m.segs[0], 64<<10)
+	_, n, ok := m.reserve(seg, 64<<10)
 	if !ok || n != 64<<10 {
 		t.Fatalf("reserve = (%d,%v), want 64 KiB claimed", n, ok)
 	}
-	if m.splitLargest(1 << 10) {
-		t.Error("splitLargest split a segment with an outstanding claim")
+	if !m.splitLargest(1 << 10) {
+		t.Fatal("splitLargest refused to split the unclaimed region past a live claim")
+	}
+	if len(m.segs) != 2 {
+		t.Fatalf("got %d segments, want 2", len(m.segs))
+	}
+	// The claim covers [0, 64Ki): the tail may only start at or after its end.
+	for i, s := range m.segs {
+		if i == 0 {
+			continue // the head owns the claim
+		}
+		if s.Start < 64<<10 {
+			t.Errorf("tail segment [%d,%d] overlaps the in-flight claim [0,%d)",
+				s.Start, s.End, 64<<10)
+		}
+	}
+	if tail := m.segs[1]; tail.Start != seg.End+1 {
+		t.Errorf("tail starts at %d, want %d (contiguous with the head)",
+			tail.Start, seg.End+1)
 	}
 
-	// Once the claim is committed the segment becomes splittable again.
-	m.commit(m.segs[0], n, n)
+	// Once the claim is committed the head can be split again.
+	m.commit(seg, n, n)
 	if !m.splitLargest(1 << 10) {
-		t.Error("splitLargest refused to split a segment with no outstanding claim")
+		t.Error("splitLargest refused to split a segment whose claim settled")
+	}
+}
+
+// A segment whose every remaining byte is already claimed has nothing to
+// split: a tail there would be empty.
+func TestSplitLargestRefusesFullyClaimedSegment(t *testing.T) {
+	m := newSegmentManager([]*Segment{{Start: 0, End: 1<<20 - 1}})
+	seg := m.segs[0]
+	_, n, ok := m.reserve(seg, 1<<20)
+	if !ok || n != 1<<20 {
+		t.Fatalf("reserve = (%d,%v), want the full MiB claimed", n, ok)
+	}
+	if m.splitLargest(1 << 10) {
+		t.Error("splitLargest split a segment with nothing unclaimed left")
 	}
 }
 

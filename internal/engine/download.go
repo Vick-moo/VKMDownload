@@ -112,6 +112,14 @@ type Options struct {
 	Limiter *Limiter
 }
 
+// Reserve defaults. A claim bounds how far the split point may drift ahead of
+// the written bytes and how often a worker pays a round trip; it does not
+// bound memory — reads still move ChunkSize at a time.
+const (
+	defaultReserveSize = 16 << 20
+	maxReserveSize     = 64 << 20
+)
+
 // Normalize returns o with unset fields replaced by defaults and out-of-range
 // values clamped.
 func (o Options) Normalize() Options {
@@ -128,13 +136,24 @@ func (o Options) Normalize() Options {
 		o.MinSegmentSize = 1 << 20
 	}
 	if o.ChunkSize <= 0 {
-		o.ChunkSize = 128 << 10
+		// Match the pooled block exactly: a read then fills one whole buffer,
+		// and the per-chunk tax (WriteAt, commit, limiter, progress) is paid
+		// half as often as the old 128 KiB default.
+		o.ChunkSize = bufPoolBlockSize
 	}
 	if o.ChunkSize > bufPoolBlockSize {
 		o.ChunkSize = bufPoolBlockSize
 	}
 	if o.ReserveSize <= 0 {
-		o.ReserveSize = 512 << 10
+		// One ranged GET per reserve. 512 KiB made a high-latency source
+		// request-bound: one round trip per 512 KiB caps a single worker near
+		// 10 MB/s on a 50 ms RTT no matter how many connections run. A claim
+		// is bookkeeping, not buffering, so the default covers many round
+		// trips of bandwidth.
+		o.ReserveSize = defaultReserveSize
+	}
+	if o.ReserveSize > maxReserveSize {
+		o.ReserveSize = maxReserveSize
 	}
 	o.Backoff = o.Backoff.normalized()
 	if o.ProgressInterval <= 0 {
@@ -606,6 +625,20 @@ func (s *session) runSegmented(ctx context.Context) (*Result, error) {
 			return nil, fmt.Errorf("segment planner produced no segments for size %d", s.probe.Size)
 		}
 		s.mgr = newSegmentManager(plan)
+	}
+
+	// Extend the partial file to the announced size before any worker
+	// writes. High segments otherwise land in a sparse file: the filesystem
+	// zero-fills every gap on demand and the extent list fragments. One
+	// Truncate up front replaces both. Extend-only, and best effort: a
+	// failed preallocation costs only the fragmentation it would have
+	// avoided, never the download itself.
+	if s.probe.Size > 0 && s.file != nil {
+		if fi, err := s.file.Stat(); err == nil && fi.Size() < s.probe.Size {
+			if err := s.file.Truncate(s.probe.Size); err == nil {
+				debugf("prealloc    size=%d", s.probe.Size)
+			}
+		}
 	}
 	s.initialSegs = s.mgr.segmentCount()
 	s.newTracker(reserved, s.probe.Size)
@@ -1530,18 +1563,37 @@ func (p *progressTracker) finish() {
 	p.mu.Lock()
 	bytes, total := p.bytes, p.total
 	p.mu.Unlock()
-	p.emit(bytes, total, 0)
+	p.emitFinal(bytes, total, 0)
 }
 
+// emit reports progress without waiting: a slow consumer must not stall the
+// workers behind the callback. A frame that cannot take the emitter
+// immediately is dropped — the next throttled tick carries fresher numbers,
+// and emitFinal always waits, so the terminal frame is never lost.
 func (p *progressTracker) emit(bytes, total int64, speed float64) {
 	if p == nil {
 		return
 	}
-	// Serialise emission: add() decides which goroutine fires, but a slow
-	// callback must not be entered concurrently. Saving happens in add(),
-	// never here, so a slow flush cannot serialise the callbacks.
+	if !p.emitMu.TryLock() {
+		return
+	}
+	defer p.emitMu.Unlock()
+	p.emitLocked(bytes, total, speed)
+}
+
+// emitFinal reports the terminal frame and waits for the emitter, so the
+// last progress event cannot be dropped.
+func (p *progressTracker) emitFinal(bytes, total int64, speed float64) {
+	if p == nil {
+		return
+	}
 	p.emitMu.Lock()
 	defer p.emitMu.Unlock()
+	p.emitLocked(bytes, total, speed)
+}
+
+func (p *progressTracker) emitLocked(bytes, total int64, speed float64) {
+	// The caller holds emitMu.
 
 	if p.report == nil {
 		return

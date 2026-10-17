@@ -68,7 +68,9 @@ func (st *State) Validator() string {
 // to parse on resume.
 func saveState(path string, st *State) error {
 	st.UpdatedAt = time.Now()
-	b, err := json.MarshalIndent(st, "", "  ")
+	// Compact JSON: the sidecar is machine state rewritten many times a
+	// second at high throughput, not a document humans edit.
+	b, err := json.Marshal(st)
 	if err != nil {
 		return err
 	}

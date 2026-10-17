@@ -168,7 +168,7 @@ func (m *segmentManager) reserve(s *Segment, max int64) (off, n int64, ok bool) 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if max <= 0 {
-		max = 512 << 10
+		max = defaultReserveSize
 	}
 	off = s.Next()
 	if off > s.End {
@@ -275,19 +275,22 @@ func (m *segmentManager) complete(s *Segment) {
 	s.Done = true
 }
 
-// splitLargest halves the segment with the most unclaimed work left and queues
-// the tail so an idle worker can pick it up. It reports whether a split
-// happened.
+// splitLargest hands the splittable work of the segment with the most
+// unclaimed bytes to a new tail segment, so an idle worker can pick it up. It
+// reports whether a split happened.
 //
 // This is the dynamic-segmentation rule: a worker that finishes early does not
 // sit idle while one unlucky segment (a slow server, a congested range) holds
 // up the whole download; it takes half of the biggest remaining chunk instead.
 //
-// A segment with an outstanding claim is skipped. Its claim describes bytes from
-// the *written* offset, so shrinking the segment would leave the claim spanning
-// the new boundary — the tail and the claim would then both cover the same
-// bytes. Waiting until the claim is committed or handed back keeps every split
-// on a clean boundary.
+// Only bytes past the highest claim are splittable. Outstanding claims cover
+// exactly [Next, Next+Reserved): every reserve hands out a run starting at
+// the written offset, so the unclaimed region always begins at Next+Reserved,
+// and cutting there keeps every in-flight claim inside the head half. An
+// older rule skipped claimed segments outright, which in practice disabled
+// the splitter: while workers run, every segment holds a claim, so the
+// scheduler's "halve the biggest" only ever fired in the instant between one
+// claim settling and the next being taken.
 func (m *segmentManager) splitLargest(minSplit int64) bool {
 	if minSplit < 1 {
 		minSplit = 1
@@ -296,32 +299,37 @@ func (m *segmentManager) splitLargest(minSplit int64) bool {
 	defer m.mu.Unlock()
 
 	var best *Segment
-	var bestRem int64
+	var bestUnclaimed int64
 	for _, s := range m.segs {
-		if s.Done || s.outstanding() > 0 {
+		if s.Done {
 			continue
 		}
-		if rem := s.Remaining(); rem > bestRem {
-			best, bestRem = s, rem
+		// Unclaimed = remaining minus in-flight claims: only that part can
+		// move to the tail without cutting across a claim.
+		if u := s.Remaining() - s.outstanding(); u > bestUnclaimed {
+			best, bestUnclaimed = s, u
 		}
 	}
 	if best == nil {
 		return false
 	}
 
-	// The tail receives exactly half of the remaining work, so it is the
-	// smaller half and the one that decides whether the split is worthwhile.
-	half := bestRem / 2
+	// The tail receives half of the *unclaimed* work, so it is the smaller
+	// half and the one that decides whether the split is worthwhile.
+	half := bestUnclaimed / 2
 	if half < minSplit {
 		return false
 	}
 
-	mid := best.Next() + half
+	// The split point derives from claimed progress, not written progress:
+	// the claim region [Next, Next+Reserved) stays in the head and the tail
+	// starts past it, so neither half overlaps a fetch in flight.
+	mid := best.Next() + best.outstanding() + half
 	tail := &Segment{Start: mid, End: best.End, NoRange: best.NoRange}
 	best.End = mid - 1
 
-	debugf("split       [%d,%d] rem=%d -> head end=%d tail=[%d,%d]",
-		best.Start, tail.End, bestRem, best.End, tail.Start, tail.End)
+	debugf("split       [%d,%d] unclaimed=%d -> head end=%d tail=[%d,%d]",
+		best.Start, tail.End, bestUnclaimed, best.End, tail.Start, tail.End)
 
 	m.segs = append(m.segs, tail)
 	m.queue = append(m.queue, tail)
