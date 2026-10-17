@@ -70,7 +70,10 @@ if (-not $SkipBuild) {
     Write-Host '构建中...' -ForegroundColor Cyan
     Push-Location $desktop
     try {
-        & wails build | Select-String 'Built|ERROR' | ForEach-Object { Write-Host "  $_" }
+        # -trimpath: strips build-machine paths out of the binary (the
+        # pclntab otherwise carries C:\Users\<you>\... for every file) and
+        # makes builds reproducible; costs nothing measurable.
+        & wails build -trimpath | Select-String 'Built|ERROR' | ForEach-Object { Write-Host "  $_" }
         if ($LASTEXITCODE -ne 0) { throw "wails build 失败（exit $LASTEXITCODE）" }
     } finally { Pop-Location }
 }

@@ -131,6 +131,11 @@ type task struct {
 	// task, like referer above. Set once at creation, never changed.
 	cookie    string
 	userAgent string
+
+	// host caches urlHost(view.URL) for the content-based duplicate check,
+	// which walks every task per add. Loaded tasks fill it lazily on first
+	// use; an empty value simply falls back to parsing.
+	host string
 }
 
 // waitStopped blocks until the transfer goroutine has exited, or the timeout
@@ -224,6 +229,11 @@ type Manager struct {
 	// The check-then-insert in Start is not atomic on its own: both would
 	// see "no duplicate" before either inserted.
 	inflight map[string]struct{}
+
+	// probeSem bounds concurrent filename probes: a burst of unnamed adds
+	// (the extension can deliver dozens at once) otherwise opens dozens of
+	// simultaneous dials and engine instances against one weak host.
+	probeSem chan struct{}
 }
 
 func NewManager(app *App) *Manager {
@@ -233,6 +243,7 @@ func NewManager(app *App) *Manager {
 		pump:     make(chan TaskView, 512),
 		livedl:   make(map[string]*engine.Downloader),
 		inflight: make(map[string]struct{}),
+		probeSem: make(chan struct{}, 4),
 	}
 }
 
@@ -327,9 +338,13 @@ func (m *Manager) emit(v TaskView) {
 	select {
 	case m.pump <- v:
 	default:
-		select {
-		case <-m.pump:
-		default:
+		// Saturated: shed the whole stale backlog in favour of the newest
+		// snapshot. Dropping a single frame still left the pump to replay the
+		// rest of the queue — old positions first, so the UI visibly jumped
+		// backwards before correcting itself. Every task's next throttled
+		// tick re-fills whatever was shed here.
+		for len(m.pump) > 0 {
+			<-m.pump
 		}
 		select {
 		case m.pump <- v:
@@ -353,15 +368,21 @@ func snapshot(t *task) TaskView {
 
 // List returns every task, newest first.
 func (m *Manager) List() []TaskView {
+	// One manager lock for the whole sweep: the per-id get() walk took and
+	// released m.mu once per task, so a list of N tasks paid N lock cycles
+	// on top of the N task locks below.
 	m.mu.Lock()
-	ids := append([]string(nil), m.order...)
+	tasks := make([]*task, 0, len(m.order))
+	for _, id := range m.order {
+		if t := m.tasks[id]; t != nil {
+			tasks = append(tasks, t)
+		}
+	}
 	m.mu.Unlock()
 
-	out := make([]TaskView, 0, len(ids))
-	for _, id := range ids {
-		if t := m.get(id); t != nil {
-			out = append(out, snapshot(t))
-		}
+	out := make([]TaskView, 0, len(tasks))
+	for _, t := range tasks {
+		out = append(out, snapshot(t))
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Created > out[j].Created })
 	return out
@@ -478,10 +499,15 @@ func (m *Manager) waitUnfinished(url, dest string, timeout time.Duration) *task 
 
 // matchSameContent is the predicate behind findSameContent, shared with the
 // insertion check in Start so both layers agree on what "same file" means.
-func matchSameContent(v TaskView, url, name string, size int64) bool {
-	host := urlHost(url)
+// Both hosts arrive pre-parsed: the callers walk O(n) candidates per add, and
+// a url.Parse per candidate made a burst of adds quadratic.
+func matchSameContent(v TaskView, url, host, vHost, name string, size int64) bool {
 	if host == "" || name == "" {
 		return false
+	}
+	if vHost == "" {
+		// A task loaded from disk has no cached host yet.
+		vHost = urlHost(v.URL)
 	}
 	// Identical URLs are the first layer's business (same link to
 	// another folder is allowed); this layer is only for different
@@ -489,7 +515,7 @@ func matchSameContent(v TaskView, url, name string, size int64) bool {
 	return v.URL != url &&
 		v.Status != StatusCompleted &&
 		v.Name != "" && v.Name == name &&
-		urlHost(v.URL) == host &&
+		vHost == host &&
 		(size <= 0 || v.Size <= 0 || v.Size == size)
 }
 
@@ -501,6 +527,9 @@ func matchSameContent(v TaskView, url, name string, size int64) bool {
 // matches. excludeID skips one task, for the post-probe check of the newcomer
 // itself.
 func (m *Manager) findSameContent(url, name string, size int64, excludeID string) *task {
+	// One parse for the incoming URL; the cached per-task hosts below cover
+	// the candidate side.
+	host := urlHost(url)
 	m.mu.Lock()
 	ids := append([]string(nil), m.order...)
 	m.mu.Unlock()
@@ -515,7 +544,10 @@ func (m *Manager) findSameContent(url, name string, size int64, excludeID string
 		}
 		t.mu.Lock()
 		v := t.view
-		match := matchSameContent(v, url, name, size)
+		if t.host == "" && v.URL != "" {
+			t.host = urlHost(v.URL)
+		}
+		match := matchSameContent(v, url, host, t.host, name, size)
 		t.mu.Unlock()
 		if match {
 			return t
@@ -713,6 +745,7 @@ func (m *Manager) Start(req StartRequest) (TaskView, error) {
 		cookie:    strings.ReplaceAll(strings.ReplaceAll(strings.TrimSpace(req.Cookie), "\r", ""), "\n", ""),
 		userAgent: strings.ReplaceAll(strings.ReplaceAll(strings.TrimSpace(req.UserAgent), "\r", ""), "\n", ""),
 		manual:    req.Manual,
+		host:      urlHost(url),
 	}
 	t.view = TaskView{
 		ID:      id,
@@ -730,10 +763,11 @@ func (m *Manager) Start(req StartRequest) (TaskView, error) {
 	// host+name, and both would have inserted (the url+dest inflight guard
 	// does not cover different URLs for the same file).
 	if !needsProbe {
+		host := urlHost(url)
 		for _, other := range m.tasks {
 			other.mu.Lock()
 			v := other.view
-			dup := matchSameContent(v, url, name, 0)
+			dup := matchSameContent(v, url, host, other.host, name, 0)
 			other.mu.Unlock()
 			if dup {
 				m.mu.Unlock()
@@ -800,6 +834,12 @@ func untouchedTask(t *task) bool {
 // untouched (paused with nothing downloaded); a task the user already started
 // is left alone, and so is anything whose row already vanished.
 func (m *Manager) fillProbedName(id, url string, req StartRequest) {
+	// Bound concurrent probes: a burst of unnamed adds (the extension can
+	// deliver dozens at once) otherwise opens a dial plus an engine instance
+	// per add against the same host.
+	m.probeSem <- struct{}{}
+	defer func() { <-m.probeSem }()
+
 	pn, ps := m.probeName(url, req)
 	if pn == "" && ps <= 0 {
 		return
@@ -939,11 +979,27 @@ func (m *Manager) maxConcurrent() int {
 	return n
 }
 
-// activeCount counts transferring tasks. It copies the task pointers under
-// m.mu and inspects them after releasing it: locking a task while holding m.mu
-// would invert the lock order used everywhere else (task first, manager
-// second) and could deadlock against a concurrent Pause.
-func (m *Manager) activeCount() int {
+// taskCounts is the aggregate figure set the sidebar, the plan watcher and
+// Stats need, tallied in one pass over the table.
+type taskCounts struct {
+	active, completed, failed, queued, paused, canceled int64
+	speed                                               int64
+	total                                               int64
+}
+
+// intervened reports whether a settled plan was interrupted: a cancelled,
+// paused or failed task means the user stepped in, so end-of-plan actions
+// (sound, shutdown) must be skipped.
+func (c taskCounts) intervened() bool {
+	return c.canceled > 0 || c.paused > 0 || c.failed > 0
+}
+
+// countByStatus tallies the table once. It snapshots the task pointers under
+// m.mu and reads each view under the task's own lock — the same lock order as
+// everywhere else — but skips the TaskView copies and the sort that List pays
+// for. The plan watcher polls this every 500ms; routing it through List made
+// the idle app sort the whole table twice a second for two numbers.
+func (m *Manager) countByStatus() taskCounts {
 	m.mu.Lock()
 	tasks := make([]*task, 0, len(m.tasks))
 	for _, t := range m.tasks {
@@ -951,16 +1007,33 @@ func (m *Manager) activeCount() int {
 	}
 	m.mu.Unlock()
 
-	n := 0
+	var c taskCounts
 	for _, t := range tasks {
 		t.mu.Lock()
-		running := t.view.Status == StatusDownloading
-		t.mu.Unlock()
-		if running {
-			n++
+		switch t.view.Status {
+		case StatusDownloading:
+			c.active++
+			c.speed += t.view.Speed
+		case StatusCompleted:
+			c.completed++
+		case StatusFailed:
+			c.failed++
+		case StatusQueued:
+			c.queued++
+		case StatusPaused:
+			c.paused++
+		case StatusCanceled:
+			c.canceled++
 		}
+		c.total++
+		t.mu.Unlock()
 	}
-	return n
+	return c
+}
+
+// activeCount counts transferring tasks.
+func (m *Manager) activeCount() int {
+	return int(m.countByStatus().active)
 }
 
 // pumpQueue starts queued tasks while slots are free. It runs after every
@@ -974,26 +1047,26 @@ func (m *Manager) pumpQueue() {
 	if frozen {
 		return
 	}
-	for {
-		if m.activeCount() >= m.maxConcurrent() {
-			return
+	// One snapshot per pump. The old loop re-ran List (full copy + sort) and
+	// activeCount (full scan) for every task it started, which made StartAll
+	// over a hundred queued tasks quadratic.
+	list := m.List()
+	active := 0
+	for _, v := range list {
+		if v.Status == StatusDownloading {
+			active++
 		}
-		// List returns newest first; walk from the end so the oldest queued
-		// task wins the freed slot.
-		list := m.List()
-		var nextID string
-		for i := len(list) - 1; i >= 0; i-- {
-			if list[i].Status == StatusQueued {
-				nextID = list[i].ID
-				break
-			}
+	}
+	max := m.maxConcurrent()
+	// List returns newest first; walk from the end so the oldest queued task
+	// wins the freed slot.
+	for i := len(list) - 1; i >= 0 && active < max; i-- {
+		if list[i].Status != StatusQueued {
+			continue
 		}
-		if nextID == "" {
-			return
-		}
-		next := m.get(nextID)
+		next := m.get(list[i].ID)
 		if next == nil {
-			return
+			continue
 		}
 		next.mu.Lock()
 		stillQueued := next.view.Status == StatusQueued
@@ -1002,6 +1075,15 @@ func (m *Manager) pumpQueue() {
 			continue
 		}
 		m.startRun(next)
+		// Count only what actually started: startRun re-checks the live count
+		// and parks the task when a concurrent starter took the slot, and
+		// over-counting here would leave a free slot idle until the next
+		// settle point pumped the queue again.
+		next.mu.Lock()
+		if next.view.Status == StatusDownloading {
+			active++
+		}
+		next.mu.Unlock()
 	}
 }
 
@@ -1140,11 +1222,23 @@ func (m *Manager) Cancel(id string) error {
 	return nil
 }
 
-// Remove drops a task, optionally deleting the files it produced.
-func (m *Manager) Remove(id string, deleteFiles bool) error {
+// removal is what a detached task's waiter still needs to finish cleaning up.
+type removal struct {
+	t           *task
+	dest        string
+	name        string
+	wasComplete bool
+	deleteFiles bool
+}
+
+// detach cancels a task and unlinks it from the index. The wait for the
+// transfer goroutine, any file deletion and the queue pump stay with the
+// caller, so a bulk remove can share one waiter instead of spawning a
+// goroutine per row.
+func (m *Manager) detach(id string) (removal, error) {
 	t := m.get(id)
 	if t == nil {
-		return fmt.Errorf("任务不存在")
+		return removal{}, fmt.Errorf("任务不存在")
 	}
 	t.mu.Lock()
 	cancel := t.cancel
@@ -1174,34 +1268,51 @@ func (m *Manager) Remove(id string, deleteFiles bool) error {
 	m.mu.Unlock()
 
 	m.app.emit("task:removed", id)
+	return removal{t: t, dest: dest, name: name, wasComplete: wasComplete}, nil
+}
+
+// settleRemoval waits for the task's transfer goroutine to stop and deletes
+// the files the record owned. It does not pump the queue: the caller decides
+// when one pump is worth it.
+func (m *Manager) settleRemoval(r removal) {
+	// Same reasoning as Cancel: the goroutine may still be writing, so
+	// waiting avoids a race between removal and a final flush.
+	r.t.waitStopped(3 * time.Second)
+
+	// Records go; an unfinished task's partial data goes with them. A
+	// .part + sidecar without their index entry can never resume (the
+	// next attempt at the same URL starts from scratch), so leaving them
+	// behind only accumulates junk named after URL tokens. A completed
+	// task's file is the user's data: it is removed only when the caller
+	// explicitly asked for it, never as a side effect of tidying the list.
+	// partialPaths mirrors the engine's dir+suggested-name resolution:
+	// tasks created without a filename keep Dest as the directory.
+	if !r.wasComplete {
+		part, state := partialPaths(r.dest, r.name)
+		_ = os.Remove(part)
+		_ = os.Remove(state)
+	}
+	if r.deleteFiles {
+		// Only delete the published file when the task actually produced
+		// one, so a failed task cannot remove an unrelated file sharing
+		// the name.
+		if r.wasComplete {
+			_ = os.Remove(r.dest)
+		}
+	}
+}
+
+// Remove drops a task, optionally deleting the files it produced.
+func (m *Manager) Remove(id string, deleteFiles bool) error {
+	r, err := m.detach(id)
+	if err != nil {
+		return err
+	}
+	r.deleteFiles = deleteFiles
 	_ = m.saveTasks()
 
 	go func() {
-		// Same reasoning as Cancel: the goroutine may still be writing, so
-		// waiting avoids a race between removal and a final flush.
-		t.waitStopped(3 * time.Second)
-
-		// Records go; an unfinished task's partial data goes with them. A
-		// .part + sidecar without their index entry can never resume (the
-		// next attempt at the same URL starts from scratch), so leaving them
-		// behind only accumulates junk named after URL tokens. A completed
-		// task's file is the user's data: it is removed only when the caller
-		// explicitly asked for it, never as a side effect of tidying the list.
-		// partialPaths mirrors the engine's dir+suggested-name resolution:
-		// tasks created without a filename keep Dest as the directory.
-		if !wasComplete {
-			part, state := partialPaths(dest, name)
-			_ = os.Remove(part)
-			_ = os.Remove(state)
-		}
-		if deleteFiles {
-			// Only delete the published file when the task actually produced
-			// one, so a failed task cannot remove an unrelated file sharing
-			// the name.
-			if wasComplete {
-				_ = os.Remove(dest)
-			}
-		}
+		m.settleRemoval(r)
 		m.pumpQueue()
 	}()
 	return nil
@@ -1214,15 +1325,29 @@ func (m *Manager) Remove(id string, deleteFiles bool) error {
 // what the filter was. Finished files are never touched; unfinished partials
 // go with their records.
 func (m *Manager) RemoveTasks(ids []string) int {
-	removed := 0
+	var rs []removal
 	m.batch(func() {
 		for _, id := range ids {
-			if err := m.Remove(id, false); err == nil {
-				removed++
+			if r, err := m.detach(id); err == nil {
+				rs = append(rs, r)
 			}
 		}
+		// Marks dirty inside the batch; one real write happens at the end.
+		_ = m.saveTasks()
 	})
-	return removed
+	if len(rs) == 0 {
+		return 0
+	}
+	// One waiter for the whole batch: a goroutine per row, each waking into
+	// its own pumpQueue, made a hundred-row delete a hundred table sweeps
+	// plus a goroutine spike.
+	go func() {
+		for _, r := range rs {
+			m.settleRemoval(r)
+		}
+		m.pumpQueue()
+	}()
+	return len(rs)
 }
 
 // RemoveFailed drops every failed record.
@@ -1319,8 +1444,8 @@ func (m *Manager) StartPlan() (int, error) {
 	// pumpQueue pulls in as slots free up. Refusing the plan in that case
 	// ("没有等待下载的任务") made the plan button dead exactly when the list
 	// was full of queued tasks.
-	stats := m.Stats()
-	covered := int(stats["active"] + stats["queued"])
+	c := m.countByStatus()
+	covered := int(c.active + c.queued)
 	if covered == 0 {
 		m.mu.Lock()
 		m.planRunning = false
@@ -1403,12 +1528,6 @@ func intervenedStatus(s TaskStatus) bool {
 	return s == StatusCanceled || s == StatusPaused || s == StatusFailed
 }
 
-// statsIntervened is the aggregate form of intervenedStatus for the global
-// watcher, which only has counts to look at.
-func statsIntervened(stats map[string]int64) bool {
-	return stats["canceled"] > 0 || stats["paused"] > 0 || stats["failed"] > 0
-}
-
 // watchPlanSelected waits until every planned task has settled, then finishes
 // the plan. Removal or cancellation of a planned task counts as settling but
 // marks the plan as intervened, which skips the end actions — same rule as
@@ -1472,8 +1591,8 @@ func (m *Manager) watchPlan() {
 	defer ticker.Stop()
 
 	for range ticker.C {
-		stats := m.Stats()
-		if stats["active"] == 0 && stats["queued"] == 0 {
+		c := m.countByStatus()
+		if c.active == 0 && c.queued == 0 {
 			m.finishPlan()
 			return
 		}
@@ -1490,7 +1609,7 @@ func (m *Manager) finishPlan() {
 	// completion: the user intervened (or something broke). Firing the
 	// end-of-plan actions anyway — especially a machine shutdown — would
 	// punish cancelling.
-	m.finishPlanEnd(statsIntervened(m.Stats()))
+	m.finishPlanEnd(m.countByStatus().intervened())
 }
 
 // finishPlanEnd emits plan:done and runs the configured end actions, unless
@@ -1581,12 +1700,6 @@ func (m *Manager) run(t *task, ctx context.Context, cancel context.CancelFunc, d
 	opt.SavePercent = 0
 	if cfg.ResumeFlushByPct {
 		opt.SavePercent = cfg.ResumeFlushPct
-	}
-	if !cfg.ResumeFlushBySize {
-		opt.SaveBytes = -1
-	}
-	if !cfg.ResumeFlushByTime {
-		opt.SaveInterval = -1
 	}
 	if !cfg.ResumeFlushBySize {
 		opt.SaveBytes = -1
@@ -1881,30 +1994,12 @@ func humanError(err error) string {
 // nothing queued" as "the plan has finished", and a paused task counted as
 // queued would keep a plan running forever.
 func (m *Manager) Stats() map[string]int64 {
-	list := m.List()
-	out := map[string]int64{
-		"active": 0, "completed": 0, "failed": 0,
-		"queued": 0, "paused": 0, "canceled": 0,
-		"total": int64(len(list)), "speed": 0,
+	c := m.countByStatus()
+	return map[string]int64{
+		"active": c.active, "completed": c.completed, "failed": c.failed,
+		"queued": c.queued, "paused": c.paused, "canceled": c.canceled,
+		"total": c.total, "speed": c.speed,
 	}
-	for _, v := range list {
-		switch v.Status {
-		case StatusDownloading:
-			out["active"]++
-			out["speed"] += v.Speed
-		case StatusCompleted:
-			out["completed"]++
-		case StatusFailed:
-			out["failed"]++
-		case StatusQueued:
-			out["queued"]++
-		case StatusPaused:
-			out["paused"]++
-		case StatusCanceled:
-			out["canceled"]++
-		}
-	}
-	return out
 }
 
 // persistedTask is the on-disk form of a task: the TaskView the UI shows plus
@@ -2044,6 +2139,20 @@ func (m *Manager) loadTasks() {
 		return
 	}
 
+	// Stat every completed destination before taking the lock. A missing
+	// network drive can stall a Stat for seconds, and holding m.mu across
+	// the whole restore would freeze List/Stats/Start with it. The lock only
+	// needs to cover the map insertion below.
+	gone := make([]bool, len(list))
+	for i := range list {
+		if list[i].TaskView.Status != StatusCompleted {
+			continue
+		}
+		if _, statErr := os.Stat(list[i].TaskView.Dest); os.IsNotExist(statErr) {
+			gone[i] = true
+		}
+	}
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	seen := map[string]bool{}
@@ -2063,11 +2172,9 @@ func (m *Manager) loadTasks() {
 		// claiming to be complete. Only a missing file flips it: any other
 		// stat error (permissions, transient I/O) leaves the record alone,
 		// so a flaky disk cannot mass-fail the library.
-		if v.Status == StatusCompleted {
-			if _, statErr := os.Stat(v.Dest); os.IsNotExist(statErr) {
-				v.Status = StatusFailed
-				v.Error = "文件已被移动或删除"
-			}
+		if gone[i] {
+			v.Status = StatusFailed
+			v.Error = "文件已被移动或删除"
 		}
 		m.tasks[v.ID] = &task{
 			view:      v,

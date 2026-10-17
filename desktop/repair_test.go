@@ -156,17 +156,21 @@ func TestPlanIntervenedSemantics(t *testing.T) {
 			t.Errorf("intervenedStatus(%s) = %v, want %v", s, got, want)
 		}
 	}
-	stats := map[string]int64{"canceled": 0, "paused": 1, "failed": 0}
-	if !statsIntervened(stats) {
-		t.Error("statsIntervened missed a paused task")
+	counts := taskCounts{paused: 1}
+	if !counts.intervened() {
+		t.Error("taskCounts.intervened missed a paused task")
 	}
-	stats = map[string]int64{"canceled": 0, "paused": 0, "failed": 1}
-	if !statsIntervened(stats) {
-		t.Error("statsIntervened missed a failed task")
+	counts = taskCounts{failed: 1}
+	if !counts.intervened() {
+		t.Error("taskCounts.intervened missed a failed task")
 	}
-	stats = map[string]int64{"canceled": 0, "paused": 0, "failed": 0}
-	if statsIntervened(stats) {
-		t.Error("statsIntervened fired on a clean plan")
+	counts = taskCounts{canceled: 1}
+	if !counts.intervened() {
+		t.Error("taskCounts.intervened missed a canceled task")
+	}
+	counts = taskCounts{}
+	if counts.intervened() {
+		t.Error("taskCounts.intervened fired on a clean plan")
 	}
 
 	// A failed task must settle a scoped plan, not hang its watcher: failed

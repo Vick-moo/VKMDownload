@@ -108,24 +108,27 @@ func (a *App) startup(ctx context.Context) {
 	a.cfg = loadConfig(a.configPath())
 	a.mu.Unlock()
 
-	// Write the settings back immediately. A fresh install otherwise has no
-	// file on disk until the user changes something, which makes "where are my
-	// settings?" unanswerable and hides a broken data directory until later.
-	if err := saveConfig(a.configPath(), a.cfg); err != nil {
-		runtime.LogErrorf(ctx, "保存设置失败: %v", err)
+	// Write the settings only when the file does not exist yet: a fresh
+	// install otherwise has no file on disk until the user changes something,
+	// which makes "where are my settings?" unanswerable and hides a broken
+	// data directory. Writing unconditionally on every start just churned
+	// the disk (and the antivirus real-time scan) to re-persist values the
+	// file already holds.
+	if _, err := os.Stat(a.configPath()); os.IsNotExist(err) {
+		if err := saveConfig(a.configPath(), a.cfg); err != nil {
+			runtime.LogErrorf(ctx, "保存设置失败: %v", err)
+		}
 	}
 
-	a.mgr.loadTasks()
-	go a.mgr.Run(ctx)
+	// Everything that does not read the task table starts first: the tray
+	// and the update check used to queue behind loadTasks for no reason of
+	// their own. The clipboard watch and the extension endpoint stay after
+	// the restore — a capture or an /add arriving mid-restore could otherwise
+	// slip past a duplicate check that has not seen the disk tasks yet.
 
 	// System-tray icon. Without it "minimise to tray" hides the window with
 	// nothing to bring it back from, which reads as a broken close button.
 	go a.startTray()
-
-	// The browser extension's endpoint. It lives and dies with the app's
-	// context rather than the window's, so closing the window to the tray does
-	// not cut the extension off.
-	go a.startLocalAPI(ctx)
 
 	// Files dropped onto the window become new tasks.
 	runtime.OnFileDrop(ctx, func(_, _ int, paths []string) {
@@ -134,11 +137,23 @@ func (a *App) startup(ctx context.Context) {
 		}
 	})
 
-	a.RestartClipboardWatch()
-
 	// Update check never blocks startup and never fails it: offline machines
 	// start exactly as fast as online ones.
 	go a.checkUpdateOnce()
+
+	a.mgr.loadTasks()
+	// The front-end's initial listTasks can land while the restore is still
+	// running and see an empty table; this event tells it to reload once the
+	// real list exists.
+	a.emit("tasks:loaded", nil)
+	go a.mgr.Run(ctx)
+
+	// The browser extension's endpoint. It lives and dies with the app's
+	// context rather than the window's, so closing the window to the tray does
+	// not cut the extension off.
+	go a.startLocalAPI(ctx)
+
+	a.RestartClipboardWatch()
 }
 
 // domReady runs after the front-end has loaded.
