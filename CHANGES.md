@@ -441,6 +441,15 @@
 - Docs: README 4-setting table + peer-check security section; PRIVACY
   cookie scope + notifications/session rows; Draft comment fixed.
 
+### 47. 性能优化批（UNRELEASED，只读性能审计后自查自改）
+- 引擎：ReserveSize 默认 512KiB→16MiB、上限钳 64MiB（高延迟源不再被"每 512KiB 一个 RTT"卡死单 worker ~10MB/s；claim 是记账不是内存，读仍按 ChunkSize 走）；ChunkSize 默认 128KiB→256KiB（与池块对齐，每字节的 WriteAt/commit/限速税减半）；分段下载启动时 Truncate 预分配到完整大小（高段写入不再按需零填空洞、碎片减少，尽力而为失败不阻断）；sidecar 改紧凑 JSON；splitLargest 改切"claim 之后的未认领区"（旧规则要求无在途 claim，而 worker 全程持 claim，动态分片实际从未触发过；新切点保证 claim 全留在头段）；进度回调改 TryLock 丢弃 + finish() 走阻塞 emitFinal（慢 UI 不再串住 worker，终帧 100% 必达）。测试更新：claim 内不越界切分、全被 claim 时拒绝切分。
+- 后端：pumpQueue 单快照（原来每启动一个排队任务都全表 List+activeCount，StartAll 上百任务 O(N²)→O(N logN)）；loadTasks 的 completed Stat 挪出 m.mu（断网盘卡 Stat 不再冻结 List/Stats/Start）；List 改单次管理器锁；新增 countByStatus 一遍扫描（Stats/计划观察器 500ms 轮询不再全表拷贝+排序，statsIntervened 并入 taskCounts.intervened）；批量删除合并为单 waiter goroutine + 一次 pumpQueue（原来每行一个 3s waiter 各自唤醒扫全表）；同内容查重按任务缓存 host（add 高频不再每候选 url.Parse）；文件名探测加 4 并发信号量（扩展 burst 添加不再几十个并发 dial）；进度泵饱和改整队倾泻（不再回放旧位置造成进度回跳）；run() 选项构造里贴了两遍的 ResumeFlush 块删除。
+- 启动：tray/文件拖放/更新检查提前到 loadTasks 之前；config.json 只在文件缺失时写（原每次启动无条件重写+触发杀软实时扫描）；恢复完成后发 tasks:loaded 事件、前端收到即 reload（修"首屏 listTasks 撞上恢复中拿到空表且无人纠正"的竞态）；release.ps1 构建 -trimpath（去 exe 内本机路径，可复现构建）。
+- 体积：third_party/systray 内置 fyne.io/systray v1.12.2 单补丁副本——上游 systray_notifier_unix.go 缺 //go:build 约束（_unix 后缀不是隐式平台约束），把 Linux-only 的 godbus/dbus + notifier 链进每个 Windows 构建。desktop/go.mod replace 指向本地副本。实测本地 exe 13,273,600→12,909,568 B（-364,032 B），二进制内 godbus 串 506→0。见 third_party/systray/PATCH.md。
+- 前端：TaskList 排序预计算每行 key + Intl.Collator 模块单例 + failed 置顶并入同一次比较（原来两趟 sort）；顺序指纹缓存——progress tick 不再每 250ms 全表 O(n log n) localeCompare 重排（不变序时映射旧序到新对象，行照常刷新）；分组一次遍历同时产出各组 exts（原来每组各扫全表）；列宽/侧栏宽度 localStorage 防抖 300ms（拖拽不再逐帧写盘）；keydown 全局监听改 ref 单次订阅（原来每次 tick 重挂）；formatWhen 的"今天"按分钟缓存。
+- 验证：go vet 全过；engine go test 全绿；desktop go test 除基线已知 TempDir 清理竞态（轮换 victim，单测隔离全过）外全绿；tsc 0 错；vitest 22/22；扩展 node 测试未动本轮无改。新 exe 已构建并重启（本地实测 PID 2084，日志干净）。
+- 有意不做并记录原因：ReserveSize 自适应（先吃默认值 80% 收益）；debugf 环境变量缓存（与测试 t.Setenv 生命周期冲突）；saveTasks 紧凑 JSON（Indent 是诊断可读性、故意的，且突发写量受 maxConcurrent 限界）；任务列表虚拟化（当前规模用不上）；Sidebar memo（内联 lambda 会抵消收益）；探测完成校验彻底异步化（保持语义不变，只把 Stat 挪出锁）；前端 gzip 资产、更新检查延迟（收益/成本比不足）。
+
 ## TODO (user requested, work later)
 
 - Detached ask-location popup WITHOUT v3 migration (backup plan).
