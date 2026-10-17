@@ -35,6 +35,12 @@ $repo = 'Vick-moo/VKMDownload'
 
 # --------------------------------------------------------------- 预检 ---
 
+# Git 把"没找到"也写进 stderr（rev-parse 报 fatal、fetch 报进度），而脚本
+# 顶部设了 $ErrorActionPreference='Stop'，PowerShell 会把原生命令的 stderr
+# 升级成终止错误 —— 于是"tag 不存在"这个正常状态反而把预检自己毙了。
+# 预检段因此容忍 stderr，只按退出码和输出判断；真正的失败路径全部显式 throw。
+$ErrorActionPreference = 'Continue'
+
 # 缺一即停：tag 已存在 / 工作区不干净 / 版本号替换无命中。
 # 只做检查，不动下面的发版主流程。
 git rev-parse --verify "v$Version" 2>$null | Out-Null
@@ -53,6 +59,9 @@ if ($unpushed) {
     $n = ($unpushed | Measure-Object).Count
     throw "main 上有 $n 个未 push 的 commit，先 git push 再发版。"
 }
+
+# 预检到此为止：后面开始真正动文件/调 API，恢复严格模式。
+$ErrorActionPreference = 'Stop'
 
 # --------------------------------------------------------------- 版本号 ---
 
