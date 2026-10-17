@@ -11,9 +11,6 @@ import (
 	"sync"
 )
 
-// errPeerCheckUnsupported is returned by the non-Windows stubs, where the
-// peer table and Authenticode APIs do not exist.
-
 // VerifyPeerProcess, when true, makes the loopback endpoint confirm that the
 // process on the other end of each connection is a genuine signed browser
 // before honouring the request. An Origin header is self-reported and costs
@@ -111,8 +108,8 @@ func (a *App) checkPeerProcess(r *http.Request) (bool, string) {
 	// changes during verification, the stored identity will not match next
 	// time and the verdict is recomputed instead of trusted.
 	mtime, size, stated := statOf(exe)
-	if hit := peerTrust.getAt(exe, mtime, size, stated); hit != nil {
-		if !*hit {
+	if hit, found := peerTrust.getAt(exe, mtime, size, stated); found {
+		if !hit {
 			a.debugLog("peer check: rejected untrusted image %s", exe)
 			return false, exe
 		}
@@ -127,11 +124,6 @@ func (a *App) checkPeerProcess(r *http.Request) (bool, string) {
 	return true, ""
 }
 
-func (c *trustCache) get(exe string) *bool {
-	mtime, size, stated := statOf(exe)
-	return c.getAt(exe, mtime, size, stated)
-}
-
 // statOf stats once so verification and caching share the same file identity:
 // otherwise a swap between the check and the store would file a stale
 // verdict under a fresh mtime.
@@ -143,22 +135,20 @@ func statOf(exe string) (mtime int64, size int64, ok bool) {
 	return st.ModTime().UnixNano(), st.Size(), true
 }
 
-func (c *trustCache) getAt(exe string, mtime, size int64, ok bool) *bool {
+// getAt reports the cached verdict for exe when the file identity matches,
+// as (verdict, found). Returning a pointer into the map entry was technically
+// fine under the lock but needlessly delicate to read.
+func (c *trustCache) getAt(exe string, mtime, size int64, ok bool) (bool, bool) {
 	if !ok {
-		return nil
+		return false, false
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	v, found := c.hits[cacheKey(exe)]
 	if !found || v.mtime != mtime || v.size != size {
-		return nil
+		return false, false
 	}
-	return &v.ok
-}
-
-func (c *trustCache) put(exe string, ok bool) {
-	mtime, size, stated := statOf(exe)
-	c.putAt(exe, mtime, size, stated, ok)
+	return v.ok, true
 }
 
 func (c *trustCache) putAt(exe string, mtime, size int64, stated, ok bool) {
