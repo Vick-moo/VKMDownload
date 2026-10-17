@@ -482,3 +482,102 @@ func TestLocalAPIAddKeepsTheFilenameInTheDownloadFolder(t *testing.T) {
 		t.Errorf("dest = %q still contains a traversal", v.Dest)
 	}
 }
+
+// TestLocalAPIAddCarriesSizeBeforeStarting covers the handover's size: the
+// browser already read Content-Length, so the row shows the total while the
+// task is still paused instead of reading "0 B" until a transfer begins.
+func TestLocalAPIAddCarriesSizeBeforeStarting(t *testing.T) {
+	const wantSize int64 = 3145728
+
+	app := newTestApp(t)
+	// Ask-location would hold the arrival for placement instead of creating.
+	disableAskLocation(t, app)
+	// The size is observable on the row before any transfer starts, so the
+	// direct-add scenario is the one where nothing auto-starts: with auto-start
+	// on, the task leaves paused before the reply is even read.
+	cfg := app.Config()
+	cfg.AutoStart = false
+	if err := app.SetConfig(cfg); err != nil {
+		t.Fatalf("SetConfig: %v", err)
+	}
+	base := startAPI(t, app)
+
+	resp := postJSON(t, base+"/add", "chrome-extension://abcdefghijklmnop",
+		`{"url":"http://127.0.0.1:1/sized.bin","filename":"sized.bin","size":3145728}`)
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	var body struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.ID == "" {
+		t.Fatal("no task id returned")
+	}
+
+	v, ok := find(app.mgr, body.ID)
+	if !ok {
+		t.Fatal("the task is not in the manager")
+	}
+	// The point of the size handover: it is known before anything transfers.
+	if v.Status != StatusPaused {
+		t.Errorf("status = %s, want paused", v.Status)
+	}
+	if v.Size != wantSize {
+		t.Errorf("size = %d, want %d", v.Size, wantSize)
+	}
+}
+
+// TestLocalAPIAddAsksLocationWithSize covers the same handover on the
+// ask-location path: no task is created, and the location:ask payload carries
+// the size so the placement dialog can show it too.
+func TestLocalAPIAddAsksLocationWithSize(t *testing.T) {
+	const wantSize = "3145728"
+
+	app := newTestApp(t)
+
+	var mu sync.Mutex
+	var ask map[string]string
+	seen := 0
+	app.emit = func(name string, data ...any) {
+		if name != "location:ask" {
+			return
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		seen++
+		if len(data) > 0 {
+			if payload, ok := data[0].(map[string]string); ok {
+				ask = payload
+			}
+		}
+	}
+	base := startAPI(t, app)
+
+	resp := postJSON(t, base+"/add", "chrome-extension://abcdefghijklmnop",
+		`{"url":"http://127.0.0.1:1/wait.bin","filename":"wait.bin","size":3145728}`)
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	// Nothing exists yet: the arrival waits for the user to place it.
+	if n := len(app.mgr.List()); n != 0 {
+		t.Errorf("%d tasks created, want none before placement", n)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if seen == 0 || ask == nil {
+		t.Fatalf("no location:ask payload captured (events seen: %d)", seen)
+	}
+	if got := ask["size"]; got != wantSize {
+		t.Errorf("location:ask size = %q, want %q", got, wantSize)
+	}
+}

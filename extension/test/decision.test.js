@@ -246,3 +246,159 @@ describe("intercept fallback order", () => {
     }
   });
 });
+
+// ------------------------------------------------- coverage: report/toggle/policy/own
+// These pin the paths the earlier suites never asserted: the three report
+// branches, the toggle round trip (including the peer-check 403), the policy
+// cache TTL, and the own-download bookkeeping.
+
+/** Full chrome stub: enough surface for background.js to register every
+ *  listener, with the handlers captured for direct invocation. */
+function stubFullChrome() {
+  const state = { msg: null, changed: null, created: null, notes: [] };
+  globalThis.chrome = {
+    storage: {
+      local: { get: async () => ({}), set: async () => {}, remove: async () => {} },
+      session: { get: async () => ({}), set: async () => {} },
+    },
+    downloads: {
+      search: async () => [],
+      cancel: (_id, cb) => cb && cb(),
+      erase: (_id, cb) => cb && cb(),
+      download: async () => 1,
+      onCreated: { addListener: (fn) => { state.created = fn; } },
+      onChanged: { addListener: (fn) => { state.changed = fn; } },
+    },
+    cookies: { getAll: async () => [] },
+    notifications: { create: (o) => state.notes.push(o) },
+    contextMenus: { removeAll: (cb) => cb && cb(), create: () => {} },
+    runtime: {
+      onMessage: { addListener: (fn) => { state.msg = fn; } },
+      onInstalled: { addListener: () => {} },
+    },
+  };
+  return state;
+}
+
+/** Re-requires background.js so it registers listeners against the stub. */
+function rerequire() {
+  delete require.cache[require.resolve("../background.js")];
+  require("../background.js");
+  return globalThis.__vkmExt;
+}
+
+describe("report", () => {
+  it("distinguishes pending, duplicate, handed over and refused", () => {
+    const notes = [];
+    globalThis.chrome = { notifications: { create: (o) => notes.push(o) } };
+
+    ext.report({ pending: true, name: "a.zip" }, "fallback");
+    ext.report({ duplicate: true }, "b.zip");
+    ext.report({ ok: true }, "c.zip");
+    ext.report({ ok: false, refused: true, error: "已拒绝" }, "fallback");
+    ext.report({ ok: false, error: "打不通" }, "fallback");
+
+    assert.equal(notes[0].title, "已转到应用等确认");
+    assert.equal(notes[0].message, "a.zip");
+    assert.equal(notes[1].title, "已在下载列表中");
+    assert.equal(notes[1].message, "b.zip");
+    assert.equal(notes[2].title, "已交给 VKMDownload");
+    assert.equal(notes[3].title, "VKMDownload 没有响应");
+    assert.equal(notes[3].message, "已拒绝");
+    assert.equal(notes[3].priority, 2, "a refusal is urgent, not chatty");
+    assert.equal(notes[4].title, "VKMDownload 没有响应");
+    assert.ok(notes[4].message.includes("请先启动 VKMDownload"), notes[4].message);
+  });
+});
+
+describe("toggle", () => {
+  it("reports a peer-check 403 with the app's reason", async () => {
+    const state = stubFullChrome();
+    globalThis.fetch = async (url, opts) => {
+      const u = String(url);
+      if (u.endsWith("/ping")) {
+        return { ok: true, status: 200, json: async () => ({ app: "VKMDownload" }) };
+      }
+      if (u.endsWith("/settings") && opts && opts.method === "POST") {
+        return { ok: false, status: 403, json: async () => ({ error: "已拒绝：非浏览器进程" }) };
+      }
+      if (u.endsWith("/settings")) {
+        return { ok: true, status: 200, json: async () => ({ enabled: true, minSizeKb: 0, skipHosts: [] }) };
+      }
+      throw new Error(`unexpected fetch: ${u}`);
+    };
+    rerequire();
+    assert.equal(typeof state.msg, "function", "onMessage listener must be registered");
+
+    const resp = await new Promise((resolve) => state.msg("toggle", {}, resolve));
+    assert.deepEqual(resp, { refused: true, error: "已拒绝：非浏览器进程" });
+  });
+
+  it("flips the live value and answers with the new one", async () => {
+    const state = stubFullChrome();
+    globalThis.fetch = async (url, opts) => {
+      const u = String(url);
+      if (u.endsWith("/ping")) {
+        return { ok: true, status: 200, json: async () => ({ app: "VKMDownload" }) };
+      }
+      if (u.endsWith("/settings") && opts && opts.method === "POST") {
+        return { ok: true, status: 200, json: async () => ({}) };
+      }
+      return { ok: true, status: 200, json: async () => ({ enabled: true, minSizeKb: 0, skipHosts: [] }) };
+    };
+    rerequire();
+
+    const resp = await new Promise((resolve) => state.msg("toggle", {}, resolve));
+    assert.deepEqual(resp, { enabled: false }, "enabled:true must flip to false");
+  });
+});
+
+describe("getPolicy cache", () => {
+  it("serves the 3s cache, refetches after it expires, and bypasses on fresh", async () => {
+    stubChrome();
+    let settings = 0;
+    globalThis.fetch = async (url) => {
+      const u = String(url);
+      if (u.endsWith("/ping")) {
+        return { ok: true, status: 200, json: async () => ({ app: "VKMDownload" }) };
+      }
+      if (u.endsWith("/settings")) {
+        settings++;
+        return { ok: true, status: 200, json: async () => ({ enabled: true, minSizeKb: 0, skipHosts: [] }) };
+      }
+      throw new Error(`unexpected fetch: ${u}`);
+    };
+
+    let fake = 10_000_000;
+    const realNow = Date.now;
+    Date.now = () => fake;
+    try {
+      await ext.getPolicy();
+      await ext.getPolicy();
+      assert.equal(settings, 1, "a read inside the TTL must come from the cache");
+      fake += 4000;
+      await ext.getPolicy();
+      assert.equal(settings, 2, "an expired cache must refetch");
+      await ext.getPolicy(true);
+      assert.equal(settings, 3, "fresh=true must bypass the cache");
+    } finally {
+      Date.now = realNow;
+    }
+  });
+});
+
+describe("own download tracking", () => {
+  it("caps the remembered ids at 1000 and forgets settled ones", () => {
+    const state = stubFullChrome();
+    const fresh = rerequire();
+
+    for (let i = 1; i <= 1001; i++) fresh.trackOwn(i);
+    assert.equal(fresh.ownDownloads.size, 1000, "the cap must hold");
+    assert.ok(fresh.ownDownloads.has(1001), "the newest id must survive");
+    assert.ok(!fresh.ownDownloads.has(1), "the oldest id must be evicted first");
+
+    assert.equal(typeof state.changed, "function", "onChanged listener must be registered");
+    state.changed({ id: 1001, state: { current: "complete" } });
+    assert.ok(!fresh.ownDownloads.has(1001), "a completed own download must be forgotten");
+  });
+});

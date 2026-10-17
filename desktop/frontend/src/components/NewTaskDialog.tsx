@@ -16,6 +16,8 @@ interface Props {
   initialCookie?: string;
   /** Browser UA, replayed when the engine's default is refused. */
   initialUserAgent?: string;
+  /** Browser-known total size in bytes; 0 means unknown. */
+  initialSize?: number;
   /** True when opened to place an intercepted download: closing abandons it,
       and the browser-hint below applies. */
   fromAsk?: boolean;
@@ -41,6 +43,7 @@ export function NewTaskDialog({
   initialReferer,
   initialCookie,
   initialUserAgent,
+  initialSize,
   fromAsk,
   config,
   onClose,
@@ -73,7 +76,7 @@ export function NewTaskDialog({
     setConns(config?.connections ?? 8);
     // Focus lands on the field the user most likely wants.
     window.setTimeout(() => urlRef.current?.focus(), 30);
-  }, [open, initialURL, initialFilename, initialReferer, initialCookie, initialUserAgent, fromAsk, config]);
+  }, [open, initialURL, initialFilename, initialReferer, initialCookie, initialUserAgent, initialSize, fromAsk, config]);
 
   useEffect(() => {
     if (!open) return;
@@ -109,6 +112,7 @@ export function NewTaskDialog({
         referer,
         cookie,
         userAgent,
+        size: initialSize ?? 0,
         start,
       } as never);
       onCreated();

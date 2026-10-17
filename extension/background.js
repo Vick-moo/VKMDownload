@@ -393,10 +393,16 @@ if (hasExtensionApis()) {
     // app falls back to a URL token and the finished file has no real name.
     // This fresh read doubles as the pre-cancel state check below.
     let filename = item.filename ? item.filename.split(/[\\/]/).pop() : "";
+    // The browser already knows the total size in most cases (the response
+    // headers arrived before the download item appeared). Passing it along
+    // lets the app show the real size the moment the row is created — no
+    // "0 B until you press start", and no extra request to learn it.
+    let size = Number(item.totalBytes) || 0;
     try {
       const [fresh] = await chrome.downloads.search({ id: item.id });
       if (!fresh) return;
       if (fresh.filename) filename = fresh.filename.split(/[\\/]/).pop();
+      if (Number(fresh.totalBytes) > 0) size = Number(fresh.totalBytes);
       // Already finished between onCreated and now: leave it to the browser.
       // Handing it over now would create a second copy in the app.
       if (fresh.state === "complete") return;
@@ -411,6 +417,7 @@ if (hasExtensionApis()) {
     const result = await handOver({
       url,
       filename,
+      size,
       referer: item.referrer || "",
       cookie: await cookiesFor(url),
       userAgent: navigator.userAgent || "",
@@ -608,6 +615,7 @@ if (typeof globalThis !== "undefined") {
       nameFromUrl,
       pickUrl,
       handOver,
+      report,
       getPolicy,
       trackOwn,
       ownDownloads,

@@ -108,15 +108,20 @@ func (a *App) apiGuard(next http.Handler) http.Handler {
 		if r.Method != http.MethodOptions && (r.URL.Path == "/add" || r.Method == http.MethodPost) {
 			if !strings.HasPrefix(origin, "chrome-extension://") &&
 				!strings.HasPrefix(origin, "moz-extension://") {
-				http.Error(w, "this endpoint only accepts requests from the browser extension",
-					http.StatusForbidden)
+				// JSON, not plain text: the extension parses the reply body
+				// and shows the error verbatim, and a plain-text 403 made it
+				// fall back to "HTTP 403" every time.
+				writeJSON(w, http.StatusForbidden, map[string]string{
+					"error": "this endpoint only accepts requests from the browser extension",
+				})
 				return
 			}
 		} else if origin != "" &&
 			!strings.HasPrefix(origin, "chrome-extension://") &&
 			!strings.HasPrefix(origin, "moz-extension://") {
-			http.Error(w, "this endpoint only accepts requests from the browser extension",
-				http.StatusForbidden)
+			writeJSON(w, http.StatusForbidden, map[string]string{
+				"error": "this endpoint only accepts requests from the browser extension",
+			})
 			return
 		}
 
@@ -132,8 +137,12 @@ func (a *App) apiGuard(next http.Handler) http.Handler {
 		// applies to the very next download with no restart.
 		if a.peerCheckRequired() {
 			if ok, exe := a.checkPeerProcess(r); !ok {
-				http.Error(w, "caller is not a recognized browser"+exeSuffix(exe),
-					http.StatusForbidden)
+				// JSON so the extension can show which process was refused
+				// verbatim; a plain-text body made every refusal read as a
+				// bare "HTTP 403" in the notification.
+				writeJSON(w, http.StatusForbidden, map[string]string{
+					"error": "caller is not a recognized browser" + exeSuffix(exe),
+				})
 				return
 			}
 		}
@@ -243,6 +252,10 @@ type apiAddRequest struct {
 	// UserAgent is the browser's UA. Some hosts/WAFs refuse the engine's
 	// default non-browser UA, so the browser's own string is replayed.
 	UserAgent string `json:"userAgent"`
+	// Size is the total size the browser already knew (Content-Length) when
+	// it handed the download over. The row shows it without waiting for a
+	// transfer to start, and the duplicate check uses it. 0 = unknown.
+	Size int64 `json:"size"`
 }
 
 // apiAdd creates a task from a download the extension intercepted.
@@ -308,6 +321,7 @@ func (a *App) apiAdd(w http.ResponseWriter, r *http.Request) {
 			"referer":   req.Referer,
 			"cookie":    req.Cookie,
 			"userAgent": req.UserAgent,
+			"size":      fmt.Sprintf("%d", req.Size),
 		})
 		writeJSON(w, http.StatusOK, map[string]any{"pending": true, "name": fn})
 		return
@@ -321,6 +335,7 @@ func (a *App) apiAdd(w http.ResponseWriter, r *http.Request) {
 		Referer:   req.Referer,
 		Cookie:    req.Cookie,
 		UserAgent: req.UserAgent,
+		Size:      req.Size,
 	})
 	if err != nil {
 		// A duplicate must NOT fail the handover: the extension falls back
