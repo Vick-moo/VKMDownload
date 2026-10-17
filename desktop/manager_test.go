@@ -41,6 +41,13 @@ func newTestApp(t *testing.T) *App {
 	// temp-directory cleanup and can be read after a failure.
 	t.Setenv("VKMDOWNLOAD_DEBUG", filepath.Join(os.TempDir(), "vkmdownload-engine-trace.log"))
 	_ = os.Remove(filepath.Join(os.TempDir(), "vkmdownload-engine-trace.log"))
+
+	// Registered after the TempDir cleanup, so it runs before it (LIFO): no
+	// background goroutine may still hold tasks.json or a partial file open
+	// when the temp directory is deleted. That race is what made Windows
+	// TempDir cleanup flake — a goroutine settling mid-write at exactly the
+	// wrong moment, "directory not empty" ever since.
+	t.Cleanup(a.mgr.WaitBackground)
 	return a
 }
 
@@ -1887,5 +1894,77 @@ func TestStartConcurrentSameURL(t *testing.T) {
 	}
 	if got := len(a.mgr.List()); got != 1 {
 		t.Fatalf("tasks = %d, want 1", got)
+	}
+}
+
+// TestStartRunRefusesASecondLaunch pins the re-entry guard in startRun: a
+// second startRun on a task that is already downloading must not spawn a
+// second engine over the same partial file, nor replace the done channel —
+// the running goroutine would become unstoppable. The guard keys on the
+// status alone, so this drives the status directly instead of depending on a
+// live transfer's timing.
+func TestStartRunRefusesASecondLaunch(t *testing.T) {
+	app := newTestApp(t)
+	dir := t.TempDir()
+	task, err := app.mgr.Start(StartRequest{
+		URL: "http://127.0.0.1:1/never.bin", Dest: filepath.Join(dir, "never.bin"),
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	tk := app.mgr.get(task.ID)
+	if tk == nil {
+		t.Fatal("task not found right after Start")
+	}
+	// Stand in for a transfer already in flight.
+	tk.mu.Lock()
+	tk.view.Status = StatusDownloading
+	done := make(chan struct{})
+	tk.done = done
+	tk.mu.Unlock()
+
+	app.mgr.startRun(tk)
+
+	tk.mu.Lock()
+	got := tk.done
+	status := tk.view.Status
+	tk.mu.Unlock()
+	if got != done {
+		t.Error("the second startRun replaced the done channel; the running transfer could no longer be stopped")
+	}
+	if status != StatusDownloading {
+		t.Errorf("status = %v, want downloading", status)
+	}
+}
+
+// TestCancelRefusesCompleted pins the Cancel state gate: cancelling a
+// finished download used to relabel it "canceled", after which a later
+// Remove(deleteFiles=true) would see wasComplete=false and quietly refuse
+// to delete the file the user asked about.
+func TestCancelRefusesCompleted(t *testing.T) {
+	app := newTestApp(t)
+	dir := t.TempDir()
+	task, err := app.mgr.Start(StartRequest{
+		URL:      "http://127.0.0.1:1/done.bin",
+		Dest:     dir,
+		Filename: "done.bin",
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	tk := app.mgr.get(task.ID)
+	tk.mu.Lock()
+	tk.view.Status = StatusCompleted
+	tk.mu.Unlock()
+
+	if err := app.mgr.Cancel(task.ID); err == nil {
+		t.Error("Cancel accepted a completed task; want an error")
+	}
+	v, ok := find(app.mgr, task.ID)
+	if !ok {
+		t.Fatal("task vanished")
+	}
+	if v.Status != StatusCompleted {
+		t.Errorf("status = %v, want completed to survive the refused cancel", v.Status)
 	}
 }

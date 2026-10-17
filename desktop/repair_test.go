@@ -65,6 +65,47 @@ func TestPersistedFieldsRoundTrip(t *testing.T) {
 	}
 }
 
+// TestLoadTasksKeepsQueuedTasksQueued pins the restart rule: mid-transfer
+// tasks come back paused, but queued ones keep waiting — the startup pump
+// then resumes them as slots free up, so a restart never silently parks a
+// queue the user asked for.
+func TestLoadTasksKeepsQueuedTasksQueued(t *testing.T) {
+	app := newTestApp(t)
+	dir := app.dataDir()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mk := func(id string, status TaskStatus) persistedTask {
+		return persistedTask{TaskView: TaskView{
+			ID: id, URL: "http://127.0.0.1:1/" + id + ".bin",
+			Dest: filepath.Join(dir, id+".bin"), Status: status,
+			Created: time.Now().Format(time.RFC3339Nano),
+		}}
+	}
+	list := []persistedTask{mk("t1-1", StatusDownloading), mk("t1-2", StatusQueued)}
+	b, _ := json.Marshal(list)
+	if err := os.WriteFile(filepath.Join(dir, "tasks.json"), b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	app.mgr.loadTasks()
+
+	running, ok := find(app.mgr, "t1-1")
+	if !ok {
+		t.Fatal("mid-transfer task did not survive reload")
+	}
+	if running.Status != StatusPaused {
+		t.Errorf("mid-transfer task reloaded as %v, want paused", running.Status)
+	}
+	waiting, ok := find(app.mgr, "t1-2")
+	if !ok {
+		t.Fatal("queued task did not survive reload")
+	}
+	if waiting.Status != StatusQueued {
+		t.Errorf("queued task reloaded as %v, want still queued", waiting.Status)
+	}
+}
+
 // TestLoadTasksCorruptPreserved pins the corrupt-index rule: a broken
 // tasks.json is renamed aside (never deleted), the app starts empty, and the
 // failure is logged.

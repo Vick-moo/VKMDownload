@@ -174,6 +174,12 @@ type StartRequest struct {
 	// hosts/WAFs refuse unknown agents, so the browser's own string is
 	// replayed when the extension supplied one.
 	UserAgent string `json:"userAgent"`
+	// Size is the total size the caller already knows — the browser read it
+	// from Content-Length before handing the download over. It fills the row
+	// immediately, so a paused task does not sit there reading "0 B" until
+	// someone presses start, and the same-content duplicate check gets a
+	// signal it would otherwise lack. 0 means unknown: nothing happens.
+	Size int64 `json:"size"`
 	// Manual marks a task the user placed explicitly (the dialog). Automatic
 	// arrivals leave it false, which is what the organize step keys on: only
 	// unplaced tasks are sorted into group folders on completion.
@@ -234,6 +240,12 @@ type Manager struct {
 	// (the extension can deliver dozens at once) otherwise opens dozens of
 	// simultaneous dials and engine instances against one weak host.
 	probeSem chan struct{}
+
+	// bgWait tracks the manager's background goroutines — transfers, settle
+	// waiters, name probes — so a caller can wait for true quiescence. Test
+	// teardown needs exactly that: a goroutine holding tasks.json open at
+	// the cleanup instant is what made Windows temp-dir removal flaky.
+	bgWait sync.WaitGroup
 }
 
 func NewManager(app *App) *Manager {
@@ -245,6 +257,22 @@ func NewManager(app *App) *Manager {
 		inflight: make(map[string]struct{}),
 		probeSem: make(chan struct{}, 4),
 	}
+}
+
+// goBg runs fn on a tracked background goroutine.
+func (m *Manager) goBg(fn func()) {
+	m.bgWait.Add(1)
+	go func() {
+		defer m.bgWait.Done()
+		fn()
+	}()
+}
+
+// WaitBackground blocks until every tracked goroutine has settled. Test
+// teardown calls it before temp directories are cleaned up; the app itself
+// exits with the process, so nothing there needs it.
+func (m *Manager) WaitBackground() {
+	m.bgWait.Wait()
 }
 
 // trackLive registers a running engine so live settings can reach it, and
@@ -726,9 +754,18 @@ func (m *Manager) Start(req StartRequest) (TaskView, error) {
 	// the probe lands (failures keep the old behaviour) and then runs the
 	// content-based duplicate check. A caller-supplied filename is checked
 	// synchronously instead: no network involved.
+	// The caller may already know the total size (the browser read it before
+	// handing over). It lands on the row immediately so a paused task does
+	// not read "0 B" until started, and the content-based duplicate check
+	// gets the signal. Negative is treated as unknown.
+	size := req.Size
+	if size < 0 {
+		size = 0
+	}
+
 	needsProbe := name == ""
 	if !needsProbe {
-		if dup := m.findSameContent(url, name, 0, ""); dup != nil {
+		if dup := m.findSameContent(url, name, size, ""); dup != nil {
 			v := snapshot(dup)
 			return v, &duplicateError{ID: v.ID, Status: v.Status, Name: v.Name}
 		}
@@ -752,6 +789,7 @@ func (m *Manager) Start(req StartRequest) (TaskView, error) {
 		URL:     url,
 		Dest:    dest,
 		Name:    name,
+		Size:    size,
 		Status:  StatusPaused,
 		Conns:   conns,
 		Created: time.Now().Format(time.RFC3339Nano),
@@ -767,7 +805,7 @@ func (m *Manager) Start(req StartRequest) (TaskView, error) {
 		for _, other := range m.tasks {
 			other.mu.Lock()
 			v := other.view
-			dup := matchSameContent(v, url, host, other.host, name, 0)
+			dup := matchSameContent(v, url, host, other.host, name, size)
 			other.mu.Unlock()
 			if dup {
 				m.mu.Unlock()
@@ -782,7 +820,7 @@ func (m *Manager) Start(req StartRequest) (TaskView, error) {
 	m.app.emit("task:added", snapshot(t))
 
 	if needsProbe {
-		go m.fillProbedName(id, url, req)
+		m.goBg(func() { m.fillProbedName(id, url, req) })
 	}
 
 	if req.Start {
@@ -912,6 +950,13 @@ func (m *Manager) startRun(t *task) {
 	if frozen {
 		// An update is being applied: park the task instead of starting it.
 		t.mu.Lock()
+		// Never park a run a concurrent starter already launched: flipping a
+		// transferring task back to queued leaves an engine writing while
+		// the row claims to be waiting for a slot.
+		if t.view.Status == StatusDownloading {
+			t.mu.Unlock()
+			return
+		}
 		t.view.Status = StatusQueued
 		t.mu.Unlock()
 		_ = m.saveTasks()
@@ -920,6 +965,10 @@ func (m *Manager) startRun(t *task) {
 	}
 	if m.activeCount() >= m.maxConcurrent() {
 		t.mu.Lock()
+		if t.view.Status == StatusDownloading {
+			t.mu.Unlock()
+			return
+		}
 		t.view.Status = StatusQueued
 		t.mu.Unlock()
 		_ = m.saveTasks()
@@ -936,6 +985,18 @@ func (m *Manager) startRun(t *task) {
 	// carried on after the user had stopped it.
 	ctx, cancel := context.WithCancel(m.app.ctx)
 	t.mu.Lock()
+	if t.view.Status == StatusDownloading {
+		// A concurrent starter already launched this task — a double-clicked
+		// resume, two settle points pumping the queue at once, StartAll
+		// racing a freed slot. Spawning a second engine would leave two
+		// run goroutines writing the same partial file, and the second
+		// startRun would overwrite cancel/done so the first run could never
+		// be stopped again. Give up: the launch the winner performed is
+		// exactly what this call wanted anyway.
+		t.mu.Unlock()
+		cancel()
+		return
+	}
 	t.cancel = cancel
 	// A fresh run has no stop to report yet.
 	t.stopIntent = ""
@@ -950,7 +1011,7 @@ func (m *Manager) startRun(t *task) {
 	// link, and until then the UI shows the pre-start state.
 	m.app.emit("task:progress", snapshot(t))
 
-	go m.run(t, ctx, cancel, done)
+	m.goBg(func() { m.run(t, ctx, cancel, done) })
 }
 
 // refreshInterval maps the UI refresh setting to an engine reporting
@@ -1177,6 +1238,14 @@ func (m *Manager) Cancel(id string) error {
 		return fmt.Errorf("任务不存在")
 	}
 	t.mu.Lock()
+	if t.view.Status == StatusCompleted {
+		// Cancelling a finished download used to flip it to "canceled",
+		// after which Remove(deleteFiles=true) would find wasComplete
+		// false and quietly refuse to delete the file the user asked
+		// about — a record that lies about what removing it will do.
+		t.mu.Unlock()
+		return fmt.Errorf("已完成的任务无法取消，直接删除即可")
+	}
 	cancel := t.cancel
 	dest := t.view.Dest
 	gen := t.generation
@@ -1199,7 +1268,7 @@ func (m *Manager) Cancel(id string) error {
 	// feel frozen. The generation guard is what keeps this safe: if the task
 	// was resumed again before the old goroutine exited, the generation has
 	// moved on and there is nothing left for us to delete.
-	go func() {
+	m.goBg(func() {
 		// Wait for the transfer goroutine to stop before deleting: cancelling
 		// only asks it to stop, and a write in flight would recreate the
 		// partial file immediately after it was removed.
@@ -1207,6 +1276,12 @@ func (m *Manager) Cancel(id string) error {
 
 		t.mu.Lock()
 		superseded := t.generation != gen
+		// Re-read the name: at cancel time it can still be empty (the probe
+		// or the first progress event fills it milliseconds later), and the
+		// deletion must aim at the partial file that actually exists — the
+		// snapshot above would point at "<directory>.part", which never
+		// matches, and the real partial would survive the "discard".
+		name := t.view.Name
 		t.mu.Unlock()
 		if superseded {
 			return
@@ -1214,11 +1289,11 @@ func (m *Manager) Cancel(id string) error {
 
 		// A cancelled task should start clean, so the partial file and the
 		// sidecar that would resume it are both removed.
-		part, state := partialPaths(dest, v.Name)
+		part, state := partialPaths(dest, name)
 		_ = os.Remove(part)
 		_ = os.Remove(state)
 		m.pumpQueue()
-	}()
+	})
 	return nil
 }
 
@@ -1311,10 +1386,10 @@ func (m *Manager) Remove(id string, deleteFiles bool) error {
 	r.deleteFiles = deleteFiles
 	_ = m.saveTasks()
 
-	go func() {
+	m.goBg(func() {
 		m.settleRemoval(r)
 		m.pumpQueue()
-	}()
+	})
 	return nil
 }
 
@@ -1341,12 +1416,12 @@ func (m *Manager) RemoveTasks(ids []string) int {
 	// One waiter for the whole batch: a goroutine per row, each waking into
 	// its own pumpQueue, made a hundred-row delete a hundred table sweeps
 	// plus a goroutine spike.
-	go func() {
+	m.goBg(func() {
 		for _, r := range rs {
 			m.settleRemoval(r)
 		}
 		m.pumpQueue()
-	}()
+	})
 	return len(rs)
 }
 
@@ -1434,6 +1509,21 @@ func (m *Manager) StartPlan() (int, error) {
 	m.planRunning = true
 	m.mu.Unlock()
 
+	// A freeze is not a queue of work. Refusing up front keeps the button's
+	// message honest; starting anyway would park a watcher whose tasks all
+	// refuse to launch and which can only ever end as "intervened" once the
+	// update's StopAll lands. The scoped entry (StartPlanSelected) reaches
+	// this same refusal through the per-task Resume errors.
+	m.mu.Lock()
+	frozen := m.updating
+	m.mu.Unlock()
+	if frozen {
+		m.mu.Lock()
+		m.planRunning = false
+		m.mu.Unlock()
+		return 0, errUpdating
+	}
+
 	// Try to start everything waiting; tasks beyond the concurrency budget
 	// stay queued and are pulled in by pumpQueue as slots free up.
 	m.StartAll()
@@ -1453,7 +1543,7 @@ func (m *Manager) StartPlan() (int, error) {
 		return 0, fmt.Errorf("没有等待下载的任务")
 	}
 
-	go m.watchPlan()
+	m.goBg(m.watchPlan)
 	return covered, nil
 }
 
@@ -1517,7 +1607,7 @@ func (m *Manager) StartPlanSelected(ids []string) (int, error) {
 		return 0, fmt.Errorf("选中的任务没有可下载的")
 	}
 
-	go m.watchPlanSelected(want)
+	m.goBg(func() { m.watchPlanSelected(want) })
 	return covered, nil
 }
 
@@ -2119,7 +2209,9 @@ func (m *Manager) batch(fn func()) {
 //
 // Tasks that were mid-transfer when the app closed come back as paused: the
 // bytes are still on disk, but nothing is running, so "paused" is the only
-// honest status to report.
+// honest status to report. Queued tasks keep their place in the queue — the
+// user asked for those downloads and they were only waiting for a slot, so
+// the startup pump resumes the wait instead of silently parking them.
 func (m *Manager) loadTasks() {
 	dir := m.app.dataDir()
 	path := filepath.Join(dir, "tasks.json")
@@ -2164,7 +2256,9 @@ func (m *Manager) loadTasks() {
 			continue
 		}
 		seen[v.ID] = true
-		if v.Status == StatusDownloading || v.Status == StatusQueued {
+		// Only mid-transfer tasks flip to paused; queued ones keep waiting
+		// (see the function comment).
+		if v.Status == StatusDownloading {
 			v.Status = StatusPaused
 		}
 		v.Speed, v.ETA = 0, 0
