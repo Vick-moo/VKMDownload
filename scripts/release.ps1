@@ -42,6 +42,18 @@ if ($LASTEXITCODE -eq 0) { throw "tag v$Version 已存在，先确认版本号�
 $dirty = git status --porcelain 2>$null
 if ($dirty) { throw "工作区不干净，先提交或暂存再发版。`n$dirty" }
 
+# The release tag lands on the REMOTE main (target_commitish), so a local
+# commit that was never pushed would make the tag and the source zip point
+# at different trees — silently. Fetch first so the check compares against
+# reality, not the last known state.
+git fetch origin 2>$null
+if ($LASTEXITCODE -ne 0) { throw "git fetch origin 失败，无法确认远端状态。" }
+$unpushed = git rev-list origin/main..main 2>$null
+if ($unpushed) {
+    $n = ($unpushed | Measure-Object).Count
+    throw "main 上有 $n 个未 push 的 commit，先 git push 再发版。"
+}
+
 # --------------------------------------------------------------- 版本号 ---
 
 $desktop = Join-Path $root 'desktop'
@@ -62,7 +74,15 @@ foreach ($file in @($appGo, $wailsJson)) {
         Write-Host "  已更新 $(Split-Path $file -Leaf)" -ForegroundColor DarkGray
     }
 }
-if ($hits -eq 0) { throw "版本号替换零命中：app.go / wails.json 里没找到可替换的版本字段。" }
+# What must hold is that both files END UP carrying the version, not that this
+# run rewrote them: committing the bump before releasing (so the release's
+# source zip matches the tag) is a supported flow and produces zero
+# replacements.
+$appText = [System.IO.File]::ReadAllText($appGo, $utf8)
+$jsonText = [System.IO.File]::ReadAllText($wailsJson, $utf8)
+if (-not ($appText.Contains("const appVersion = `"$Version`"") -and $jsonText.Contains("`"productVersion`": `"$Version`""))) {
+    throw "版本号校验失败：app.go / wails.json 里没有 $Version。"
+}
 
 # ---------------------------------------------------------------- 构建 ---
 
@@ -97,7 +117,10 @@ $extSrc = Join-Path $root 'extension'
 $extStage = Join-Path $env:TEMP "vkm-ext-$Version"
 if (Test-Path $extStage) { Remove-Item $extStage -Recurse -Force }
 New-Item -ItemType Directory -Path (Join-Path $extStage 'extension') -Force | Out-Null
-Copy-Item (Join-Path $extSrc '*') (Join-Path $extStage 'extension') -Recurse -Force
+# Tests travel with the source zip; the extension zip users load into their
+# browser should not carry them (store reviewers do look at what ships).
+Get-ChildItem $extSrc | Where-Object { $_.Name -ne 'test' } |
+    Copy-Item -Destination (Join-Path $extStage 'extension') -Recurse -Force
 
 $zipPath = Join-Path $stage 'VKMDownload-extension.zip'
 $zip = [System.IO.Compression.ZipFile]::Open($zipPath, 'Create')
