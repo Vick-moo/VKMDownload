@@ -2,9 +2,18 @@ package engine
 
 import (
 	"fmt"
+	"math"
 	"os"
+	"sort"
 	"sync"
 )
+
+// unboundedSegmentEnd is the End of a segment that has no upper bound because
+// the server never disclosed a resource length. It is MaxInt64-1 rather than
+// MaxInt64 so that Length() (=End-Start+1, with Start>=0) still fits in an
+// int64: MaxInt64+1 wraps to a negative number, which used to make commit's
+// "Written > Length()" clamp fire immediately and drive Written to -2^63.
+const unboundedSegmentEnd = math.MaxInt64 - 1
 
 // Segment is one contiguous inclusive byte range of the resource, together
 // with how much of it has been written and how much has been claimed.
@@ -43,7 +52,22 @@ type Segment struct {
 }
 
 // Length is the total size of the segment.
-func (s *Segment) Length() int64 { return s.End - s.Start + 1 }
+//
+// The subtraction is guarded so an End-Start of exactly MaxInt64 (a legacy
+// unbounded segment built as End=MaxInt64) cannot wrap End-Start+1 to a
+// negative length: a negative length makes the "is Written past the end"
+// clamps treat the segment as already satisfied and silently counts progress
+// as negative.
+func (s *Segment) Length() int64 {
+	n := s.End - s.Start
+	if n == math.MaxInt64 {
+		return math.MaxInt64
+	}
+	if n < 0 {
+		return 0
+	}
+	return n + 1
+}
 
 // Next is the absolute offset of the first byte not yet written to disk.
 func (s *Segment) Next() int64 { return s.Start + s.Written }
@@ -413,6 +437,52 @@ func (m *segmentManager) segmentStates() []SegState {
 		})
 	}
 	return out
+}
+
+// writtenExtent is the highest file offset (exclusive) any segment claims to
+// have written, i.e. the end of the furthest confirmed byte. It is the
+// candidate durable high-water mark: once the part file has been fsynced, every
+// byte below it that was actually written is on the medium.
+func (m *segmentManager) writtenExtent() int64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var hi int64
+	for _, s := range m.segs {
+		if e := s.Start + s.Written; e > hi {
+			hi = e
+		}
+	}
+	return hi
+}
+
+// validateSegmentCoverage reports whether states tile [0,size) exactly: no
+// gaps, no overlaps, and nothing outside the resource.
+//
+// A persisted segment table that passes matches() can still be internally
+// broken (a torn or tampered sidecar, a layout written by a different build).
+// Resuming one with a hole would leave the hole unfetched while still
+// producing a file of exactly the right length, so such a table must be
+// rejected outright and the download restarted from zero.
+func validateSegmentCoverage(states []SegState, size int64) bool {
+	if size <= 0 || len(states) == 0 {
+		return false
+	}
+	sorted := make([]SegState, len(states))
+	copy(sorted, states)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Start < sorted[j].Start })
+
+	var next int64
+	for _, s := range sorted {
+		if s.Start != next {
+			// A gap (Start past next) or an overlap (Start before next).
+			return false
+		}
+		if s.End < s.Start || s.End >= size {
+			return false
+		}
+		next = s.End + 1
+	}
+	return next == size
 }
 
 // segmentsFromStates rebuilds a manager from persisted state.

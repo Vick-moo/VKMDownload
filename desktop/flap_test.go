@@ -49,16 +49,23 @@ func withRecoveryDelays(t *testing.T, delays ...time.Duration) {
 // plantSidecarWithProgress writes a resume sidecar that records bytes already
 // written but no longer matches the resource (its length is wrong), so the
 // engine ignores it while the manager's recovery check still treats it as
-// evidence that the link once worked.
+// evidence that the link once worked. The partial file must exist too: the
+// engine's ResumableProgress evidence now requires sidecar identity and a
+// non-empty .part, mirroring what a real interrupted download leaves behind.
 func plantSidecarWithProgress(t *testing.T, target string, written int64) {
 	t.Helper()
 
+	if err := os.WriteFile(target+engine.PartSuffix, make([]byte, written), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	b, err := json.Marshal(&engine.State{
-		Version:  engine.StateVersion,
-		URL:      "http://example.com/f",
-		FinalURL: "http://example.com/f",
-		Size:     1 << 40,
-		Segments: []engine.SegState{{Start: 0, End: written - 1, Written: written}},
+		Version:    engine.StateVersion,
+		URL:        "http://example.com/f",
+		FinalURL:   "http://example.com/f",
+		Size:       1 << 40,
+		TargetPath: target,
+		TempPath:   target + engine.PartSuffix,
+		Segments:   []engine.SegState{{Start: 0, End: written - 1, Written: written}},
 	})
 	if err != nil {
 		t.Fatal(err)

@@ -312,13 +312,19 @@ func (s *Server) writeResponse(conn net.Conn, req *http.Request, lim *rateLimite
 	// Chunked encoding is only usable on a non-partial GET: a 206 must carry
 	// Content-Length, HEAD carries no body at all, and lying about the length
 	// is mutually exclusive with chunked framing.
-	useChunked := cfg.NoContentLength && !partial && cfg.LieContentLength == 0 && !isHead
+	//
+	// NoContentLength must also strip the length from a HEAD response. A HEAD
+	// that announces Content-Length while the matching GET is chunked is
+	// exactly the mismatch that hid the engine's unknown-length path from every
+	// test: the probe believed it knew a size the transfer never had.
+	omitLength := cfg.NoContentLength && !partial && cfg.LieContentLength == 0
+	useChunked := omitLength && !isHead
 
 	var h bytes.Buffer
 	fmt.Fprintf(&h, "HTTP/1.1 %s\r\n", status)
 	if useChunked {
 		h.WriteString("Transfer-Encoding: chunked\r\n")
-	} else {
+	} else if !omitLength {
 		fmt.Fprintf(&h, "Content-Length: %d\r\n", declareCL)
 	}
 	if cfg.AdvertiseRange {

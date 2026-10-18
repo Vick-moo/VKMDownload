@@ -66,6 +66,13 @@ func (st *State) Validator() string {
 // renamed over the target. A crash therefore leaves either the old complete
 // sidecar or the new complete one, never a half-written file that would fail
 // to parse on resume.
+//
+// The temporary name carries the pid plus an atomic counter (the same scheme
+// moveFile uses) rather than a fixed ".tmp" suffix. Two writers used to share
+// one temporary path, so their writes interleaved, the rename raced, and the
+// loser left a half-written file behind that failed to parse — or silently
+// replaced the winner's good sidecar. Any failure removes the temporary file so
+// no debris is left for the next run to trip over.
 func saveState(path string, st *State) error {
 	st.UpdatedAt = time.Now()
 	// Compact JSON: the sidecar is machine state rewritten many times a
@@ -74,13 +81,18 @@ func saveState(path string, st *State) error {
 	if err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
+	tmp := fmt.Sprintf("%s.vkmdownload-%d-%d.tmp", path, os.Getpid(), nextTmpID())
 	if err := os.WriteFile(tmp, b, 0o644); err != nil {
+		_ = os.Remove(tmp)
 		return err
 	}
+	// Keep the transient file hidden too: Explorer should not flash a helper
+	// artefact in the user's download folder.
+	hideFile(tmp)
 	// On Windows os.Rename maps to MoveFileEx with MOVEFILE_REPLACE_EXISTING,
 	// so this does replace an existing sidecar.
 	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
 		return err
 	}
 	hideFile(path)

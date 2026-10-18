@@ -234,12 +234,20 @@ func TestRecoverableNotFoundRequiresEvidence(t *testing.T) {
 
 	// A sidecar holding bytes is the other form of evidence: the link worked
 	// long enough to store something, even if this attempt 404'd at the probe.
+	// The evidence now also requires the partial file the sidecar describes to
+	// actually exist, so plant both.
+	part := target + PartSuffix
+	if err := os.WriteFile(part, make([]byte, 4096), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	st := &State{
-		Version:  StateVersion,
-		URL:      "http://example.com/f",
-		FinalURL: "http://example.com/f",
-		Size:     1 << 20,
-		Segments: []SegState{{Start: 0, End: (1 << 20) - 1, Written: 4096}},
+		Version:    StateVersion,
+		URL:        "http://example.com/f",
+		FinalURL:   "http://example.com/f",
+		Size:       1 << 20,
+		Segments:   []SegState{{Start: 0, End: (1 << 20) - 1, Written: 4096}},
+		TempPath:   part,
+		TargetPath: target,
 	}
 	if err := saveState(target+StateSuffix, st); err != nil {
 		t.Fatal(err)
@@ -252,6 +260,27 @@ func TestRecoverableNotFoundRequiresEvidence(t *testing.T) {
 	}
 	if ResumableProgress(filepath.Join(dir, "absent.bin")) {
 		t.Error("ResumableProgress reported progress for a missing sidecar")
+	}
+
+	// A sidecar whose partial file is gone describes a download that no longer
+	// exists; it must not be treated as progress.
+	if err := os.Remove(part); err != nil {
+		t.Fatal(err)
+	}
+	if ResumableProgress(target) {
+		t.Error("ResumableProgress accepted a sidecar with no partial file behind it")
+	}
+
+	// A sidecar that names a different target is not this download's progress.
+	if err := os.WriteFile(part, make([]byte, 4096), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	st.TargetPath = filepath.Join(dir, "someone-else.bin")
+	if err := saveState(target+StateSuffix, st); err != nil {
+		t.Fatal(err)
+	}
+	if ResumableProgress(target) {
+		t.Error("ResumableProgress accepted a sidecar naming a different target")
 	}
 
 	// A 5xx is never a "the link is gone" case, recoverable or not.

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -452,6 +451,18 @@ type session struct {
 	track   *progressTracker
 	created time.Time
 
+	// saveMu serialises sidecar flushes. The progress tracker calls save from
+	// every worker's write path, so without it two flushes race on the same
+	// temporary file and the same rename target.
+	saveMu sync.Mutex
+
+	// syncedHigh is the highest offset (exclusive) of the partial file that a
+	// successful fsync has made durable. The sidecar's Written counters are
+	// clamped to it, so the sidecar can only ever describe bytes that reached
+	// the medium; the preallocated region past it is zeros that must be
+	// re-fetched rather than trusted.
+	syncedHigh int64
+
 	resumeState *State
 	useIfRange  bool
 	resumed     bool
@@ -460,20 +471,41 @@ type session struct {
 }
 
 // loadResumable attaches a usable sidecar to the session, or leaves it nil.
+//
+// Every rejection path that finds something on disk removes it: a corrupt or
+// version-mismatched sidecar, a partial whose bytes belong to a different
+// representation, and a segment table that does not tile the resource are all
+// unusable, and leaving them in place would make every later run pay for the
+// same inspection without ever producing a download.
 func (s *session) loadResumable() {
 	st, err := loadState(s.state)
 	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			debugf("resume: discarding unusable sidecar %s: %v", s.state, err)
+			_ = os.Remove(s.state)
+		}
 		return
 	}
 	if !st.matches(s.probe) {
 		// The resource changed under us. The partial bytes describe a
 		// different representation, so they must not be mixed with new ones.
+		debugf("resume: sidecar %s does not match the resource; discarding", s.state)
 		_ = os.Remove(s.part)
 		_ = os.Remove(s.state)
 		return
 	}
 	if !s.probe.RangeSupported {
 		// Without range support there is no way to continue mid-file.
+		debugf("resume: server does not support ranges; discarding %s", s.part)
+		_ = os.Remove(s.part)
+		_ = os.Remove(s.state)
+		return
+	}
+	if !validateSegmentCoverage(st.Segments, s.probe.Size) {
+		// A segment table with a hole or an overlap would resume as though the
+		// missing bytes were already present, publishing a correctly sized file
+		// with a hole in it. Refuse the whole table instead.
+		debugf("resume: sidecar %s does not tile [0,%d); discarding", s.state, s.probe.Size)
 		_ = os.Remove(s.part)
 		_ = os.Remove(s.state)
 		return
@@ -481,6 +513,22 @@ func (s *session) loadResumable() {
 	s.resumeState = st
 	s.created = st.CreatedAt
 	s.resumed = true
+	// The persisted Written counters were clamped to a synced high-water mark
+	// before they were written, so their extent is already durable and is the
+	// basis this session measures further progress against.
+	s.syncedHigh = stateExtent(st.Segments)
+}
+
+// stateExtent is the highest offset (exclusive) a persisted segment table
+// claims to have written.
+func stateExtent(states []SegState) int64 {
+	var hi int64
+	for _, st := range states {
+		if e := st.Start + st.Written; e > hi {
+			hi = e
+		}
+	}
+	return hi
 }
 
 // openPart opens (creating if needed) the partial file.
@@ -501,21 +549,26 @@ func (s *session) openPart() error {
 
 // effectiveAvailable reports how many bytes of the partial file can be trusted.
 //
-// This is the size of the file on disk, capped at the announced resource size.
-// The sidecar can be newer than the data it describes if the process died
-// between writing the sidecar and flushing the file, and trusting a segment
-// that claims more progress than the file holds would silently skip bytes.
+// The basis is the synced high-water mark, not the file's size. The segmented
+// path preallocates the partial file to the full resource length, so its size
+// is the announced size from the first instant and a size-based clamp never
+// removed anything — the preallocated zeros were indistinguishable from bytes
+// that had really been written. The synced mark only ever covers bytes an
+// fsync confirmed, so a crash that lost the tail cannot be mistaken for
+// progress. The file's real size still bounds it, which catches a partial that
+// was truncated after the sidecar was last written.
 func (s *session) effectiveAvailable() int64 {
-	if s.file == nil {
-		return 0
+	n := s.syncedHigh
+	if s.file != nil {
+		if st, err := s.file.Stat(); err == nil && st.Size() < n {
+			n = st.Size()
+		}
 	}
-	st, err := s.file.Stat()
-	if err != nil {
-		return 0
-	}
-	n := st.Size()
 	if s.probe.Size >= 0 && n > s.probe.Size {
 		n = s.probe.Size
+	}
+	if n < 0 {
+		n = 0
 	}
 	return n
 }
@@ -573,37 +626,58 @@ func (s *session) newTracker(initial, total int64) {
 
 // saveState persists the sidecar. It is called from the throttled tracker, so
 // it stays off the hot path.
+//
+// The partial file is fsynced before the sidecar is written. That ordering is
+// what makes the sidecar's Written counters meaningful: a counter only ever
+// advances after a successful WriteAt, and the fsync pushes those bytes to the
+// medium, so a sidecar on disk can never claim more than the medium holds. It
+// is also why the clamp below is based on the synced high-water mark rather
+// than on the file's size: the size includes the preallocated tail, whose zeros
+// would otherwise be published as if they were data.
 func (s *session) saveState() error {
 	if s.state == "" || s.mgr == nil {
 		return nil
 	}
 
+	// One writer at a time. The tracker calls this from every worker's write
+	// path, so concurrent flushes would otherwise race on the same temporary
+	// file and the same rename.
+	s.saveMu.Lock()
+	defer s.saveMu.Unlock()
+
+	// Read the candidate extent before the sync so every byte the sidecar will
+	// claim was handed to the OS before fsync started; the sync then flushes
+	// exactly those. The snapshot is taken afterwards, so a write that lands in
+	// the gap is conservatively clamped back to the durable mark.
+	extent := s.mgr.writtenExtent()
 	segs := s.mgr.segmentStates()
 
-	// Clamp every segment's progress to what the file actually holds.
-	//
-	// A cancelled transfer can leave the in-memory counters ahead of the bytes
-	// on disk: the claim for the block being written is settled on the way out,
-	// and the last write may not have reached the file. Persisting the larger
-	// number would make a later resume start past bytes that were never
-	// written, leaving a hole in a file whose length is still exactly right —
-	// the one failure mode no length check can detect.
 	if s.file != nil {
-		if fi, err := s.file.Stat(); err == nil {
-			available := fi.Size()
-			if s.probe.Size >= 0 && available > s.probe.Size {
-				available = s.probe.Size
+		if err := s.file.Sync(); err != nil {
+			// Without a successful sync the counters may describe bytes that
+			// never reached the medium. Persisting them would let a later
+			// resume step over a hole that no length check can detect, so fail
+			// and keep the previous sidecar instead.
+			return fmt.Errorf("sync partial file %s before saving state: %w", s.part, err)
+		}
+		if extent > s.syncedHigh {
+			s.syncedHigh = extent
+		}
+
+		available := s.syncedHigh
+		if s.probe.Size >= 0 && available > s.probe.Size {
+			available = s.probe.Size
+		}
+		for i := range segs {
+			room := available - segs[i].Start
+			if room < 0 {
+				room = 0
 			}
-			for i := range segs {
-				if room := available - segs[i].Start; segs[i].Written > room {
-					if room < 0 {
-						room = 0
-					}
-					segs[i].Written = room
-					if segs[i].Written < segs[i].End-segs[i].Start+1 {
-						segs[i].Done = false
-					}
-				}
+			if segs[i].Written > room {
+				segs[i].Written = room
+			}
+			if segs[i].Written < segs[i].End-segs[i].Start+1 {
+				segs[i].Done = false
 			}
 		}
 	}
@@ -1127,10 +1201,11 @@ func (s *session) runSingle(ctx context.Context) (*Result, error) {
 	// Single stream is one segment by definition. When the server never reported
 	// a length the stream simply runs to EOF, so the segment carries no upper
 	// bound — Size-1 would be a negative length, which the accounting would then
-	// treat as an already-satisfied segment.
+	// treat as an already-satisfied segment. unboundedSegmentEnd keeps Length()
+	// inside int64 so commit's "past the end" clamp stays inert on this path.
 	segEnd := s.probe.Size - 1
 	if s.probe.Size < 0 {
-		segEnd = math.MaxInt64
+		segEnd = unboundedSegmentEnd
 	}
 	s.mgr = newSegmentManager([]*Segment{{Start: 0, End: segEnd, NoRange: !s.probe.RangeSupported}})
 	s.initialSegs = 1
@@ -1330,7 +1405,11 @@ func (s *session) publish(res *Result) (*Result, error) {
 	if s.track != nil {
 		s.track.finish()
 	}
-	_ = os.Remove(s.state)
+	if err := os.Remove(s.state); err != nil && !errors.Is(err, os.ErrNotExist) {
+		// The download itself is complete; a stale sidecar is harmless but its
+		// presence would make the next run inspect this target as resumable.
+		debugf("publish: removing sidecar %s: %v", s.state, err)
+	}
 
 	res.Path = s.target
 	res.Segments = s.mgr.segmentCount()
@@ -1459,8 +1538,14 @@ func RecoverableNotFound(err error, target string) bool {
 }
 
 // ResumableProgress reports whether the sidecar beside target records any
-// durably written bytes. A missing, corrupt or unversioned sidecar is not
-// progress.
+// durably written bytes, backed by a real partial file.
+//
+// The check is deliberately about identity as well as magnitude. A sidecar can
+// outlive the partial file it describes, or describe a different download that
+// happened to reuse the same destination name; counting either as "progress"
+// drags a link that never worked into the manager's multi-minute recovery
+// cycle before reporting a 404. So the sidecar must name this file, and the
+// partial it points at must exist and hold at least one byte.
 func ResumableProgress(target string) bool {
 	if target == "" {
 		return false
@@ -1469,12 +1554,28 @@ func ResumableProgress(target string) bool {
 	if err != nil {
 		return false
 	}
+	if st.TargetPath != "" && !samePath(st.TargetPath, target) {
+		return false
+	}
+	if st.TempPath != "" && !samePath(st.TempPath, target+PartSuffix) {
+		return false
+	}
+	fi, err := os.Stat(target + PartSuffix)
+	if err != nil || fi.Size() <= 0 {
+		return false
+	}
 	for _, seg := range st.Segments {
 		if seg.Written > 0 {
 			return true
 		}
 	}
 	return false
+}
+
+// samePath compares two paths after cleaning, so an equivalent spelling of the
+// same file is not treated as a different download.
+func samePath(a, b string) bool {
+	return filepath.Clean(a) == filepath.Clean(b)
 }
 
 // resolveTarget turns the caller's destination into an absolute file path,

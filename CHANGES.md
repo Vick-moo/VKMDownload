@@ -495,6 +495,18 @@
 - 测试：engine 5 个新用例（扛过窗口且逐字节正确 / FlapPeriod 下有限终止 / 404 预算不被成功块重置 / 恢复判定证据链 / isRetryable 表）、manager 7 个新用例（flap 重放成功 / 中途窗口恢复后完成 / 耗尽文案 / 首次 404 快速失败 / Pause 与 Cancel 立即打断 / 更新冻结不重启）。
 - 验收：go vet 三处干净；engine、desktop 全量测试通过；GOOS=linux 可编译；tsc 0 错、vitest 26/26。
 
+### 51. 全量审计修复第 1 批：引擎数据正确性 + 前端/拖放（UNRELEASED）
+- 审计背景：7 个并行只读审计（完整报告见工作区 `audit-2026-10-18.md`，去重后 73 条）。本批落地引擎 5 条 + testsrv 测试盲区 + 前端 13 条 + 拖放读文件。
+- 断电全 0 文件（P0）：sidecar 落盘前先 fsync `.part`，新增 `syncedHigh` 已确认落盘高水位；`effectiveAvailable` 不再信任预分配后的文件大小，改为高水位（再与真实文件大小取 min）；被截短的 segment 标记未完成。为什么改：分段路径一开始就把 `.part` 预分配到完整大小，所以"文件大小=完整大小"从第一秒成立，断电后 sidecar 声称写完、盘上全是 0，任何长度校验都拦不住——审计在仓库外跑通了"resume → publish 4MiB 全 0 文件"的完整链条。
+- 并发 sidecar（P1）：`session.saveMu` 串行化所有 flush；临时文件名改为 `<path>.vkmdownload-<pid>-<counter>.tmp`、写后隐藏、失败即删。为什么改：多 worker 在锁外并发写同一个固定 `.tmp`，审计实测 24000 次调用 23128 次失败、518 次读到非法 JSON——断点续传与 404 恢复判据会被静默破坏，且失败会因水位不推进而自我放大。
+- 未知长度溢出（P1）：无界 segment 的 End 改为 `MaxInt64-1`，`Length()` 对边界饱和。为什么改：`End-Start+1` 溢出成负数后 `Written` 被写成 `-2^63` 落盘，`progressed()`/`ResumableProgress` 恒 false，404 韧性在 chunked/无 Content-Length 资源上完全失效（审计 A/B 实测）。
+- 续传证据收紧（P2）：`ResumableProgress` 要求 sidecar 身份匹配（TargetPath/TempPath）且 `.part` 存在非空；恢复的分段表必须精确铺满 `[0,size)`（无洞/无重叠/不越界），否则丢弃重下。为什么改：残留 sidecar 会把真正失效的链接拖进两分钟恢复循环；带洞分段表会产出"长度正确、中间空洞"的文件。
+- sidecar 卫生（P3）：损坏 / 版本不符 / 不匹配 / 不支持 Range 的 sidecar 一律删除并记日志（不再永久滞留、每次 resume 重读）；publish 删 sidecar 失败记日志。
+- testsrv：`NoContentLength` 下 HEAD 不再宣布 `Content-Length`。为什么改：HEAD 说知道长度、GET 却 chunked 的不一致，让引擎的未知长度路径长期零测试覆盖。
+- 前端（13 项）：剪贴板按设置行事（不再无视 `clipboardConfirm`/`clipboardAutoStart`）；completed 的"整理失败"消息可见；新增 `ErrorBoundary` 兜底白屏 + 设置页 `organizeGroups` null 防御；Esc 捕获阶段停止传播；`toDialogText` 超长单行按词边界截断；侧栏拖拽先 flush 挂起帧并在卸载时清理；列宽把手补齐第 5 个；行内确认框不再冒泡选中整行；URL 校验改用 `new URL()` + 长度上限；"正在应用"失败时复位并提示；空列表提示改为真实行为；`format` 子字节值不再渲染 `undefined`；30ms 聚焦定时器清理；删除 `planRunning` 死绑定。
+- 拖放读文件：新增 `droppedText`——≤256KiB 的文本文件按内容交给前端识别（`.url`/`.txt` 里的链接现在真的能拖入），其余回退为路径，保持原行为。
+- 测试：engine 新增 4 个测试文件、8 个用例（未知长度 A/B、2400 次并发 save、断电模拟 resume、损坏/版本不符/带洞 sidecar）；前端 30/30（新增 ErrorBoundary、超长单行、子字节格式化用例）。验收：根 `vet`/`test`/`-race`、desktop `vet`/`test`、`GOOS=linux vet` 全干净；`tsc` 0 错；vitest 30/30。
+
 ## TODO (user requested, work later)
 
 - Detached ask-location popup WITHOUT v3 migration (backup plan).
