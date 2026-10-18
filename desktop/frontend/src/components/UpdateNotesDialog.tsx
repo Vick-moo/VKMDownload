@@ -11,6 +11,39 @@ type Props = {
   onUpdate: () => void;
 };
 
+/** The release body is written for the GitHub page; this dialog only shows
+ * the short version. The author marks where the in-app summary ends with an
+ * HTML comment — invisible on GitHub — and everything past it (the backstory,
+ * the asset table, the SmartScreen boilerplate) never reaches the dialog.
+ * Markdown furniture is stripped so the summary reads as plain sentences, and
+ * the hard cap is the backstop for bodies written before the marker existed. */
+const APP_NOTES_END = "<!-- app-notes-end -->";
+const APP_NOTES_MAX = 1200;
+
+function toDialogText(body: string): string {
+  let text = body.includes(APP_NOTES_END)
+    ? body.slice(0, body.indexOf(APP_NOTES_END))
+    : body;
+  text = text
+    .split("\n")
+    .map((line) => line.trim())
+    // Tables and rules only read well rendered; as plain text the pipes are
+    // noise.
+    .filter((line) => line !== "" && !line.startsWith("|") && !/^-{3,}$/.test(line))
+    .map((line) =>
+      line
+        .replace(/^#{1,6}\s*/, "")
+        .replace(/\*\*/g, "")
+        .replace(/`/g, ""),
+    )
+    .join("\n");
+  if (text.length > APP_NOTES_MAX) {
+    // Cut on a line boundary, never mid-sentence.
+    text = text.slice(0, APP_NOTES_MAX).replace(/\n[^\n]*$/, "");
+  }
+  return text.trim();
+}
+
 /**
  * "What's new" before an update commits.
  *
@@ -89,7 +122,13 @@ export function UpdateNotesDialog({
               更新内容没拉到（可能离线，或这个版本没写说明）。可以直接更新，也可以稍后去发布页看。
             </p>
           ) : null}
-          {notes !== null ? <pre className="notes__body">{notes}</pre> : null}
+          {notes !== null ? (
+            <div className="notes__body">
+              {notes.split("\n").map((line, i) =>
+                line.trim() === "" ? null : <p key={i}>{line}</p>,
+              )}
+            </div>
+          ) : null}
           <p className="notes__hint">
             更新会先暂停全部任务，换好文件后自动重启，任务都在、可继续下载。
             {current ? `当前版本 v${current}。` : ""}
@@ -97,6 +136,19 @@ export function UpdateNotesDialog({
         </div>
 
         <div className="modal__foot">
+          <button
+            type="button"
+            className="btn btn--link"
+            onClick={() =>
+              void api
+                .openReleasePage(
+                  "https://github.com/Vick-moo/VKMDownload/releases/tag/v" + version,
+                )
+                .catch(() => {})
+            }
+          >
+            完整说明在发布页
+          </button>
           <span className="modal__foot-spacer" />
           <button type="button" className="btn" onClick={onClose}>
             以后再说
