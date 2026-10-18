@@ -3,7 +3,7 @@
 > 每次改完代码都在这里记一笔：日期、改了什么、为什么改。
 > 发版 / push 前看这份文件写 release notes。
 
-## 2026-10-18 — 0.2.6（待发布）
+## 2026-10-18 — 0.2.7
 
 ### 48. 稳定性收尾批：测试基建、重启语义、并发防护、更新说明与大小交接（UNRELEASED）
 - 测试基建：Windows 下 `TempDir` 清理的假报警根治。`Manager` 新增 `bgWait`/`goBg`，把传输 goroutine、删除/取消的 settle waiter、文件名探测、计划 watcher 全部纳入跟踪；`newTestApp` 在 `t.TempDir()` 之后注册 `t.Cleanup(WaitBackground)`，按 LIFO 在清目录前先等后台静默。为什么改：此前清理瞬间仍有 goroutine 持着 `tasks.json` 或半成品在写，"directory not empty" 间歇性地把无关测试拖红，真 bug 反而淹在噪声里。验收：desktop 全量连跑 3 次 0 失败；engine 82 过；扩展 27/27；`tsc` 0 错；vitest 22/22。
