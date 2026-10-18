@@ -88,11 +88,16 @@ type TaskView struct {
 	ETA        int64      `json:"eta"`
 	Status     TaskStatus `json:"status"`
 	Error      string     `json:"error"`
-	Conns      int        `json:"connections"`
-	Segments   int        `json:"segments"`
-	SegsDone   int        `json:"segmentsDone"`
-	Created    string     `json:"createdAt"`
-	Finished   string     `json:"finishedAt"`
+	// Notice carries a transient message for a task that is still working —
+	// today, the "server is temporarily returning 404, retrying in N s"
+	// recovery wait. It is kept apart from Error because it does not mean the
+	// task failed: the row stays in the downloading state throughout.
+	Notice   string `json:"notice,omitempty"`
+	Conns    int    `json:"connections"`
+	Segments int    `json:"segments"`
+	SegsDone int    `json:"segmentsDone"`
+	Created  string `json:"createdAt"`
+	Finished string `json:"finishedAt"`
 }
 
 // task is the mutable record behind a TaskView.
@@ -1743,6 +1748,90 @@ func shutdownMachine() {
 	}()
 }
 
+// sessionRetryDelays is how long the manager waits before replaying a whole
+// download session after the server 404s mid-transfer.
+//
+// It is the session-level analogue of the engine's per-segment backoff: the
+// segment budget absorbs a blip, this absorbs the minute-scale outage behind
+// an uploadhaven link. Exhausting the list settles the task as failed. It is a
+// variable so tests can drive the cycle at millisecond scale.
+var sessionRetryDelays = []time.Duration{
+	20 * time.Second,
+	40 * time.Second,
+	60 * time.Second,
+}
+
+// serverStalledMessage is the terminal text for a link that kept answering 404
+// across the whole recovery cycle.
+//
+// It is written literally rather than derived by humanError: its generic 404
+// wording ("the link does not exist") would be misleading once bytes had
+// arrived, and this text has to fit both a flapping CDN and a single-use link
+// that was already consumed.
+const serverStalledMessage = "服务器持续返回 404，链接可能已失效或正被限流 · 请稍后重试，或重新获取下载链接"
+
+// errServerStalled carries serverStalledMessage as an error, so the mapping in
+// humanError recognises it explicitly instead of falling into the generic
+// HTTP-404 case.
+var errServerStalled = errors.New(serverStalledMessage)
+
+// updateFrozen reports whether an update is being applied, which freezes
+// scheduling.
+func (m *Manager) updateFrozen() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.updating
+}
+
+// awaitRetry announces a pending session-level retry and waits for it, both
+// cancellable by the run's context, and reports whether the caller should try
+// the download again.
+//
+// The task keeps its "downloading" status and its concurrency slot for the
+// whole wait: it is still working, only waiting, and that is also what keeps a
+// running plan (watchPlan) from declaring itself finished and intervened.
+func (m *Manager) awaitRetry(ctx context.Context, t *task, gen int64, attempt int, d time.Duration) bool {
+	seconds := int((d + time.Second - 1) / time.Second)
+
+	t.mu.Lock()
+	if t.generation != gen {
+		t.mu.Unlock()
+		return false
+	}
+	t.view.Notice = fmt.Sprintf("服务器临时故障（404），%d 秒后自动重试（第 %d/%d 次）",
+		seconds, attempt, len(sessionRetryDelays))
+	v := t.view
+	t.mu.Unlock()
+	m.app.emit("task:progress", v)
+
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		// Pause, Cancel, StopAll during an update, or shutdown: the caller's
+		// stop branch honours stopIntent.
+		return false
+	case <-timer.C:
+	}
+
+	// Never restart a transfer while an update is being applied. The update's
+	// own StopAll has usually cancelled ctx already; this covers the race
+	// where the freeze landed in the instant after the timer fired.
+	if m.updateFrozen() {
+		return false
+	}
+
+	// Clear the notice before retrying: the retry's own progress events replace
+	// it, and a failure or an interrupted wait would otherwise leave it in
+	// tasks.json as if it were still pending.
+	t.mu.Lock()
+	if t.generation == gen {
+		t.view.Notice = ""
+	}
+	t.mu.Unlock()
+	return true
+}
+
 // run performs the transfer for one task.
 //
 // ctx, cancel and done come from the caller: startRun creates them before
@@ -1763,6 +1852,7 @@ func (m *Manager) run(t *task, ctx context.Context, cancel context.CancelFunc, d
 	gen := t.generation
 	t.view.Status = StatusDownloading
 	t.view.Error = ""
+	t.view.Notice = ""
 	t.view.Speed = 0
 	t.view.ETA = 0
 	url, dest, conns := t.view.URL, t.view.Dest, t.view.Conns
@@ -1824,7 +1914,7 @@ func (m *Manager) run(t *task, ctx context.Context, cancel context.CancelFunc, d
 	untrack := m.trackLive(snapshot(t).ID, dl)
 	defer untrack()
 
-	res, err := dl.Download(ctx, engine.Request{
+	req := engine.Request{
 		URL:    url,
 		Dest:   dest,
 		Resume: true,
@@ -1857,26 +1947,77 @@ func (m *Manager) run(t *task, ctx context.Context, cancel context.CancelFunc, d
 			t.mu.Unlock()
 			m.emit(v)
 		},
-	})
-	if err != nil {
+	}
+
+	res, err := dl.Download(ctx, req)
+
+	// Session-level recovery for a server whose links flap. A 404 that arrived
+	// after this session had already written bytes is a temporary outage, not a
+	// dead link, so the whole session is replayed from its sidecar instead of
+	// failing the task. The task stays "downloading" throughout: flipping it to
+	// failed would flash a failure the user did not ask for, end a running plan
+	// early (marking it intervened), and drop the run goroutine whose context
+	// is what makes Pause/Cancel instant.
+	recovered := 0
+	for err != nil && recovered < len(sessionRetryDelays) {
 		if ctx.Err() != nil {
+			break
+		}
+		if recovered == 0 {
+			// Only a 404 that happened after real progress — or that has a
+			// resumable sidecar to come back to — is worth a whole-session
+			// retry. A first-request 404 stays a fast, permanent failure.
+			t.mu.Lock()
+			name := t.view.Name
+			t.mu.Unlock()
+			part, _ := partialPaths(dest, name)
+			if !engine.RecoverableNotFound(err, strings.TrimSuffix(part, engine.PartSuffix)) {
+				break
+			}
+		} else if !engine.IsNotFound(err) {
+			// A later attempt may 404 at probe time, before any bytes are
+			// written; that still means the outage is on. Anything else —
+			// disk full, size mismatch, TLS — must surface at once instead
+			// of after minutes of waiting.
+			break
+		}
+		recovered++
+		if !m.awaitRetry(ctx, t, gen, recovered, sessionRetryDelays[recovered-1]) {
+			break
+		}
+		res, err = dl.Download(ctx, req)
+	}
+
+	if err != nil {
+		if frozen := m.updateFrozen(); ctx.Err() != nil || frozen {
 			// The transfer was stopped. Whichever action did that also recorded
 			// what it wanted the status to become, and that record is the one to
 			// trust: reading the view here can race the setter, and mistaking a
 			// pause for a cancel throws away the partial data's ability to
-			// resume. Only an unclaimed cancellation — the app shutting down —
-			// falls back to "canceled".
+			// resume. An update freeze is a pause too: the partial data stays
+			// valid and the task resumes after the restart.
 			t.mu.Lock()
 			if t.view.Status == StatusDownloading {
-				if t.stopIntent != "" {
+				switch {
+				case t.stopIntent != "":
 					t.view.Status = t.stopIntent
-				} else {
+				case frozen:
+					t.view.Status = StatusPaused
+				default:
 					t.view.Status = StatusCanceled
 				}
 			}
+			t.view.Notice = ""
 			v := t.view
 			t.mu.Unlock()
 			m.app.emit("task:progress", v)
+			return
+		}
+		if recovered > 0 && engine.IsNotFound(err) {
+			// The recovery cycle ran out: the link has answered 404 for
+			// minutes. A flapping CDN that never recovered and a single-use
+			// token that was already spent look identical here.
+			m.failMessage(t, gen, serverStalledMessage)
 			return
 		}
 		m.fail(t, gen, err)
@@ -1930,6 +2071,7 @@ func (m *Manager) run(t *task, ctx context.Context, cancel context.CancelFunc, d
 	t.view.Downloaded = res.Size
 	t.view.Speed = 0
 	t.view.ETA = 0
+	t.view.Notice = ""
 	t.view.Segments = res.Segments
 	t.view.SegsDone = res.Segments
 	t.view.Conns = res.Connections
@@ -2013,13 +2155,24 @@ func copyFile(src, dst string) error {
 
 // fail records a task failure with a message meant for a human.
 func (m *Manager) fail(t *task, gen int64, err error) {
+	m.failMessage(t, gen, humanError(err))
+}
+
+// failMessage settles a task as failed with a message that is already meant
+// for a human.
+//
+// It exists for the one failure whose text must not be re-derived: a link that
+// kept answering 404 after bytes had arrived, where humanError's generic "the
+// link does not exist" would be a lie.
+func (m *Manager) failMessage(t *task, gen int64, msg string) {
 	t.mu.Lock()
 	if t.generation != gen {
 		t.mu.Unlock()
 		return
 	}
 	t.view.Status = StatusFailed
-	t.view.Error = humanError(err)
+	t.view.Error = msg
+	t.view.Notice = ""
 	t.view.Speed = 0
 	t.view.ETA = 0
 	t.view.Finished = time.Now().Format(time.RFC3339Nano)
@@ -2039,6 +2192,11 @@ func humanError(err error) string {
 	msg := err.Error()
 	lower := strings.ToLower(msg)
 	switch {
+	case errors.Is(err, errServerStalled):
+		// Returned verbatim, not re-derived: after bytes have arrived, "the
+		// link does not exist" is the wrong story — it is a server outage or a
+		// single-use link that was already consumed.
+		return serverStalledMessage
 	case errors.Is(err, engine.ErrNeedsSignIn):
 		// Checked before ErrNotAFile: both arrive as an HTML body, but the fix
 		// is different and "find a direct link" would send the user looking for

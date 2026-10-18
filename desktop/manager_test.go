@@ -1853,6 +1853,16 @@ func TestHumanErrorMappings(t *testing.T) {
 			t.Errorf("humanError(%q) = %q, want it to contain %q", c.in, got, c.want)
 		}
 	}
+
+	// The stalled-server error must come out verbatim. Deriving it from the
+	// "HTTP 404" wording would tell the user the link does not exist just
+	// after bytes from that very link arrived on disk.
+	if got := humanError(errServerStalled); got != serverStalledMessage {
+		t.Errorf("humanError(errServerStalled) = %q, want %q", got, serverStalledMessage)
+	}
+	if got := humanError(fmt.Errorf("wrapped: %w", errServerStalled)); !strings.Contains(got, serverStalledMessage) {
+		t.Errorf("humanError(wrapped errServerStalled) = %q, want it to contain %q", got, serverStalledMessage)
+	}
 }
 
 type fakeErr struct{ s string }

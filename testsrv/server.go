@@ -80,6 +80,20 @@ type Config struct {
 	// exercises the engine's exponential backoff.
 	FailFirst int
 
+	// FlapAfter, FlapNotFound and FlapPeriod model a CDN whose links flap
+	// between usable and not-found on a minute-scale cycle. Once FlapAfter
+	// requests have been served, the next FlapNotFound requests answer 404
+	// with an empty body, whatever their method or Range header, and service
+	// then returns to normal. FlapPeriod > 0 repeats the outage every
+	// FlapPeriod requests instead of once.
+	//
+	// A 404 is used rather than FailFirst's 503 precisely because 404 is the
+	// status the engine treats as permanent: this is the only mode that
+	// reaches the mid-transfer recovery path.
+	FlapAfter    int
+	FlapNotFound int
+	FlapPeriod   int
+
 	// NoHead makes HEAD answer 405 Method Not Allowed, forcing the engine to
 	// fall back to GET with Range: bytes=0-0.
 	NoHead bool
@@ -124,11 +138,34 @@ type Server struct {
 	requests []Request
 	served   int
 	failed   int
+	notFound int
+
+	// The flap window is copied out of cfg so SetFlap can heal a server
+	// mid-transfer without racing the config reads that happen outside the
+	// mutex. Only these three fields may be changed after Start.
+	flapAfter    int
+	flapNotFound int
+	flapPeriod   int
 }
 
 // New creates a server for cfg. Call Start to listen.
 func New(cfg Config) *Server {
-	return &Server{cfg: cfg}
+	return &Server{
+		cfg:          cfg,
+		flapAfter:    cfg.FlapAfter,
+		flapNotFound: cfg.FlapNotFound,
+		flapPeriod:   cfg.FlapPeriod,
+	}
+}
+
+// SetFlap replaces the 404 window. Healing a server mid-transfer is what lets a
+// test watch the recovery path be taken and then let the retry succeed.
+func (s *Server) SetFlap(after, notFound, period int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.flapAfter = after
+	s.flapNotFound = notFound
+	s.flapPeriod = period
 }
 
 // ServeHTTP implements http.Handler. It is exported so the server can be
@@ -208,7 +245,25 @@ func (s *Server) writeResponse(conn net.Conn, req *http.Request, lim *rateLimite
 	s.mu.Lock()
 	s.served++
 	served := s.served
+	// The flap window is evaluated here rather than in ServeHTTP: once the
+	// first request has hijacked the connection, handleConn serves every
+	// keep-alive request on it through this function, so a counter kept in
+	// ServeHTTP would miss all of the follow-ups — which is most of a
+	// segmented transfer.
+	flap := s.flapAt(served)
+	if flap {
+		s.notFound++
+	}
 	s.mu.Unlock()
+
+	if flap {
+		if _, err := conn.Write([]byte("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: keep-alive\r\n\r\n")); err != nil {
+			return false
+		}
+		// The response is well formed, so the connection stays usable — a
+		// real CDN's red window does not close connections, it just 404s.
+		return true
+	}
 
 	etag := cfg.ETag
 	if etag == "" {
@@ -428,12 +483,20 @@ func (s *Server) Requests() []Request {
 	return out
 }
 
-// Reset clears the request log and the failure counter.
+// NotFound returns how many requests the flap window answered with 404.
+func (s *Server) NotFound() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.notFound
+}
+
+// Reset clears the request log and the failure counters.
 func (s *Server) Reset() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.requests = nil
 	s.failed = 0
+	s.notFound = 0
 }
 
 func (s *Server) record(r *http.Request) {
@@ -467,6 +530,23 @@ func (l *rateLimiter) throttle(n int) {
 	if elapsed := time.Since(l.start); want > elapsed {
 		time.Sleep(want - elapsed)
 	}
+}
+
+// flapAt reports whether the request at 1-based index served falls in the
+// configured 404 window. The caller must hold s.mu.
+//
+// With FlapPeriod == 0 the window opens once, after FlapAfter requests, and
+// never recurs. With FlapPeriod > 0 the index is folded into the current cycle
+// first, so the outage repeats every FlapPeriod requests.
+func (s *Server) flapAt(served int) bool {
+	if s.flapNotFound <= 0 {
+		return false
+	}
+	idx := served
+	if s.flapPeriod > 0 {
+		idx = (served-1)%s.flapPeriod + 1
+	}
+	return idx > s.flapAfter && idx <= s.flapAfter+s.flapNotFound
 }
 
 // parseByteRange parses a single-range "bytes=" header against a known size.

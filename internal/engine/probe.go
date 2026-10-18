@@ -230,7 +230,7 @@ func (d *Downloader) probeHead(ctx context.Context, rawURL string, res *ProbeRes
 			resp.StatusCode == http.StatusForbidden:
 			return errHeadUnavailable
 		case resp.StatusCode >= 400:
-			return &statusError{resp.StatusCode, "HEAD " + rawURL}
+			return &statusError{Code: resp.StatusCode, Detail: "HEAD " + rawURL}
 		}
 
 		res.AdvertisedRange = strings.EqualFold(resp.Header.Get("Accept-Ranges"), "bytes")
@@ -356,7 +356,7 @@ func (d *Downloader) probeRange(ctx context.Context, rawURL string, res *ProbeRe
 		return nil
 
 	default:
-		return &statusError{resp.StatusCode, "GET with Range " + rawURL}
+		return &statusError{Code: resp.StatusCode, Detail: "GET with Range " + rawURL}
 	}
 }
 
@@ -383,7 +383,7 @@ func (d *Downloader) probeRangeFetch(ctx context.Context, rawURL string) (*http.
 		if resp.StatusCode >= 500 {
 			_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<12))
 			_ = resp.Body.Close()
-			return &statusError{resp.StatusCode, "GET with Range " + rawURL}
+			return &statusError{Code: resp.StatusCode, Detail: "GET with Range " + rawURL}
 		}
 		out = resp
 		return nil

@@ -36,6 +36,14 @@ var (
 type statusError struct {
 	Code   int
 	Detail string
+	// PostProgress marks a status that is normally permanent but that this
+	// session has evidence is temporary here: a 404 received after bytes had
+	// already been written to disk. That is what a CDN whose links flap
+	// between usable and not-found on a minute-scale cycle looks like — the
+	// same request succeeded a moment ago, so the 404 is an outage, not a
+	// dead link. Probe requests never set it, so a 404 during discovery still
+	// fails fast.
+	PostProgress bool
 }
 
 func (e *statusError) Error() string { return fmt.Sprintf("HTTP %d: %s", e.Code, e.Detail) }
@@ -512,6 +520,27 @@ func (s *session) effectiveAvailable() int64 {
 	return n
 }
 
+// progressed reports whether this session has already written bytes to disk.
+//
+// It reads the segment manager's committed bytes rather than the file size:
+// the segmented path preallocates the part file to the announced size with
+// Truncate before a single worker writes (runSegmented), so the file's size is
+// non-zero from the first instant and would classify the very first 404 as
+// "after progress". Written only advances on a real commit, and a resumed
+// session starts with the sidecar's Written already restored, so progress from
+// a previous attempt counts too.
+//
+// This session-level signal is the evidence that makes a 404 retryable. A
+// per-attempt one cannot serve: a 404 is recognised in validateRangeResponse
+// before the attempt that received it has written anything.
+func (s *session) progressed() bool {
+	if s.mgr == nil {
+		return false
+	}
+	n, _, _ := s.mgr.progress()
+	return n > 0
+}
+
 // newTracker builds the throttled progress reporter for this session.
 func (s *session) newTracker(initial, total int64) {
 	s.track = &progressTracker{
@@ -728,6 +757,15 @@ func (s *session) runSegmented(ctx context.Context) (*Result, error) {
 func (s *session) fetchSegment(ctx context.Context, seg *Segment) error {
 	b := s.d.opt.Backoff.normalized()
 	var lastErr error
+	// notFound counts 404s that arrived after this session had already
+	// written bytes. It is deliberately separate from attempt: the
+	// errSegmentIncomplete branch below resets attempt to -1 every time a
+	// block lands, and a server alternating between an open red window and a
+	// green one would reset this budget forever. Bounding it on its own is
+	// what keeps an oscillating server from retrying without end, while
+	// still handing the failure to the session-level recovery instead of
+	// declaring the link dead.
+	notFound := 0
 
 	for attempt := 0; attempt <= b.MaxTries; attempt++ {
 		if attempt > 0 {
@@ -748,6 +786,15 @@ func (s *session) fetchSegment(ctx context.Context, seg *Segment) error {
 			// the count so a long segment cannot exhaust MaxTries and fail
 			// merely for being large.
 			attempt = -1
+		case isPostProgressNotFound(err):
+			// The red window is still open. Spend this budget, never the
+			// attempt counter, and let the last one through so the session
+			// level can decide whether to replay the whole download.
+			notFound++
+			if notFound > transientNotFoundMax {
+				return err
+			}
+			lastErr = err
 		case !isRetryable(err):
 			return err
 		default:
@@ -761,10 +808,30 @@ func (s *session) fetchSegment(ctx context.Context, seg *Segment) error {
 	// fewer bytes than the resource has. When retries were exhausted instead,
 	// keep the last real error: without it every such failure degrades into a
 	// generic "bytes unclaimed" with 0 B on disk and nothing actionable.
+	//
+	// The last error is wrapped with %w so a status buried in it — in
+	// particular the post-progress 404 that drives session-level recovery —
+	// stays classified by errors.As at the caller.
 	if lastErr != nil {
-		return fmt.Errorf("segment %s ended with bytes unclaimed (last error: %v)", s.mgr.describe(seg), lastErr)
+		return fmt.Errorf("segment %s ended with bytes unclaimed (last error: %w)", s.mgr.describe(seg), lastErr)
 	}
 	return fmt.Errorf("segment %s ended with bytes unclaimed", s.mgr.describe(seg))
+}
+
+// transientNotFoundMax bounds how many post-progress 404s one segment absorbs
+// before the failure is handed up to the session-level retry.
+//
+// It is small on purpose. A genuinely dead link (a consumed single-use token)
+// must not stall for the whole segment attempt budget, and the long-horizon
+// waiting belongs to the manager's recovery loop, which also re-probes and can
+// therefore ride out an outage that outlives this segment.
+const transientNotFoundMax = 5
+
+// isPostProgressNotFound reports a 404 that arrived after this session had
+// already written bytes: the signature of a CDN whose links flap.
+func isPostProgressNotFound(err error) bool {
+	var se *statusError
+	return errors.As(err, &se) && se.Code == http.StatusNotFound && se.PostProgress
 }
 
 // errSegmentIncomplete is a sentinel that drives the per-segment loop in
@@ -1028,8 +1095,9 @@ func (s *session) validateRangeResponse(resp *http.Response, seg *Segment, off, 
 
 	default:
 		return &statusError{
-			resp.StatusCode,
-			fmt.Sprintf("unexpected status for range %d-%d", off, off+n-1),
+			Code:         resp.StatusCode,
+			Detail:       fmt.Sprintf("unexpected status for range %d-%d", off, off+n-1),
+			PostProgress: s.progressed(),
 		}
 	}
 }
@@ -1160,9 +1228,13 @@ func (s *session) singleAttempt(ctx context.Context, offset int64, canResume boo
 		if s.probe.Size >= 0 && offset == s.probe.Size {
 			return offset, nil
 		}
-		return offset, &statusError{resp.StatusCode, "range not satisfiable"}
+		return offset, &statusError{Code: resp.StatusCode, Detail: "range not satisfiable"}
 	default:
-		return offset, &statusError{resp.StatusCode, "unexpected status for a single stream"}
+		return offset, &statusError{
+			Code:         resp.StatusCode,
+			Detail:       "unexpected status for a single stream",
+			PostProgress: s.progressed(),
+		}
 	}
 
 	bufp := bufPool.Get().(*[]byte)
@@ -1341,12 +1413,68 @@ func isRetryable(err error) bool {
 
 	var se *statusError
 	if errors.As(err, &se) {
+		// A 4xx that arrived after this session had already written bytes is
+		// not the permanent answer it normally is: the very same request
+		// succeeded a moment ago, so a temporary outage has opened. Probe
+		// paths never set the flag, which is what keeps a 404 during
+		// discovery failing fast.
+		if se.PostProgress {
+			return true
+		}
 		if se.Code >= 400 && se.Code < 500 {
 			return se.Code == http.StatusRequestTimeout || se.Code == http.StatusTooManyRequests
 		}
 		return true
 	}
 	return true
+}
+
+// IsNotFound reports whether err carries an HTTP 404 from the server.
+//
+// The manager uses it to keep one session-level recovery cycle going across
+// failures of different shapes: the first attempt carries a post-progress 404
+// from a segment fetch, while a later attempt can 404 at probe time, before
+// any bytes have been written.
+func IsNotFound(err error) bool {
+	var se *statusError
+	return errors.As(err, &se) && se.Code == http.StatusNotFound
+}
+
+// RecoverableNotFound reports whether a 404 is worth retrying as a whole
+// session rather than failing the task permanently.
+//
+// It is true when the engine observed progress before the 404, or when a
+// resume sidecar beside target records bytes already written. A link that
+// 404s before either is true is treated as gone, so a mistyped address still
+// errors out at once instead of burning a retry cycle.
+func RecoverableNotFound(err error, target string) bool {
+	if !IsNotFound(err) {
+		return false
+	}
+	var se *statusError
+	if errors.As(err, &se) && se.PostProgress {
+		return true
+	}
+	return ResumableProgress(target)
+}
+
+// ResumableProgress reports whether the sidecar beside target records any
+// durably written bytes. A missing, corrupt or unversioned sidecar is not
+// progress.
+func ResumableProgress(target string) bool {
+	if target == "" {
+		return false
+	}
+	st, err := loadState(target + StateSuffix)
+	if err != nil {
+		return false
+	}
+	for _, seg := range st.Segments {
+		if seg.Written > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // resolveTarget turns the caller's destination into an absolute file path,

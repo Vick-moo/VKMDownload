@@ -487,6 +487,14 @@
 - 验证：go vet 全过；engine go test 全绿；desktop go test 除基线已知 TempDir 清理竞态（轮换 victim，单测隔离全过）外全绿；tsc 0 错；vitest 22/22；扩展 node 测试未动本轮无改。新 exe 已构建并重启（本地实测 PID 2084，日志干净）。
 - 有意不做并记录原因：ReserveSize 自适应（先吃默认值 80% 收益）；debugf 环境变量缓存（与测试 t.Setenv 生命周期冲突）；saveTasks 紧凑 JSON（Indent 是诊断可读性、故意的，且突发写量受 maxConcurrent 限界）；任务列表虚拟化（当前规模用不上）；Sidebar memo（内联 lambda 会抵消收益）；探测完成校验彻底异步化（保持语义不变，只把 Stat 挪出锁）；前端 gzip 资产、更新检查延迟（收益/成本比不足）。
 
+### 50. 引擎韧性：CDN"红/绿窗口"不再杀死整个任务（UNRELEASED）
+- 背景（实测）：uploadhaven 这类站的 CDN 存在分钟级的"红/绿"状态摆动——红色窗口内**任何请求**（不分大小、区域、并发、请求头）一律 404，几分钟后自愈；绿色窗口一切正常（单线程 168 KB/s、8 路并发 Range 全 206）。而引擎把任何一个 worker 收到的任何一个 404 判为永久性失败：一次瞬时故障就杀死整个任务，错误还误导（"链接不存在，请检查地址"——地址明明是对的，字节都下了一半）。用户的 245MB 任务三次分别死在 341KB/390KB/81KB，全是撞窗。
+- 引擎层：`statusError` 增加 `PostProgress` 标记——session 已有字节落盘（含断点恢复的 Written）之后再收到的 404 视为暂时性故障，可重试；探测路径的 404 永不带标记，"链接写错"依旧秒报错。`fetchSegment` 为这种 404 设**独立且不被 `errSegmentIncomplete` 重置**的预算（5 次）——否则红绿摆动 + 预算被成功块重置 = 无限重试。新增 `IsNotFound`/`RecoverableNotFound`/`ResumableProgress` 供上层判定。
+- manager 层：任务因"有进展的 404"失败时不再标 failed，而是在 `run()` 内部以 20s/40s/60s 退避自动重放整个会话（从 sidecar 断点续传），任务全程保持"下载中"（计划下载不会提前记为"介入"，暂停/取消/更新冻结能立刻打断等待）；重试等待期间任务行显示"服务器临时故障（404），N 秒后自动重试（第 i/3 次）"（`TaskView` 新增 `Notice` 字段 + 任务行一处渲染）；重试耗尽才真正失败，终局文案"服务器持续返回 404，链接可能已失效或正被限流 · 请稍后重试，或重新获取下载链接"（不经 humanError 的 404 启发式，避免"链接不存在"的误导）。
+- testsrv：新增 `FlapAfter/FlapNotFound/FlapPeriod` 故障模式（放在 `writeResponse`，keep-alive 复用连接也计数），可精确模拟红/绿窗口，`SetFlap` 允许测试中途"治好"服务器。
+- 测试：engine 5 个新用例（扛过窗口且逐字节正确 / FlapPeriod 下有限终止 / 404 预算不被成功块重置 / 恢复判定证据链 / isRetryable 表）、manager 7 个新用例（flap 重放成功 / 中途窗口恢复后完成 / 耗尽文案 / 首次 404 快速失败 / Pause 与 Cancel 立即打断 / 更新冻结不重启）。
+- 验收：go vet 三处干净；engine、desktop 全量测试通过；GOOS=linux 可编译；tsc 0 错、vitest 26/26。
+
 ## TODO (user requested, work later)
 
 - Detached ask-location popup WITHOUT v3 migration (backup plan).

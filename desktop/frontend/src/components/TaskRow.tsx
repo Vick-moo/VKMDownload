@@ -114,6 +114,8 @@ export const TaskRow = memo(function TaskRow({
         </div>
         {task.status === "failed" && task.error ? (
           <span className="task__error">{task.error}</span>
+        ) : task.status === "downloading" && task.notice ? (
+          <span className="task__url">{task.notice}</span>
         ) : (
           <span className="task__url" title={task.url}>
             {task.url}
