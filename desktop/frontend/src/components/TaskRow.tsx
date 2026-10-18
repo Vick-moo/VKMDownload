@@ -112,7 +112,8 @@ export const TaskRow = memo(function TaskRow({
             )}
           </span>
         </div>
-        {task.status === "failed" && task.error ? (
+        {(task.status === "failed" || task.status === "completed") &&
+        task.error ? (
           <span className="task__error">{task.error}</span>
         ) : task.status === "downloading" && task.notice ? (
           <span className="task__url">{task.notice}</span>
@@ -234,17 +235,26 @@ export const TaskRow = memo(function TaskRow({
       </div>
 
       {confirmRemove ? (
-        <ConfirmDialog
-          title="移除这条记录？"
-          message={`将从列表里移除「${task.name || urlTail(task.url)}」。`}
-          detail="只删除列表记录。下好的文件会保留；没下完的半成品和续传记录会一起删掉，同链接重下从头开始。"
-          confirmLabel="移除"
-          onConfirm={() => {
-            setConfirmRemove(false);
-            void run(() => api.removeTask(task.id, false));
-          }}
-          onCancel={() => setConfirmRemove(false)}
-        />
+        // display:contents keeps this from becoming a seventh grid item, while
+        // still swallowing the click: without it, choosing "移除" or "取消" in
+        // the dialog also bubbles to the row's own onClick and toggles the
+        // row's selection.
+        <span
+          style={{ display: "contents" }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <ConfirmDialog
+            title="移除这条记录？"
+            message={`将从列表里移除「${task.name || urlTail(task.url)}」。`}
+            detail="只删除列表记录。下好的文件会保留；没下完的半成品和续传记录会一起删掉，同链接重下从头开始。"
+            confirmLabel="移除"
+            onConfirm={() => {
+              setConfirmRemove(false);
+              void run(() => api.removeTask(task.id, false));
+            }}
+            onCancel={() => setConfirmRemove(false)}
+          />
+        </span>
       ) : null}
     </div>
   );

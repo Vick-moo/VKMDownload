@@ -527,12 +527,15 @@ export function TaskList({
 
 
 
-      {/* Handles sitting on the boundary after each sortable column.
+      {/* Handles sitting on the boundary after every sortable column,
+          including the last one: its right edge borders the action track, and
+          leaving that edge out was why the speed column could not be dragged
+          while the other four could.
           Absolutely positioned and only a dozen pixels wide. A handle as wide
           as its own column covers the whole header cell, which swallowed the
           clicks that sort — the list could be resized but no longer sorted. */}
       <div className="colresizers" aria-hidden="true">
-        {COLUMNS.slice(0, -1).map((c, i) => (
+        {COLUMNS.map((c, i) => (
           <span
             key={c.key}
             className="colresizer"

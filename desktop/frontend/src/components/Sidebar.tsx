@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { JSX } from "react";
 import logoMark from "../assets/logo.png";
 import { formatSpeed } from "../format";
@@ -78,8 +78,15 @@ export function Sidebar({
 }: Props): JSX.Element {
   const [typesOpen, setTypesOpen] = useState(true);
 
-  /** Width the owner had when a drag started, and where the pointer was. */
-  const dragRef = useRef({ startX: 0, startW: 0, frame: 0 });
+  /** Width the owner had when a drag started, where the pointer was, and the
+      latest width the scheduled frame has not applied yet. */
+  const dragRef = useRef({ startX: 0, startW: 0, frame: 0, pending: 0 });
+  /** Tears down an in-flight drag; set while one is active, null otherwise. */
+  const endResizeRef = useRef<(() => void) | null>(null);
+
+  // A drag that is still active when the sidebar unmounts would otherwise
+  // leave its window listeners attached and the body's resizing cursor on.
+  useEffect(() => () => endResizeRef.current?.(), []);
 
   /**
    * Resizes the sidebar by dragging its right edge.
@@ -93,27 +100,37 @@ export function Sidebar({
     e.stopPropagation();
     dragRef.current.startX = e.clientX;
     dragRef.current.startW = width;
+    dragRef.current.pending = width;
 
     const onMove = (ev: MouseEvent) => {
       const { startX, startW } = dragRef.current;
       const next = Math.max(180, Math.min(420, startW + ev.clientX - startX));
+      dragRef.current.pending = next;
       if (dragRef.current.frame) cancelAnimationFrame(dragRef.current.frame);
-      dragRef.current.frame = requestAnimationFrame(() =>
-        onWidthChange(next),
-      );
+      dragRef.current.frame = requestAnimationFrame(() => {
+        dragRef.current.frame = 0;
+        onWidthChange(dragRef.current.pending);
+      });
     };
-    const onUp = () => {
-      if (dragRef.current.frame) cancelAnimationFrame(dragRef.current.frame);
-      dragRef.current.frame = 0;
+    const end = () => {
+      // Flush whatever the last move scheduled before tearing down: cancelling
+      // the pending frame outright used to drop the final width of the drag.
+      if (dragRef.current.frame) {
+        cancelAnimationFrame(dragRef.current.frame);
+        dragRef.current.frame = 0;
+        onWidthChange(dragRef.current.pending);
+      }
       document.body.classList.remove("resizing");
       window.removeEventListener("mousemove", onMove);
-      window.removeEventListener("mouseup", onUp);
+      window.removeEventListener("mouseup", end);
+      endResizeRef.current = null;
     };
+    endResizeRef.current = end;
     // A class on the body keeps the cursor consistent even when the pointer
     // outruns the 6px handle.
     document.body.classList.add("resizing");
     window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp);
+    window.addEventListener("mouseup", end);
   }
 
   // The counts come from the parent, which derives them in the same pass as

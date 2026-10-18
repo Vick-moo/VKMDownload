@@ -15,6 +15,13 @@ describe("formatBytes", () => {
     expect(formatBytes(NaN)).toBe("0 B");
     expect(formatBytes(Infinity)).toBe("0 B");
   });
+  it("never renders an undefined unit for a sub-byte value", () => {
+    // 0 < bytes < 1 has a negative log, so the exponent floor landed on -1 and
+    // units[-1] printed as the literal string "undefined". The clamp keeps it
+    // in bytes instead.
+    expect(formatBytes(0.5)).toBe("1 B");
+    expect(formatBytes(0.1)).not.toContain("undefined");
+  });
   it("uses binary units with one decimal below 100", () => {
     expect(formatBytes(1)).toBe("1 B");
     expect(formatBytes(1023)).toBe("1023 B");

@@ -42,8 +42,20 @@ export function toDialogText(body: string): string {
     )
     .join("\n");
   if (text.length > APP_NOTES_MAX) {
-    // Cut on a line boundary, never mid-sentence.
-    text = text.slice(0, APP_NOTES_MAX).replace(/\n[^\n]*$/, "");
+    const head = text.slice(0, APP_NOTES_MAX);
+    const lastLine = head.lastIndexOf("\n");
+    if (lastLine > 0) {
+      // Cut on a line boundary, never mid-sentence.
+      text = head.slice(0, lastLine);
+    } else {
+      // A single run with no line break to cut on. Prefer the last word
+      // boundary so the text does not stop mid-word; failing that (one
+      // enormous unbroken token) hard-cut with an ellipsis, so the reader can
+      // see it was shortened instead of getting a silent, arbitrary slice.
+      const tail = text.slice(0, APP_NOTES_MAX - 1);
+      const wordEnd = tail.search(/\s+\S*$/);
+      text = (wordEnd > 0 ? tail.slice(0, wordEnd) : tail) + "…";
+    }
   }
   return text.trim();
 }

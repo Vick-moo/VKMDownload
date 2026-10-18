@@ -4,6 +4,14 @@ import { api } from "../api";
 import type { Config } from "../types";
 import { IconFolder, IconX } from "./Icons";
 
+/**
+ * Longest link the dialog accepts.
+ *
+ * This is a typo guard, not a protocol limit: a pasted-in blob (a whole web
+ * page, a chat log) is almost never a link. Real URLs stop far short of it.
+ */
+const MAX_URL_LENGTH = 8192;
+
 interface Props {
   open: boolean;
   /** Pre-filled URL, used when a link is captured from the clipboard. */
@@ -74,17 +82,26 @@ export function NewTaskDialog({
     setBusy(false);
     setDest(config?.downloadDir ?? "");
     setConns(config?.connections ?? 8);
-    // Focus lands on the field the user most likely wants.
-    window.setTimeout(() => urlRef.current?.focus(), 30);
+    // Focus lands on the field the user most likely wants. The timer is
+    // cleared on close/teardown so a late focus cannot land on a field that
+    // has already been unmounted.
+    const focusTimer = window.setTimeout(() => urlRef.current?.focus(), 30);
+    return () => window.clearTimeout(focusTimer);
   }, [open, initialURL, initialFilename, initialReferer, initialCookie, initialUserAgent, initialSize, fromAsk, config]);
 
+  // Esc dismisses the dialog. Captured and stopped on the window, like the
+  // confirm and update-notes dialogs: the app's global Escape handler also
+  // closes the settings page behind this one (Ctrl+N can open the dialog over
+  // settings), and without the stop one press would fold both layers away.
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      if (e.key !== "Escape") return;
+      e.stopImmediatePropagation();
+      onClose();
     };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    window.addEventListener("keydown", onKey, { capture: true });
+    return () => window.removeEventListener("keydown", onKey, { capture: true });
   }, [open, onClose]);
 
   if (!open) return null;
@@ -95,9 +112,22 @@ export function NewTaskDialog({
       setError("请填写下载链接");
       return;
     }
+    if (trimmed.length > MAX_URL_LENGTH) {
+      setError(`链接过长（超过 ${MAX_URL_LENGTH} 个字符），请检查是否粘贴了多余内容`);
+      return;
+    }
     // Same rule as the backend: only http(s) reaches the engine. Checking here
-    // fails fast at the dialog instead of round-tripping through Go.
-    if (!/^https?:\/\//i.test(trimmed)) {
+    // fails fast at the dialog instead of round-tripping through Go. Parsing
+    // once rejects malformed strings a prefix-only regex let through — a URL
+    // with spaces in the host, or one with nothing after the scheme.
+    let parsed: URL;
+    try {
+      parsed = new URL(trimmed);
+    } catch {
+      setError("链接格式不正确，请检查后重试");
+      return;
+    }
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
       setError("链接必须以 http:// 或 https:// 开头");
       return;
     }

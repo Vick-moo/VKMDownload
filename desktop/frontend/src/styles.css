@@ -1053,6 +1053,51 @@ input:focus {
   margin-top: var(--space-2);
 }
 
+/* ------------------------------------------------------------- fatal ----- */
+/* The ErrorBoundary fallback. It replaces the whole app when a render throws,
+   so it establishes its own full-height frame instead of relying on .shell. */
+.fatal {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-3);
+  min-height: 100vh;
+  padding: var(--space-8);
+  text-align: center;
+  background: var(--bg-base);
+  color: var(--text-secondary);
+}
+
+.fatal__title {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.fatal__hint {
+  max-width: 460px;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--text-muted);
+}
+
+.fatal__detail {
+  max-width: 640px;
+  max-height: 160px;
+  overflow: auto;
+  margin: 0;
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-surface);
+  color: var(--danger);
+  font-size: 12px;
+  text-align: left;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 /* ------------------------------------------------------- sortable header --- */
 
 .listhead {

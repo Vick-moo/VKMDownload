@@ -61,6 +61,20 @@ describe("toDialogText", () => {
     expect(got.endsWith("。")).toBe(true);
   });
 
+  it("falls back to a word-boundary cut for a single over-long line", () => {
+    // One line with no newline to cut on. The old fallback sliced at the cap
+    // and stopped wherever that landed — the "1200 个 A" case. It now marks
+    // the cut, and where there is whitespace to cut on, ends on a whole word.
+    const chars = toDialogText("A".repeat(3000));
+    expect(chars.length).toBeLessThanOrEqual(1200);
+    expect(chars.endsWith("…")).toBe(true);
+    expect(chars).not.toBe("A".repeat(1200));
+
+    const words = toDialogText("download ".repeat(200));
+    expect(words.length).toBeLessThanOrEqual(1200);
+    expect(words.endsWith("download…")).toBe(true);
+  });
+
   it("returns an empty string for an empty body so the caller shows the fallback", () => {
     expect(toDialogText("")).toBe("");
     expect(toDialogText("   \n  ")).toBe("");

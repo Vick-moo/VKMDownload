@@ -23,6 +23,11 @@ import {
 function App(): JSX.Element {
   const [tasks, setTasks] = useState<TaskView[]>([]);
   const [config, setConfig] = useState<Config | null>(null);
+  // Latest config for the bridge handlers, which subscribe exactly once:
+  // re-subscribing on every config change would churn the listeners, and the
+  // clipboard handler has to read the setting in force when the link arrives.
+  const configRef = useRef<Config | null>(null);
+  configRef.current = config;
 
   const [filter, setFilter] = useState<Filter>("all");
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -241,9 +246,17 @@ function App(): JSX.Element {
             // A finished row never goes back to transferring: progress events
             // travel through a queue while done jumps it directly, so a slow
             // stale update arriving late must not resurrect it. (Failed rows
-            // are excluded on purpose: resume legitimately returns them to
-            // downloading, and completed never resumes.)
+            // are not frozen — resume legitimately returns them to downloading
+            // — but a late event must not undo a failure the user can see: the
+            // transition is only accepted when its byte count is not behind.
+            // The backend guards this too; this just stops the row flickering.)
             if (t.status === "completed" && v.status !== "completed") return t;
+            if (
+              t.status === "failed" &&
+              v.status === "downloading" &&
+              (v.downloaded || 0) < (t.downloaded || 0)
+            )
+              return t;
             return v;
           }),
         ),
@@ -260,10 +273,26 @@ function App(): JSX.Element {
       on<string>(EVENTS.removed, (id) =>
         setTasks((prev) => prev.filter((t) => t.id !== id)),
       ),
-      // A captured link opens the dialog for confirmation; one that arrives
-      // while the dialog is already open waits its turn instead of
-      // overwriting what the user already typed.
+      // A captured clipboard link. The backend has already acted on the
+      // clipboard settings before it emitted this: with "先弹窗确认" it created
+      // nothing and expects the dialog, but otherwise it has already added
+      // (and possibly started) the task, so opening the dialog here would ask
+      // about a download that already exists — and its "取消" would not cancel
+      // anything. Read the current config through the ref so the handler keeps
+      // seeing the setting in force.
       on<string>(EVENTS.clipboardURL, (url) => {
+        const cfg = configRef.current;
+        // While the config is still loading the setting is unknown; falling
+        // back to the dialog is the safe side (a redundant prompt beats a link
+        // silently going nowhere).
+        if (cfg && !cfg.clipboardConfirm) {
+          flash(
+            cfg.clipboardAutoStart
+              ? "已按设置开始下载剪贴板里的链接"
+              : "已按设置把剪贴板里的链接加入列表",
+          );
+          return;
+        }
         handleArrival({
           url,
           filename: "",
@@ -589,6 +618,11 @@ function App(): JSX.Element {
           setUpdPct("正在应用…");
           try {
             await api.applyUpdate();
+            // Reaching this line means the process could not quit for the
+            // swap — a normal apply ends by the app exiting. Report it rather
+            // than leaving the banner stuck on "正在应用…" forever.
+            setUpdating(false);
+            flash("应用更新失败：程序没有退出，可稍后在设置里重试");
           } catch (e) {
             setUpdating(false);
             flash(`更新失败：${e instanceof Error ? e.message : String(e)}`);
@@ -888,7 +922,8 @@ function App(): JSX.Element {
                 <p className="empty__title">把下载链接粘贴到这里</p>
                 <p className="empty__hint">
                   支持 HTTP / HTTPS 直链。多连接并行下载，中断后可继续；
-                  也可以把链接拖进窗口，或在设置里打开剪贴板监控自动捕获。
+                  把含下载链接的文件拖进窗口会尝试识别其中的链接，也可以在设置里
+                  打开剪贴板监控，复制链接后自动捕获。
                 </p>
                 <div className="empty__actions">
                   <button

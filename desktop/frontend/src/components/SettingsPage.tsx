@@ -22,6 +22,22 @@ interface Props {
  */
 type Draft = Config & { verifyPeerProcess?: boolean };
 
+/**
+ * The Config made safe for the editor.
+ *
+ * A nil slice on the Go side arrives as null, and this page indexes straight
+ * into organizeGroups (map/filter/slice) whenever organise is enabled, so a
+ * null there white-screens the window. Normalising once here keeps every use
+ * below free of `?? []`. Object.assign onto a fresh candidate matches patch()
+ * and preserves the generated model's prototype.
+ */
+function normalizeConfig(config: Config | null): Draft | null {
+  if (!config) return null;
+  return Object.assign(new main.Config(), config, {
+    organizeGroups: config.organizeGroups ?? [],
+  });
+}
+
 /** A labelled switch row. */
 function Switch({
   title,
@@ -72,7 +88,7 @@ export function SettingsPage({
   updateNotice,
   onSaved,
 }: Props): JSX.Element {
-  const [draft, setDraft] = useState<Draft | null>(config);
+  const [draft, setDraft] = useState<Draft | null>(() => normalizeConfig(config));
   const [status, setStatus] = useState("");
   // Short-lived notices (radio changes, copy confirmations) share the status
   // line with the save confirmation.
@@ -99,7 +115,7 @@ export function SettingsPage({
 
 
   useEffect(() => {
-    setDraft(config);
+    setDraft(normalizeConfig(config));
   }, [config]);
 
   // The update state lives in the backend: leaving this page unmounts it, so

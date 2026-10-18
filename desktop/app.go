@@ -10,6 +10,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/wailsapp/wails/v2/pkg/options"
 	"github.com/wailsapp/wails/v2/pkg/runtime"
@@ -17,6 +18,28 @@ import (
 
 // appVersion is what Version() reports and the browser extension displays.
 const appVersion = "0.2.7"
+
+// maxDroppedRead bounds how much of a dropped file is read looking for a
+// link: shortcuts and notes are tiny, and the bridge should not carry
+// megabytes of text.
+const maxDroppedRead = 256 << 10
+
+// droppedText turns one dropped path into the text the UI scans for a
+// download link. A dropped shortcut or text file carries its link inside it
+// (a .url file is an INI whose URL= line holds the target), so small text
+// files are handed over by content; anything else by path, which the UI
+// scans just the same. Only the first match matters to the UI.
+func droppedText(path string) string {
+	info, err := os.Stat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Size() > maxDroppedRead {
+		return path
+	}
+	b, err := os.ReadFile(path)
+	if err != nil || !utf8.Valid(b) {
+		return path
+	}
+	return string(b)
+}
 
 // App is the object exposed to the front-end. Every exported method becomes a
 // callable binding, so internal state is kept unexported.
@@ -159,10 +182,12 @@ func (a *App) startup(ctx context.Context) {
 	// nothing to bring it back from, which reads as a broken close button.
 	go a.startTray()
 
-	// Files dropped onto the window become new tasks.
+	// Files dropped onto the window become new tasks. Small text files are
+	// handed over by content so a dropped .url shortcut actually works; the
+	// UI scans whatever arrives for an http(s) link.
 	runtime.OnFileDrop(ctx, func(_, _ int, paths []string) {
 		for _, p := range paths {
-			a.emit("files:dropped", p)
+			a.emit("files:dropped", droppedText(p))
 		}
 	})
 
