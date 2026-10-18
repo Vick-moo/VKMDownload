@@ -48,6 +48,7 @@ func (a *App) apiPort() int {
 func (a *App) startLocalAPI(ctx context.Context) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ping", a.apiPing)
+	mux.HandleFunc("/pair", a.apiPair)
 	mux.HandleFunc("/settings", a.apiSettings)
 	mux.HandleFunc("/add", a.apiAdd)
 	handler := a.apiGuard(mux)
@@ -105,7 +106,11 @@ func (a *App) apiGuard(next http.Handler) http.Handler {
 		// a local test) may still use the read-only endpoints, but must not
 		// enqueue downloads: without this, any process on the machine could
 		// push arbitrary tasks into the queue with no credential at all.
-		if r.Method != http.MethodOptions && (r.URL.Path == "/add" || r.Method == http.MethodPost) {
+		//
+		// /pair is held to the same rule even though it is a GET: it hands out
+		// the pairing key, which is a credential, so a caller without a browser
+		// Origin must never reach it.
+		if r.Method != http.MethodOptions && (r.URL.Path == "/add" || r.URL.Path == "/pair" || r.Method == http.MethodPost) {
 			if !strings.HasPrefix(origin, "chrome-extension://") &&
 				!strings.HasPrefix(origin, "moz-extension://") {
 				// JSON, not plain text: the extension parses the reply body
@@ -159,8 +164,16 @@ func exeSuffix(exe string) string {
 	return " (" + filepath.Base(exe) + ")"
 }
 
-// apiPing lets the extension find the app without guessing.
+// apiPing lets the extension find the app without guessing, and proves the app's
+// identity when the caller asks for a challenge.
+//
+// The self-reported "app" field is not evidence: any program can answer with it.
+// The extension therefore requires the proof header, which only a holder of the
+// per-install key can produce for the nonce it just generated.
 func (a *App) apiPing(w http.ResponseWriter, r *http.Request) {
+	if proof := a.answerChallenge(r.URL.Query().Get("challenge")); proof != "" {
+		w.Header().Set(proofHeader, proof)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"app":     "VKMDownload",
 		"version": appVersion,

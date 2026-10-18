@@ -49,6 +49,26 @@
 - 更新 P3：无 `Content-Length` 且无 digest 时拒绝（否则任何"前 1MB 完好"的截断文件都能过关）；更新放弃后把原本在下载的任务恢复（以前一律留在暂停，像是应用偷偷停了用户的活）；路径过长时预检报错并给出建议（`MAX_PATH` 追加 `.bak`/`.failed-<时间戳>` 会超）；`WRITE_THROUGH` 注释改成不夸大（它是请求，不保证数据落盘，真正保证靠写入端 fsync）；助手校验 `--exe/--bak` 必须是自身映像（否则这个程序就是一个"拿参数替换任意文件"的工具，放在 `main.go` 里做，因为那里才知道真实映像）；"已是最新"不再写成 failed，改为独立状态 `current`，前端设置页与横幅各自处理；`.new` 残留超过一天清理。验收：`TestDownloadRefusesWithoutLengthOrDigest`、`TestFreezeRestoresWhatWasDownloading`、`TestPreflightRefusesAPathTooLongForTheBackupName`、`TestAlreadyCurrentIsNotAFailure`。
 - 门槛：根 `go vet` / `go test ./... -count=1`（engine 45.1s、cmd/idm 1.2s）、`GOOS=linux go vet ./...`、desktop `go vet` / `go test`（35.1s）、desktop `-race`（38.2s）、desktop `GOOS=linux go vet`、前端 `tsc --noEmit` / `vitest run`（30/30）、扩展 `node --test`（27/27）全部通过。本批新增 19 个用例，都在 `desktop/audit_c_test.go`。
 
+### 53. 审计 E 批：浏览器扩展 + 无感配对认证（UNRELEASED）
+- **P0-3 本地接口零认证（本轮最严重）**：以前扩展只凭 `/ping` 返回的 `app:"VKMDownload"` 就认定对方是应用，然后把自己的 Cookie（含 HttpOnly，通过 cookies API 读到）和带签名的下载链接 POST 过去；端口一旦被缓存就不再复查。也就是说：**本机任何程序**抢到 18888 就能拿走用户的登录身份。现在改为无感配对：
+  1. 应用首次运行生成 per-install 随机密钥（32 字节，存 `%AppData%\VKMDownload\pair.key`，权限 0600，**从不写日志**）。
+  2. 新增 `GET /pair`：必须同时满足"Origin 是 chrome-extension:// 或 moz-extension://"**且**"连接进程是可执行签名校验通过的浏览器"才返回密钥，否则 403。这个接口**无视** `VerifyPeerProcess` 开关——它发的是凭据，开关关掉也不等于谁问都给。
+  3. `/ping?challenge=<hex>` 回 `X-VKMDownload-Proof: HMAC-SHA256(key, challenge)`；扩展用 `crypto.subtle` 校验。挑战必须是 hex 且 ≤128 字符（空挑战**不**回 HMAC，否则空串的 HMAC 可被重放）。
+  4. 扩展把密钥存 `chrome.storage.local`；端口**只有验证通过后才缓存**，worker 重启后重新验证，不再永久信任任何端口。
+  5. 拿不到密钥（未配对）先调 `/pair`；被拒 → 按"应用未运行"处理，**绝不**把 URL/Cookie 发给未验证的响应方。
+  验收：`desktop/audit_e_test.go` 9 例（密钥只生成一次且跨进程复用、两个数据目录不共享密钥、损坏密钥文件被替换、证明随密钥与挑战变化、空/非 hex/超长挑战不回应、`/pair` 无浏览器 Origin 403、`/pair` 非签名浏览器 403、`/pair` 只接受 GET、密钥不出现在日志里）＋ `extension/test/pairing.test.js` 5 例（只会回 ping 正文的假服务器被拒且**一次 /add 都没收到**、配对一次后复用、`/pair` 被拒时什么都不发、未验证时不读 Cookie、不接管别的扩展的下载）。
+- P1-11 应用拒绝时**取消用户本来正常的下载**再裸重下：这条路会丢掉进度、Referer 和用户选的目录，最坏（重下也失败）什么都不剩。现在拒绝路径只报告，**不动浏览器里那条下载**。测试期望同步改正（原用例断言的正是被删掉的旧行为）。
+- P1-12 popup 开关没有错误处理：service worker 不可达时 `sendMessage` 会 reject，旧代码让按钮**永久变灰**且无提示。现在 `try/catch/finally`：失败时刷新状态、恢复按钮、把错误简短显示在提示行（截断到 80 字符）。
+- P1-13 取消与抹记录之间没有状态确认：cancel 可能失败（下载刚好完成），旧代码照样 `erase`，于是**下完的文件历史被抹掉**、应用又下一份。现在先看 `lastError`，再重新 `search` 确认不是 `complete` 才 `erase`；并且取消前先把 id 写进 `chrome.storage.session`。
+- P2-12 端口扫描最长串行 11×600ms（还要加策略与尺寸等待）：现在 11 个端口**并行**探测，总耗时约 600ms 封顶；已知 `totalBytes` 时不再轮询尺寸。
+- P2-13 交接成功到取消之间 worker 被杀 → 双份下载：`chrome.storage.session` 记"已交接待取消"的 id，worker 启动时 `drainPendingCancels()` 补齐取消。
+- P2-14 fallback 自我拦截循环：拒绝路径不再产生 fallback 下载（随 P1-11 一起消失），`ownDownloads` 仍保留作为第二道保险。
+- P2-15 `/add` 的 Origin 依赖：未做真机抓包（本轮无浏览器自动化），因此**没有**放宽应用侧校验；配对之后即使某版本浏览器不带 Origin，扩展也会先因拿不到密钥而按"应用未运行"处理、绝不会把凭据发给别人。这一点明确标注为**未验证**。
+- P2-17 扩展没有标准测试入口：新增 `extension/package.json`（`"test": "node --test \"test/*.test.js\""`，`private: true`，要求 node ≥18）；`npm test` 32/32 通过。
+- 扩展 P3：不接管别的扩展发起的下载（`item.byExtensionId`）；通知与提示文案统一清洗（URL 只留主机+路径、去控制字符、超长截断），避免把带签名 query 的链接显示到通知里；popup 长文案换行（`overflow-wrap: anywhere`）。
+- 门槛：根 `go vet` / `go test ./... -count=1`（engine 44.9s、cmd/idm 1.4s）、`GOOS=linux go vet ./...`、desktop `go vet` / `go test`（34.6s）、desktop `-race`（38.1s）、desktop `GOOS=linux go vet`、前端 `tsc --noEmit` / `vitest run`（30/30）、扩展 `node --test`（32/32）全部通过。
+- 顺带修掉的测试脆弱点：`TestStartEmitsProgressImmediately` 原来用"立刻连接失败"的地址，两个任务可能在 StartAll 走到第三个之前就失败并释放槽位，使"启动了 3 个"变成合法结果；现改用慢速真实服务器，断言才有意义。
+
 ## 2026-10-18 — 0.2.7
 
 ### 48. 稳定性收尾批：测试基建、重启语义、并发防护、更新说明与大小交接（UNRELEASED）

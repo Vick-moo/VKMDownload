@@ -30,7 +30,16 @@
       color: #7ba9ff; font: inherit; font-weight: 600;
     }
     button:hover { background: rgba(76, 141, 255, 0.14); }
-    .hint { margin: 10px 0 0; font-size: 11px; color: #7c8699; }
+    /* Long messages (a refusal reason, an error string) must wrap inside this
+       narrow popup instead of stretching it or being clipped. */
+    .hint {
+      margin: 10px 0 0;
+      font-size: 11px;
+      color: #7c8699;
+      white-space: normal;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+    }
     .ver { margin: 12px 0 0; font-size: 11px; color: #525b70; text-align: center; }
   </style>
 </head>

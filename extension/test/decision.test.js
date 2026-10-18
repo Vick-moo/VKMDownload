@@ -37,16 +37,64 @@ function stubChrome({ searchImpl } = {}) {
   };
 }
 
-/** Stubs fetch for findApp (/ping) and handOver (/add); records calls. */
-function stubFetch(addBody) {
+const TEST_KEY = "0123456789abcdef".repeat(4);
+
+/** Answer a /ping the way the real app does: HMAC of the challenge. */
+async function proofResponse(url) {
+  const challenge = new URL(url).searchParams.get("challenge") || "";
+  const keyBytes = new Uint8Array(TEST_KEY.match(/../g).map((h) => parseInt(h, 16)));
+  const key = await crypto.subtle.importKey(
+    "raw",
+    keyBytes,
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(challenge));
+  const hex = [...new Uint8Array(sig)].map((b) => b.toString(16).padStart(2, "0")).join("");
+  return {
+    ok: true,
+    status: 200,
+    headers: { get: (name) => (name === "X-VKMDownload-Proof" ? hex : null) },
+    json: async () => ({ app: "VKMDownload" }),
+  };
+}
+
+/** The ping body that never proves anything: the impostor case. */
+function impostorResponse() {
+  return {
+    ok: true,
+    status: 200,
+    headers: { get: () => null },
+    json: async () => ({ app: "VKMDownload" }),
+  };
+}
+
+/**
+ * Stubs fetch for the whole handshake: /pair hands over the key, /ping proves
+ * it, /add answers with addBody.
+ *
+ * The pairing key is stubbed as already stored, so these tests exercise the
+ * handover rather than the pairing exchange itself.
+ */
+function stubFetch(addBody, opts = {}) {
   const calls = [];
-  globalThis.fetch = async (url, opts) => {
-    calls.push({ url: String(url), opts });
-    if (String(url).endsWith("/ping")) {
-      return { ok: true, status: 200, json: async () => ({ app: "VKMDownload" }) };
+  globalThis.chrome.storage.local.get = async () =>
+    opts.noKey ? {} : { vkmPairKey: TEST_KEY };
+  globalThis.fetch = async (url, fetchOpts) => {
+    calls.push({ url: String(url), opts: fetchOpts });
+    const u = String(url);
+    if (u.includes("/ping")) return proofResponse(u);
+    if (u.endsWith("/pair")) {
+      return {
+        ok: !opts.pairRefused,
+        status: opts.pairRefused ? 403 : 200,
+        headers: { get: () => null },
+        json: async () => (opts.pairRefused ? { error: "no" } : { key: TEST_KEY }),
+      };
     }
-    if (String(url).endsWith("/add")) {
-      return { ok: true, status: 200, json: async () => addBody };
+    if (u.endsWith("/add")) {
+      return { ok: true, status: 200, headers: { get: () => null }, json: async () => addBody };
     }
     throw new Error(`unexpected fetch: ${url}`);
   };
@@ -165,12 +213,21 @@ describe("handOver", () => {
     assert.deepEqual(result, { ok: true, duplicate: true, name: "f.zip" });
   });
 
-  it("reports a peer-check 403 with the app's reason", async () => {    stubChrome();
+  it("reports a peer-check 403 with the app's reason", async () => {
+    stubChrome();
+    stubFetch({});
     globalThis.fetch = async (url) => {
-      if (String(url).endsWith("/ping")) {
-        return { ok: true, status: 200, json: async () => ({ app: "VKMDownload" }) };
+      const u = String(url);
+      if (u.includes("/ping")) return proofResponse(u);
+      if (u.endsWith("/pair")) {
+        return { ok: true, status: 200, headers: { get: () => null }, json: async () => ({ key: TEST_KEY }) };
       }
-      return { ok: false, status: 403, json: async () => ({ error: "caller is not a recognized browser (evil.exe)" }) };
+      return {
+        ok: false,
+        status: 403,
+        headers: { get: () => null },
+        json: async () => ({ error: "caller is not a recognized browser (evil.exe)" }),
+      };
     };
     const result = await ext.handOver({ url: "https://example.com/f.zip" });
     assert.equal(result.ok, false);
@@ -219,16 +276,20 @@ describe("intercept fallback order", () => {
         onInstalled: { addListener: () => {} },
       },
     };
+    globalThis.chrome.storage.local.get = async () => ({ vkmPairKey: TEST_KEY });
     globalThis.fetch = async (url) => {
       const u = String(url);
-      if (u.endsWith("/ping")) {
-        return { ok: true, status: 200, json: async () => ({ app: "VKMDownload" }) };
+      if (u.includes("/ping")) {
+        return proofResponse(u);
+      }
+      if (u.endsWith("/pair")) {
+        return { ok: true, status: 200, headers: { get: () => null }, json: async () => ({ key: TEST_KEY }) };
       }
       if (u.endsWith("/settings")) {
-        return { ok: true, status: 200, json: async () => ({ enabled: true, minSizeKb: 0, skipHosts: [] }) };
+        return { ok: true, status: 200, headers: { get: () => null }, json: async () => ({ enabled: true, minSizeKb: 0, skipHosts: [] }) };
       }
       if (u.endsWith("/add")) {
-        return { ok: false, status: 400, json: async () => ({ error: "nope" }) };
+        return { ok: false, status: 400, headers: { get: () => null }, json: async () => ({ error: "nope" }) };
       }
       throw new Error(`unexpected fetch: ${u}`);
     };
@@ -238,7 +299,10 @@ describe("intercept fallback order", () => {
       const ext2 = globalThis.__vkmExt;
       ext2.resetForTest();
       await createdHandler({ id: 7, url: "https://example.com/f.zip", totalBytes: 5 * 1024 * 1024 });
-      assert.deepEqual(order, ["cancel", "download"]);
+      // A refusal leaves the browser's own download running. Cancelling it and
+      // starting a fresh one (what this used to assert) threw away the
+      // progress, the Referer and the chosen directory for no benefit.
+      assert.deepEqual(order, [], "a refusal must not cancel or re-download");
     } finally {
       globalThis.fetch = savedFetch;
       delete require.cache[require.resolve("../background.js")];
@@ -314,16 +378,20 @@ describe("report", () => {
 describe("toggle", () => {
   it("reports a peer-check 403 with the app's reason", async () => {
     const state = stubFullChrome();
+    globalThis.chrome.storage.local.get = async () => ({ vkmPairKey: TEST_KEY });
     globalThis.fetch = async (url, opts) => {
       const u = String(url);
-      if (u.endsWith("/ping")) {
-        return { ok: true, status: 200, json: async () => ({ app: "VKMDownload" }) };
+      if (u.includes("/ping")) {
+        return proofResponse(u);
+      }
+      if (u.endsWith("/pair")) {
+        return { ok: true, status: 200, headers: { get: () => null }, json: async () => ({ key: TEST_KEY }) };
       }
       if (u.endsWith("/settings") && opts && opts.method === "POST") {
-        return { ok: false, status: 403, json: async () => ({ error: "已拒绝：非浏览器进程" }) };
+        return { ok: false, status: 403, headers: { get: () => null }, json: async () => ({ error: "已拒绝：非浏览器进程" }) };
       }
       if (u.endsWith("/settings")) {
-        return { ok: true, status: 200, json: async () => ({ enabled: true, minSizeKb: 0, skipHosts: [] }) };
+        return { ok: true, status: 200, headers: { get: () => null }, json: async () => ({ enabled: true, minSizeKb: 0, skipHosts: [] }) };
       }
       throw new Error(`unexpected fetch: ${u}`);
     };
@@ -336,15 +404,19 @@ describe("toggle", () => {
 
   it("flips the live value and answers with the new one", async () => {
     const state = stubFullChrome();
+    globalThis.chrome.storage.local.get = async () => ({ vkmPairKey: TEST_KEY });
     globalThis.fetch = async (url, opts) => {
       const u = String(url);
-      if (u.endsWith("/ping")) {
-        return { ok: true, status: 200, json: async () => ({ app: "VKMDownload" }) };
+      if (u.includes("/ping")) {
+        return proofResponse(u);
+      }
+      if (u.endsWith("/pair")) {
+        return { ok: true, status: 200, headers: { get: () => null }, json: async () => ({ key: TEST_KEY }) };
       }
       if (u.endsWith("/settings") && opts && opts.method === "POST") {
-        return { ok: true, status: 200, json: async () => ({}) };
+        return { ok: true, status: 200, headers: { get: () => null }, json: async () => ({}) };
       }
-      return { ok: true, status: 200, json: async () => ({ enabled: true, minSizeKb: 0, skipHosts: [] }) };
+      return { ok: true, status: 200, headers: { get: () => null }, json: async () => ({ enabled: true, minSizeKb: 0, skipHosts: [] }) };
     };
     rerequire();
 
@@ -356,15 +428,19 @@ describe("toggle", () => {
 describe("getPolicy cache", () => {
   it("serves the 3s cache, refetches after it expires, and bypasses on fresh", async () => {
     stubChrome();
+    globalThis.chrome.storage.local.get = async () => ({ vkmPairKey: TEST_KEY });
     let settings = 0;
     globalThis.fetch = async (url) => {
       const u = String(url);
-      if (u.endsWith("/ping")) {
-        return { ok: true, status: 200, json: async () => ({ app: "VKMDownload" }) };
+      if (u.includes("/ping")) {
+        return proofResponse(u);
+      }
+      if (u.endsWith("/pair")) {
+        return { ok: true, status: 200, headers: { get: () => null }, json: async () => ({ key: TEST_KEY }) };
       }
       if (u.endsWith("/settings")) {
         settings++;
-        return { ok: true, status: 200, json: async () => ({ enabled: true, minSizeKb: 0, skipHosts: [] }) };
+        return { ok: true, status: 200, headers: { get: () => null }, json: async () => ({ enabled: true, minSizeKb: 0, skipHosts: [] }) };
       }
       throw new Error(`unexpected fetch: ${u}`);
     };

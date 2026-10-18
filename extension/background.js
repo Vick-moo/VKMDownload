@@ -18,6 +18,24 @@ const PORT_FIRST = 18888;
 const PORT_LAST = 18898;
 
 /**
+ * Header the app uses to answer a /ping challenge.
+ *
+ * The app returns HMAC-SHA256(key, challenge) here. Only a holder of the
+ * per-install key can produce it, which is what distinguishes the real app from
+ * any other program that happens to answer on one of these ports — the body's
+ * self-reported "app" field proves nothing.
+ */
+const PROOF_HEADER = "X-VKMDownload-Proof";
+
+/**
+ * Where the pairing key lives: chrome.storage.local, per profile.
+ *
+ * It is a capability over this browser's cookies and download URLs, not a
+ * secret identity, so it never leaves the profile and is never logged.
+ */
+const KEY_STORAGE = "vkmPairKey";
+
+/**
  * The base URL of the running app, once found.
  *
  * Cached in the worker's memory for as long as it lives, and cleared whenever a
@@ -126,29 +144,167 @@ if (hasExtensionApis()) {
 
 // --------------------------------------------------------------- talking ---
 
-/** Finds the app, trying each port it may be listening on. */
+/** Cached pairing key, loaded once per worker lifetime. */
+let pairKey = null;
+
+/** Reads the stored key; an unreadable store means "not paired yet". */
+async function loadPairKey() {
+  if (pairKey) return pairKey;
+  try {
+    if (typeof chrome !== "undefined" && chrome.storage && chrome.storage.local) {
+      const got = await chrome.storage.local.get(KEY_STORAGE);
+      const k = got && got[KEY_STORAGE];
+      if (typeof k === "string" && /^[0-9a-f]{64}$/i.test(k)) pairKey = k;
+    }
+  } catch {
+    // No storage: pair again below rather than failing the download.
+  }
+  return pairKey;
+}
+
+async function savePairKey(key) {
+  pairKey = key;
+  try {
+    if (typeof chrome !== "undefined" && chrome.storage && chrome.storage.local) {
+      await chrome.storage.local.set({ [KEY_STORAGE]: key });
+    }
+  } catch {
+    // In-memory only; the next worker start pairs again.
+  }
+}
+
+/** A fresh nonce per probe, so an observed proof cannot be replayed. */
+function randomChallenge() {
+  const raw = new Uint8Array(16);
+  crypto.getRandomValues(raw);
+  return [...raw].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/** HMAC-SHA256(key, message) as lower-case hex. */
+async function hmacHex(keyHex, message) {
+  const keyBytes = new Uint8Array(keyHex.match(/../g).map((h) => parseInt(h, 16)));
+  const key = await crypto.subtle.importKey(
+    "raw",
+    keyBytes,
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(message));
+  return [...new Uint8Array(sig)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/** Constant-time-ish comparison of two equal-length hex strings. */
+function proofMatches(got, want) {
+  if (typeof got !== "string" || got.length !== want.length) return false;
+  let diff = 0;
+  for (let i = 0; i < got.length; i += 1) {
+    diff |= got.charCodeAt(i) ^ want.charCodeAt(i);
+  }
+  return diff === 0;
+}
+
+/**
+ * Asks one candidate port to prove it holds the key.
+ *
+ * Returns false for anything that does not answer correctly, including a port
+ * held by a different program that imitates the ping body.
+ */
+async function provePort(base, key) {
+  const challenge = randomChallenge();
+  try {
+    const response = await fetch(`${base}/ping?challenge=${challenge}`, {
+      cache: "no-store",
+      signal: AbortSignal.timeout(600),
+    });
+    if (!response.ok) return false;
+    const got = response.headers.get(PROOF_HEADER);
+    if (!got) return false;
+    return proofMatches(got.toLowerCase(), await hmacHex(key, challenge));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Asks the app for the pairing key.
+ *
+ * This is a GET so no preflight is needed. A refusal (403) means the caller was
+ * not recognised as a signed browser, and the extension must treat that exactly
+ * like "the app is not running": nothing is sent to a responder that has not
+ * proven itself.
+ */
+async function pairWith(base) {
+  try {
+    const response = await fetch(`${base}/pair`, {
+      cache: "no-store",
+      signal: AbortSignal.timeout(800),
+    });
+    if (!response.ok) return "";
+    const body = await response.json().catch(() => ({}));
+    const key = body && body.key;
+    return typeof key === "string" && /^[0-9a-f]{64}$/i.test(key) ? key : "";
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Finds the app and proves it is really VKMDownload.
+ *
+ * Every candidate port is probed at once rather than one after another: the
+ * sequential version spent up to 11 x 600 ms before concluding the app was not
+ * running, which the user felt as a pause on every download while the browser
+ * carried on fetching.
+ *
+ * The port is only cached after a proof. A responder that answers the ping body
+ * but cannot produce the HMAC is treated as an impostor and skipped, never
+ * handed a URL or a cookie.
+ */
 async function findApp() {
   if (apiBase) return apiBase;
 
-  for (let port = PORT_FIRST; port <= PORT_LAST; port += 1) {
-    const candidate = `http://127.0.0.1:${port}`;
-    try {
-      const response = await fetch(`${candidate}/ping`, {
-        cache: "no-store",
-        signal: AbortSignal.timeout(600),
-      });
-      if (!response.ok) continue;
+  const ports = [];
+  for (let port = PORT_FIRST; port <= PORT_LAST; port += 1) ports.push(port);
 
-      const body = await response.json();
-      // Another program could hold the port; only the app identifies itself.
-      if (body && body.app === "VKMDownload") {
-        apiBase = candidate;
-        return apiBase;
+  const candidates = (
+    await Promise.all(
+      ports.map(async (port) => {
+        const candidate = `http://127.0.0.1:${port}`;
+        try {
+          const response = await fetch(`${candidate}/ping`, {
+            cache: "no-store",
+            signal: AbortSignal.timeout(600),
+          });
+          if (!response.ok) return null;
+          const body = await response.json().catch(() => ({}));
+          return body && body.app === "VKMDownload" ? candidate : null;
+        } catch {
+          return null;
+        }
+      }),
+    )
+  ).filter(Boolean);
+
+  if (candidates.length === 0) return null;
+
+  let key = await loadPairKey();
+  for (const base of candidates) {
+    if (!key) {
+      const got = await pairWith(base);
+      if (got) {
+        await savePairKey(got);
+        key = got;
       }
-    } catch {
-      // Nothing there, or it did not answer in time: try the next port.
+    }
+    if (key && (await provePort(base, key))) {
+      apiBase = base;
+      return apiBase;
     }
   }
+
+  // Nothing proved itself. Do not cache anything: the real app may start later,
+  // and the stored key is still valid for it.
   return null;
 }
 
@@ -193,6 +349,28 @@ async function handOver(payload) {
     apiBase = null;
     return { ok: false, error: String(error) };
   }
+}
+
+/**
+ * Strips URLs down to host+path and removes control characters.
+ *
+ * Notification text is built from server- and page-supplied strings: a URL with
+ * a signed query in it would put a credential on the lock screen, and a newline
+ * would break the layout.
+ */
+function sanitizeText(raw, max) {
+  let out = String(raw == null ? "" : raw);
+  out = out.replace(/https?:\/\/[^\s"'<>]+/gi, (m) => {
+    try {
+      const u = new URL(m);
+      return u.host + u.pathname;
+    } catch {
+      return "(link)";
+    }
+  });
+  out = out.replace(/[\u0000-\u001f\u007f]/g, " ").trim();
+  if (max && out.length > max) out = `${out.slice(0, max)}…`;
+  return out;
 }
 
 /** Tells the user what happened, since neither path has a UI of its own. */
@@ -248,6 +426,118 @@ async function cookiesFor(raw) {
   } catch {
     return "";
   }
+}
+
+/**
+ * Cancels a handed-over browser download, then forgets it.
+ *
+ * The two steps are separate on purpose. Cancelling is a request, not a fact:
+ * it can fail (the download may have finished in the same instant), and erasing
+ * the history entry regardless is how a genuinely finished file loses its record
+ * while the app downloads a second copy. So: check the error, re-read the item,
+ * and only erase once it really is interrupted or cancelled.
+ *
+ * The id is also recorded in session storage first, because the service worker
+ * can be stopped between the handover and this call: on restart the pending list
+ * is drained and the leftover browser download is cancelled then.
+ */
+async function cancelHandedOver(id) {
+  await rememberPendingCancel(id);
+  const failed = await new Promise((resolve) => {
+    chrome.downloads.cancel(id, () => {
+      const err = chrome.runtime.lastError;
+      resolve(Boolean(err));
+    });
+  });
+  if (failed) {
+    // Most often: it completed while we were talking to the app. Leave the
+    // history entry alone — the file is real and the app will notice the
+    // duplicate — and drop the pending marker.
+    await forgetPendingCancel(id);
+    return;
+  }
+
+  let state = "";
+  try {
+    const [current] = await chrome.downloads.search({ id });
+    state = current ? current.state : "";
+  } catch {
+    state = "";
+  }
+  if (state === "complete") {
+    await forgetPendingCancel(id);
+    return;
+  }
+  chrome.downloads.erase({ id }, () => void chrome.runtime.lastError);
+  await forgetPendingCancel(id);
+}
+
+/** Session-storage list of downloads handed over but not yet cancelled. */
+const PENDING_KEY = "pendingCancel";
+
+async function pendingCancelIds() {
+  try {
+    if (typeof chrome === "undefined" || !chrome.storage || !chrome.storage.session) return [];
+    const got = await chrome.storage.session.get(PENDING_KEY);
+    const arr = got && got[PENDING_KEY];
+    return Array.isArray(arr) ? arr.filter((n) => typeof n === "number") : [];
+  } catch {
+    return [];
+  }
+}
+
+async function writePendingCancel(ids) {
+  try {
+    if (typeof chrome !== "undefined" && chrome.storage && chrome.storage.session) {
+      await chrome.storage.session.set({ [PENDING_KEY]: ids.slice(-200) });
+    }
+  } catch {
+    // Best effort: the in-memory flow still works.
+  }
+}
+
+async function rememberPendingCancel(id) {
+  const ids = await pendingCancelIds();
+  if (!ids.includes(id)) ids.push(id);
+  await writePendingCancel(ids);
+}
+
+async function forgetPendingCancel(id) {
+  const ids = await pendingCancelIds();
+  const next = ids.filter((n) => n !== id);
+  if (next.length !== ids.length) await writePendingCancel(next);
+}
+
+/**
+ * Drains the pending-cancel list at worker startup.
+ *
+ * A worker stopped between "the app accepted this download" and "the browser
+ * entry was cancelled" leaves both copies running: the app fetches the file and
+ * the browser keeps its own. Nothing else notices, so this runs on every start.
+ */
+async function drainPendingCancels() {
+  const ids = await pendingCancelIds();
+  for (const id of ids) {
+    try {
+      const [current] = await chrome.downloads.search({ id });
+      if (current && current.state !== "complete") {
+        await new Promise((resolve) => {
+          chrome.downloads.cancel(id, () => {
+            void chrome.runtime.lastError;
+            resolve();
+          });
+        });
+        chrome.downloads.erase({ id }, () => void chrome.runtime.lastError);
+      }
+    } catch {
+      // Already gone; the marker is dropped below either way.
+    }
+    await forgetPendingCancel(id);
+  }
+}
+
+if (hasExtensionApis()) {
+  void drainPendingCancels();
 }
 
 /** The last path segment of a URL, decoded, for display only. */
@@ -360,6 +650,11 @@ function shouldTake(item) {
   // Anything the extension itself started.
   if (ownDownloads.has(item.id)) return false;
 
+  // A download another extension started. Taking it over would be stealing a
+  // different tool's work: the user installed that one deliberately, and our
+  // "take over every download" rule is about the browser's own downloads.
+  if (item.byExtensionId) return false;
+
   return true;
 }
 
@@ -424,44 +719,17 @@ if (hasExtensionApis()) {
     });
 
     if (result.ok) {
-      chrome.downloads.cancel(item.id, () => {
-        void chrome.runtime.lastError;
-        chrome.downloads.erase({ id: item.id }, () => void chrome.runtime.lastError);
-      });
+      await cancelHandedOver(item.id);
       report(result, filename);
       return;
     }
 
-    // Explicit refusal. The original browser entry is still alive (nothing
-    // was cancelled on the failure path), so cancel it first: re-downloading
-    // alongside it would fetch the file twice.
-    let freshName = filename;
-    try {
-      const [current] = await chrome.downloads.search({ id: item.id });
-      if (!current || current.state === "complete") {
-        report(result, filename);
-        return;
-      }
-      if (current.filename) freshName = current.filename.split(/[\\/]/).pop();
-    } catch {
-      report(result, filename);
-      return;
-    }
-    await new Promise((resolve) => {
-      chrome.downloads.cancel(item.id, () => {
-        void chrome.runtime.lastError;
-        resolve();
-      });
-    });
-    const retry = { url };
-    if (freshName) retry.filename = freshName;
-    try {
-      trackOwn(await chrome.downloads.download(retry));
-    } catch (error) {
-      // Even the fallback failed: report the original refusal, not silence.
-      report({ ok: false, error: result.error || String(error) }, filename);
-      return;
-    }
+    // The app refused (403/400) or could not be reached. The browser's download
+    // is untouched and still running, which is exactly what the user wants:
+    // it keeps its progress, its Referer and its chosen directory. This used to
+    // cancel it and start a bare re-download, which threw all three away and —
+    // when that also failed — left the user with nothing at all. So: report, and
+    // change nothing.
     report(result, filename);
   });
 }
@@ -624,6 +892,10 @@ if (typeof globalThis !== "undefined") {
         policyCache = { at: 0, value: null };
         ownDownloads.clear();
         ownLoaded = true;
+        // The pairing key is module state too. Leaving it behind made one test's
+        // key leak into the next, which is also what a stale worker would do
+        // after the user deleted the app's pair.key.
+        pairKey = null;
       },
     };
   } catch {

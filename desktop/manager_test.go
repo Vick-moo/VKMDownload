@@ -1570,9 +1570,17 @@ func TestStartEmitsProgressImmediately(t *testing.T) {
 	app := newTestApp(t)
 	dir := t.TempDir()
 
+	// A real, slow source rather than an unreachable port. Against a port that
+	// refuses instantly, the first two tasks can fail and free their slots before
+	// StartAll reaches the third, so "three started" would be a legitimate answer
+	// and the MaxConcurrent assertion would be measuring scheduler timing.
+	body := payload(4 << 20)
+	srv := rangedServer(t, body, 20*time.Millisecond)
+
 	for i := 0; i < 3; i++ {
 		if _, err := app.mgr.Start(StartRequest{
-			URL: "http://127.0.0.1:1/instant.bin", Dest: filepath.Join(dir, fmt.Sprintf("in-%d.bin", i)),
+			URL: srv.URL + "/instant.bin", Dest: filepath.Join(dir, fmt.Sprintf("in-%d.bin", i)),
+			Conns: 2,
 		}); err != nil {
 			t.Fatalf("Start: %v", err)
 		}
