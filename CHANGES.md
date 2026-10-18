@@ -3,6 +3,26 @@
 > 每次改完代码都在这里记一笔：日期、改了什么、为什么改。
 > 发版 / push 前看这份文件写 release notes。
 
+### 50. 审计 A2 批：引擎杂项 + 命令行（UNRELEASED）
+- P2-3 拒 HEAD 的服务器不再傻等：HEAD 回 405/501/403 以前被当作"暂时性"，会再重试 3 次、每次间隔翻倍，共约 3.5 秒才去发第一个真正能用的 GET。现在 HEAD 被拒即放弃，直接走 GET 探测。验收：`TestProbeNoHeadMakesExactlyOneHead`（HEAD 恰好 1 次、探针 < 0.5 秒）、`TestHeadUnavailableIsNotRetryable`（整次下载也只发 1 个 HEAD）。
+- P2-4 服务器返回的数据范围对不上时立刻失败：以前按"暂时性"错误重试，默认退避下最长卡 151 秒才报错。现在归为不可重试，实测 0.01 秒失败、每个连接的请求只发 1 次。验收：`TestBadContentRangeFailsFast`（默认退避下 < 1 秒、请求数 ≤ 连接数）、`TestErrRangeUnusableIsNotRetryable`（起点/终点/总长/缺头四种错都带哨兵且不可重试；"服务器多给了尾部"这种真实行为仍然放行）。
+- 探针自身的 206 校验：以前只要 206 返回了任何 Content-Range 就算"支持分段"，于是首发 206 撒谎的服务器会被规划成多连接、每个块都失败，错误却指向块而不是探针。现在要求 `bytes=0-0` 得到的就是 `0-0` 且总长可见。验收：`TestProbeRejectsLying206`（错误终点、错误起点、总长未知、无法解析四种都判为不支持分段并给出原因）。
+- Content-Type 以真正的 GET 为准：HEAD 说是纯文本、GET 说是网页时，以前会因为 HEAD 压过 GET 而把网页当文件下载；反过来 HEAD 说是网页、GET 说是文件时又会误拒。验收：`TestProbeGetContentTypeWins`。
+- 弱 ETag 不再用于 If-Range：`W/"..."` 按 RFC 9110 不能出现在 If-Range，服务器会拒或忽略，续传就会把两个版本拼在一起。现在自动退到 Last-Modified，没有就留空。验收：`TestValidatorSkipsWeakETag`。
+- 没有校验值时拒绝续传：服务器既不给 ETag 也不给 Last-Modified 时，旧代码硬着头皮从上次的偏移接着下。只要文件在服务器上被替换成同名的另一份，拼出来的就是长度正确、内容错位的坏文件。现在这种情况丢弃半成品、从头下。验收：`TestResumeWithoutValidatorRestarts`。
+- `VerifySize` 从死开关接上：选项和 `-verify-size` 以前没有任何读取点，开与不开行为完全一样。现在开启后除"长度等于服务器公布的大小"外，还要求"长度等于本次真正写入的字节数"，两者不一致就拒绝发布。验收：`TestVerifySizeChecksReportedBytes`（计数 90 / 文件 100 时拒绝；一致时正常发布）。
+- 进度记录写入失败不再静默：失败只累加一个没人读的计数、外加一行需要开调试才看得见的日志。现在第一次失败就通过新的 `Request.Logger` 报告（之后每 100 次报一次，避免刷屏），并计入 `Result.StateSaveErrors`。验收：`TestSaveFailureReachesLogger`、`TestSidecarWatermarkAdvancesOnlyOnSaveSuccess`。
+- 文案说人话：分段失败以前一律写 "ended with bytes unclaimed"，把"重试耗尽"和"计划本身算错了"两种完全不同的情况混成一句看不懂的话。现在分别写"重试耗尽，最后一次错误是……"和"这段计划的字节数对不上"。验收：`TestSegmentFailureMessageSaysWhy`。
+- 重试计数改为每次下载独立：以前是全进程一个计数器，每开一个新任务就清零，正在跑的任务的数字会被别人改掉、结果也不准。现在每次 `Download` 自带一份。验收：`TestRetriesCountedPerCall`（并发两次下载，第一次仍报出自己的 2 次重试）。
+- `Limiter.Wait` 参数改 `int64`：字节数在 32 位构建上是 32 位 int，超过 2 GiB 的块会溢出成小数或负数，限速直接被跳过。验收：既有 limiter 测试全部改用 int64 并通过 `-race`。
+- ETA 钳位：速度在极短窗口测出来时，剩余秒数换算成 Duration 可能溢出成负数或荒谬数值，界面就会显示怪倒计时。现在 NaN/Inf/超过上限一律钳住。验收：`TestETANeverNonsense`。
+- 退避参数防 NaN：`Factor` 或 `Jitter` 为 NaN 时所有比较都是 false，会绕过全部上下限，算出 NaN 延迟等于不退避。现在非有限值按无效处理，超大重试次数饱和到上限。验收：`TestBackoffRejectsNonFinite`、`TestBackoffDelayIsCapped`（还有新增的 `backoff_test.go` 六个用例，此前该文件零测试）。
+- 隐藏属性失败记日志；顺带修掉一个实测确认的真 bug：`GetFileAttributesW` 失败返回 `0xFFFFFFFF`，旧代码用 `^uintptr(0)` 比较，在 64 位上是 `0xFFFF...FFFF`，永远不相等，于是一个不存在的文件会被当成"已隐藏"，还会把 `0xFFFFFFFF` 当属性写回去。验收：`hide_windows_test.go`（只读属性在隐藏/取消隐藏后保持不变；不存在的文件安静跳过且 `isHidden` 返回 false）。
+- `Close()` 注释与行为对齐：注释写"保留调试句柄以免泄漏"，代码实际是关掉句柄、下次按需重开——后者才对，改的是注释。
+- 文件名两项：`filename*=` 在裸 `filename=` 形式下不解析（`mime.ParseMediaType` 拒收时）——现在支持 UTF-8 与 Latin-1，扩展形式优先；180 字符按字节截断会把中文/emoji 切成半个字符——现在按字符截断，并额外限制 UTF-8 字节数不超过 240 以免撞 NTFS 255 上限。验收：`TestFilenameStarInBareDisposition`、`TestFilenameRuneSafeTruncation`。
+- 命令行：默认 chunk/reserve 改为 0 交给引擎 `Normalize`（以前硬编码 128K/512K，把引擎已否定的旧值打了回去，高延迟源上慢好几倍）；重复 `-H` 改 `Header.Add`（以前用 `"; "` 拼成一个值，两个 Cookie 拼成一条畸形 Cookie，其它头第二个值直接消失）；新增 `-limit`（KiB/s，所有连接共享同一个 Limiter）；文件大小未知时显示 "unknown (server did not say)" 而不是 "-1 B"；进度条以前拿新行长度和旧宽度比，永远不会补空格，旧行尾巴擦不掉；bench 的 `MinSizeForSegments` 改 1。验收：`cmd/idm/main_test.go` 15 个用例（参数重排、布尔 flag 不吃 URL、`--` 后以 `-` 开头的 URL、重复 `-H`、`-limit`、引擎默认值、`humanBytes` 边界、`roundDuration`、进度打印 `-race`），该包此前零测试。
+- 门槛：根 `go vet` / `go test ./... -count=1`（engine 44.2s、cmd/idm 1.3s）、`internal/engine` `-race`（65.4s）、`GOOS=linux go vet ./...`、desktop `go vet` / `go test`（31.8s）、desktop `GOOS=linux go vet`、前端 `tsc --noEmit` / `vitest run`（30/30）、扩展 `node --test`（27/27）全部通过。
+
 ## 2026-10-18 — 0.2.7
 
 ### 48. 稳定性收尾批：测试基建、重启语义、并发防护、更新说明与大小交接（UNRELEASED）

@@ -115,9 +115,14 @@ func (l *Limiter) cap() float64 {
 
 // Wait blocks until n bytes may be transferred, or ctx is cancelled.
 //
+// n is int64 rather than int on purpose: it carries a byte count, and int is
+// 32 bits on 32-bit Windows builds, where a single block over 2 GiB (or any
+// value that overflowed on the way in) would silently become a small or
+// negative request and leave the transfer unthrottled.
+//
 // It returns ctx.Err() in that case so a paused transfer stops promptly rather
 // than finishing its allowance first.
-func (l *Limiter) Wait(ctx context.Context, n int) error {
+func (l *Limiter) Wait(ctx context.Context, n int64) error {
 	if l == nil || n <= 0 {
 		return nil
 	}

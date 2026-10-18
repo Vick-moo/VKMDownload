@@ -257,7 +257,7 @@ func TestLimiterSmallRateBucketScaled(t *testing.T) {
 	// Prove the small bucket actually bites: after draining it, one second of
 	// traffic must be earned.
 	ctx := context.Background()
-	if err := small.Wait(ctx, int(small.cap())); err != nil {
+	if err := small.Wait(ctx, int64(small.cap())); err != nil {
 		t.Fatalf("draining the burst: %v", err)
 	}
 	start := time.Now()

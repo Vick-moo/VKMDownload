@@ -23,6 +23,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -83,6 +84,7 @@ type commonFlags struct {
 	minSeg   int64
 	chunk    int64
 	reserve  int64
+	limitKB  int
 	headers  headerList
 	proxy    string
 	insecure bool
@@ -92,8 +94,13 @@ type commonFlags struct {
 func (c *commonFlags) register(fs *flag.FlagSet) {
 	fs.IntVar(&c.conns, "conns", 8, "maximum number of parallel connections (1 disables segmentation)")
 	fs.Int64Var(&c.minSeg, "min-segment", 1<<20, "smallest segment size in bytes")
-	fs.Int64Var(&c.chunk, "chunk-size", 128<<10, "per-worker read/write buffer in bytes")
-	fs.Int64Var(&c.reserve, "reserve", 512<<10, "bytes a worker claims from a segment at a time")
+	// Zero hands the choice to engine.Options.Normalize. Duplicating the
+	// defaults here is how the CLI ended up pinning 128 KiB chunks and
+	// 512 KiB reserves long after the engine moved to 256 KiB and 16 MiB,
+	// which cost several times the throughput on any high-latency source.
+	fs.Int64Var(&c.chunk, "chunk-size", 0, "per-worker read/write buffer in bytes (0 uses the engine default)")
+	fs.Int64Var(&c.reserve, "reserve", 0, "bytes a worker claims from a segment at a time (0 uses the engine default)")
+	fs.IntVar(&c.limitKB, "limit", 0, "total download speed limit in KiB/s shared by all connections (0 means unlimited)")
 	fs.Var(&c.headers, "H", "extra request header, repeatable (e.g. -H 'Cookie: a=b')")
 	fs.StringVar(&c.proxy, "proxy", "", "proxy URL, empty honours HTTP_PROXY/HTTPS_PROXY/NO_PROXY")
 	fs.BoolVar(&c.insecure, "insecure", false, "skip TLS certificate verification (debugging only)")
@@ -106,6 +113,7 @@ func (c *commonFlags) options() engine.Options {
 		MinSegmentSize: c.minSeg,
 		ChunkSize:      int(c.chunk),
 		ReserveSize:    c.reserve,
+		Limiter:        engine.NewLimiter(int64(c.limitKB) << 10),
 		Headers:        c.headers.Header(),
 		Transport: engine.TransportOptions{
 			ProxyURL:           c.proxy,
@@ -128,6 +136,12 @@ func (h *headerList) Set(v string) error {
 }
 
 // Header converts the collected flags into a header set.
+//
+// Repeated names accumulate as separate header lines, which is how curl treats
+// -H and the only spelling the HTTP grammar allows for most headers. The old
+// code joined them with "; " into one value, which turns two cookies into a
+// single malformed one ("a=1; b=2" is not two cookies) and makes the second
+// value of any other header invisible to the server.
 func (h headerList) Header() http.Header {
 	if len(h) == 0 {
 		return nil
@@ -140,12 +154,7 @@ func (h headerList) Header() http.Header {
 		if name == "" {
 			continue
 		}
-		if prev := out.Get(name); prev != "" {
-			// Repeated names accumulate, matching how curl treats -H.
-			out.Set(name, prev+"; "+value)
-			continue
-		}
-		out.Set(name, value)
+		out.Add(name, value)
 	}
 	return out
 }
@@ -278,7 +287,7 @@ func runInfo(args []string) error {
 		fmt.Printf("final url      %s\n", p.FinalURL)
 	}
 	fmt.Printf("name           %s\n", p.SuggestedName)
-	fmt.Printf("size           %d (%s)\n", p.Size, humanBytes(p.Size))
+	fmt.Printf("size           %d (%s)\n", p.Size, humanSize(p.Size))
 	fmt.Printf("range support  %v (measured)\n", p.RangeSupported)
 	fmt.Printf("accept-ranges  %v (as advertised)\n", p.AdvertisedRange)
 	if p.ContentType != "" {
@@ -356,7 +365,7 @@ func runBench(args []string) error {
 		for rep := 0; rep < *reps; rep++ {
 			opt := cf.options()
 			opt.Connections = n
-			opt.MinSizeForSegments = 0 // benchmark segmentation even on small resources
+			opt.MinSizeForSegments = 1 // benchmark segmentation even on small resources
 			opt.ProgressInterval = time.Hour
 
 			dl, err := engine.New(opt)
@@ -502,7 +511,7 @@ func newProgressPrinter() (func(engine.Progress), func()) {
 		mu     sync.Mutex
 		last   = time.Now()
 		closed bool
-		width  int
+		width  atomic.Int64
 	)
 	stop := func() {
 		mu.Lock()
@@ -511,8 +520,8 @@ func newProgressPrinter() (func(engine.Progress), func()) {
 			return
 		}
 		closed = true
-		if width > 0 {
-			fmt.Printf("\r%s\r", strings.Repeat(" ", width))
+		if w := width.Load(); w > 0 {
+			fmt.Printf("\r%s\r", strings.Repeat(" ", int(w)))
 		}
 	}
 	report := func(p engine.Progress) {
@@ -524,7 +533,7 @@ func newProgressPrinter() (func(engine.Progress), func()) {
 		now := time.Now()
 		// The engine already throttles, but a second gate keeps a chatty
 		// caller from making the terminal flicker.
-		if now.Sub(last) < 80*time.Millisecond && p.Downloaded != p.Total {
+		if now.Sub(last) < 80*time.Millisecond && !(p.Total > 0 && p.Downloaded >= p.Total) {
 			return
 		}
 		last = now
@@ -540,16 +549,19 @@ func newProgressPrinter() (func(engine.Progress), func()) {
 		line := fmt.Sprintf("%s %s / %s  %s/s  eta %s  seg %d/%d  conns %d",
 			pct,
 			humanBytes(p.Downloaded),
-			humanBytes(p.Total),
+			humanSize(p.Total),
 			humanBytes(int64(p.Speed)),
 			eta,
 			p.SegmentsDone, p.Segments,
 			p.Connections,
 		)
-		if pad := width - len(line); pad > 0 {
-			line += strings.Repeat(" ", pad)
+		// The previous line is padded, not the current one: the line changes
+		// length as units and the ETA shrink, and measuring the new line
+		// against itself never clears the tail of the old one.
+		if prev := int(width.Load()); prev > len(line) {
+			line += strings.Repeat(" ", prev-len(line))
 		}
-		width = len(line)
+		width.Store(int64(len(line)))
 		fmt.Printf("\r%s", line)
 	}
 	return report, stop
@@ -650,6 +662,16 @@ func humanBytes(n int64) string {
 		exp++
 	}
 	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
+}
+
+// humanSize formats a size that may be unknown: the engine reports a length it
+// never learned as -1, and printing that as "-1 B" reads like a corrupt file
+// rather than "this server did not say".
+func humanSize(n int64) string {
+	if n < 0 {
+		return "unknown (server did not say)"
+	}
+	return humanBytes(n)
 }
 
 // roundDuration formats a duration compactly: "1.4s", "2m13s", "1h02m".

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -29,6 +30,23 @@ var (
 	// With a server that lies about Content-Length this is the only check that
 	// catches a silently truncated download.
 	ErrSizeMismatch = errors.New("completed file size does not match the announced size")
+
+	// ErrRangeUnusable means the server answered a range request with a
+	// Content-Range that does not describe the range asked for: a different
+	// start, a short end, or a different total.
+	//
+	// It is a definitive answer, not a hiccup. The same request produced the
+	// same wrong header, so replaying it only burns the attempt budget while
+	// the download appears frozen: at the default backoff a stable such server
+	// held a worker for about 151 s before the first error reached the user.
+	ErrRangeUnusable = fmt.Errorf("%w: server returned bytes for a different range than requested", errNotRetryable)
+
+	// errNotRetryable is embedded (via %w) in errors that are definite answers
+	// rather than transient faults. isRetryable refuses them outright, which is
+	// what keeps a refused HEAD from being replayed three times, and what marks
+	// a server that ignores Range support as one to work around rather than one
+	// to wait for.
+	errNotRetryable = errors.New("not retryable")
 )
 
 // statusError carries a non-2xx response through the retry classifier.
@@ -110,8 +128,11 @@ type Options struct {
 	// Transport configures the shared HTTP transport.
 	Transport TransportOptions
 
-	// VerifySize re-checks the finished length against the announced size
-	// before publishing the file.
+	// VerifySize requests an extra consistency check at publish time: the
+	// finished length must equal the announced size (the basic check, which
+	// always runs) *and* the bytes reported as downloaded, so a file whose
+	// writes were counted but never landed cannot slip through with the right
+	// length. Unknown-size resources are exempt; there is nothing to compare.
 	VerifySize bool
 
 	// Limiter caps throughput. Sharing one across downloaders limits their
@@ -220,6 +241,11 @@ type Request struct {
 	Resume bool
 	// Progress, when non-nil, is called with throttled progress snapshots.
 	Progress func(Progress)
+	// Logger, when non-nil, receives engine warnings that are not fatal but
+	// that the user deserves to know about: today, a sidecar flush that keeps
+	// failing. Nil keeps them on the internal debug channel only. Callers must
+	// expect it to be called from worker goroutines.
+	Logger func(msg string)
 }
 
 // Result summarises a completed download.
@@ -246,6 +272,12 @@ type Result struct {
 	Duration    time.Duration
 	BytesPerSec float64
 	Retries     int64
+
+	// StateSaveErrors counts sidecar flushes that failed during this download.
+	// A non-zero value means the crash-recovery record is behind the data on
+	// disk; it used to be invisible, so a persistently failing sidecar looked
+	// like a download that merely saved rarely.
+	StateSaveErrors int64
 }
 
 // Downloader runs downloads over a shared HTTP/1.1 transport.
@@ -260,7 +292,22 @@ type Downloader struct {
 	progressIntervalNs atomic.Int64
 
 	userAgent string
-	retries   atomic.Int64
+
+	// activeRetries points at the retry counter of the Download call running
+	// on this goroutine. It exists because the helpers that count retries
+	// (probe, fetch loops) are methods on the shared Downloader, while the
+	// tally belongs to one job: a single field would be reset by every new
+	// job and read by every finished one.
+	activeRetries atomic.Pointer[atomic.Int64]
+}
+
+// retryCounter returns the current call's retry tally, falling back to a
+// throwaway counter when a helper is used outside Download (as tests do).
+func (d *Downloader) retryCounter() *atomic.Int64 {
+	if p := d.activeRetries.Load(); p != nil {
+		return p
+	}
+	return new(atomic.Int64)
 }
 
 // New creates a Downloader.
@@ -309,9 +356,10 @@ func (d *Downloader) Transport() *http.Transport { return d.tr }
 // Close releases idle connections and the shared debug handle.
 func (d *Downloader) Close() {
 	d.tr.CloseIdleConnections()
-	// The debug handle is process-global and shared by every Downloader; leave
-	// it open and repeated open/close cycles leak descriptors. The next debugf
-	// reopens it on demand.
+	// The debug handle is process-global and shared by every Downloader, so it
+	// cannot be left open here: a Downloader per benchmark repetition would
+	// leak one descriptor each. It is closed instead, and the next debugf
+	// reopens it on demand — which is why closing never loses later output.
 	debugMu.Lock()
 	if debugFile != nil {
 		_ = debugFile.Close()
@@ -333,11 +381,17 @@ func (d *Downloader) Close() {
 //  3. Single stream, which needs no range support at all.
 func (d *Downloader) Download(ctx context.Context, req Request) (*Result, error) {
 	start := time.Now()
-	d.retries.Store(0)
 
 	if strings.TrimSpace(req.URL) == "" {
 		return nil, errors.New("no URL given")
 	}
+
+	// Retries are counted per call, not on the Downloader. The Downloader is
+	// shared by every job the app runs, so a process-wide counter reset here
+	// would zero the tally of downloads that are still running and report
+	// each job's figure against whatever else happened concurrently.
+	var retries atomic.Int64
+	d.activeRetries.Store(&retries)
 
 	probe, err := d.Probe(ctx, req.URL)
 	if err != nil {
@@ -411,7 +465,8 @@ func (d *Downloader) Download(ctx context.Context, req Request) (*Result, error)
 			if secs := out.Duration.Seconds(); secs > 0 {
 				out.BytesPerSec = float64(out.Size) / secs
 			}
-			out.Retries = d.retries.Load()
+			out.Retries = retries.Load()
+			out.StateSaveErrors = s.track.saveFailures()
 			return out, nil
 		}
 
@@ -506,6 +561,18 @@ func (s *session) loadResumable() {
 		// missing bytes were already present, publishing a correctly sized file
 		// with a hole in it. Refuse the whole table instead.
 		debugf("resume: sidecar %s does not tile [0,%d); discarding", s.state, s.probe.Size)
+		_ = os.Remove(s.part)
+		_ = os.Remove(s.state)
+		return
+	}
+	if st.Validator() == "" {
+		// Nothing identifies the representation the partial bytes came from.
+		// The length and URL can stay identical across a server-side rebuild
+		// ("file replaced, same name, same size"), and stitching new bytes onto
+		// the old prefix then yields a corrupt file with the right length.
+		// Without a validator there is no safe resume, so the bytes are
+		// discarded and the download restarts from zero.
+		debugf("resume: sidecar %s has no ETag/Last-Modified; cannot prove the bytes are current, restarting", s.state)
 		_ = os.Remove(s.part)
 		_ = os.Remove(s.state)
 		return
@@ -613,6 +680,7 @@ func (s *session) newTracker(initial, total int64) {
 		suggest:      s.probe.SuggestedName,
 	}
 	s.track.save = s.saveState
+	s.track.log = s.req.Logger
 	if s.req.Progress != nil {
 		s.track.report = s.req.Progress
 	}
@@ -843,7 +911,7 @@ func (s *session) fetchSegment(ctx context.Context, seg *Segment) error {
 
 	for attempt := 0; attempt <= b.MaxTries; attempt++ {
 		if attempt > 0 {
-			s.d.retries.Add(1)
+			s.d.retryCounter().Add(1)
 			if err := b.Sleep(ctx, attempt-1); err != nil {
 				return err
 			}
@@ -876,20 +944,19 @@ func (s *session) fetchSegment(ctx context.Context, seg *Segment) error {
 		}
 	}
 
-	// The loop can only fall through when every attempt asked for more work
-	// than the segment had left, which fetchOnce maps to errSegmentIncomplete,
-	// and the last check found none. Reaching here means the plan accounted for
-	// fewer bytes than the resource has. When retries were exhausted instead,
-	// keep the last real error: without it every such failure degrades into a
-	// generic "bytes unclaimed" with 0 B on disk and nothing actionable.
+	// The loop falls through in one of two ways, and the message says which.
+	// When retries were exhausted, lastErr holds the real cause and is kept:
+	// without it every such failure degraded into a generic "bytes unclaimed"
+	// with 0 B on disk and nothing actionable. With no error at all the plan
+	// itself accounted for fewer bytes than the segment needs.
 	//
 	// The last error is wrapped with %w so a status buried in it — in
 	// particular the post-progress 404 that drives session-level recovery —
 	// stays classified by errors.As at the caller.
 	if lastErr != nil {
-		return fmt.Errorf("segment %s ended with bytes unclaimed (last error: %w)", s.mgr.describe(seg), lastErr)
+		return fmt.Errorf("segment %s kept failing after its retries; last error: %w", s.mgr.describe(seg), lastErr)
 	}
-	return fmt.Errorf("segment %s ended with bytes unclaimed", s.mgr.describe(seg))
+	return fmt.Errorf("segment %s was left with bytes the plan never accounted for", s.mgr.describe(seg))
 }
 
 // transientNotFoundMax bounds how many post-progress 404s one segment absorbs
@@ -936,7 +1003,7 @@ func (d *Downloader) doWithRetry(ctx context.Context, op func(context.Context) e
 
 	for attempt := 0; attempt <= probeRetryBudget; attempt++ {
 		if attempt > 0 {
-			d.retries.Add(1)
+			d.retryCounter().Add(1)
 			if err := b.Sleep(ctx, attempt-1); err != nil {
 				return err
 			}
@@ -1087,7 +1154,7 @@ func (s *session) fetchOnce(ctx context.Context, seg *Segment) error {
 				// actually stored rather than to bytes merely read into the
 				// buffer. The limiter is shared, so several workers pause
 				// together instead of each getting the full allowance.
-				if err := s.d.opt.Limiter.Wait(ctx, wn); err != nil {
+				if err := s.d.opt.Limiter.Wait(ctx, int64(wn)); err != nil {
 					return err
 				}
 			}
@@ -1140,24 +1207,23 @@ func (s *session) validateRangeResponse(resp *http.Response, seg *Segment, off, 
 	case http.StatusPartialContent:
 		start, end, total, ok := parseContentRange(resp.Header.Get("Content-Range"))
 		if !ok {
-			return errors.New("206 response without a parsable Content-Range")
+			return fmt.Errorf("%w: 206 response without a parsable Content-Range", ErrRangeUnusable)
 		}
 		if start != off {
-			return fmt.Errorf("206 Content-Range starts at %d, but %d was requested", start, off)
+			return fmt.Errorf("%w: server sent bytes starting at %d, asked for %d", ErrRangeUnusable, start, off)
 		}
-		// Some servers (observed: dl.fuckingfast.co) ignore the requested
-		// range end and always answer with start-EOF, e.g. asking for
+		// Some servers (observed on a real host) ignore the requested range
+		// end and always answer with start-EOF, e.g. asking for
 		// bytes=0-524287 yields "Content-Range: bytes 0-2097151999/2097152000"
 		// while the body still carries the requested prefix. Requiring an
-		// exact end match turns every multi-connection block into a failure
-		// (retried, then reported as a generic "bytes unclaimed" with 0 B on
-		// disk). Accept any end at or past the requested end and read exactly
-		// the n bytes asked for; a short end is still an error.
+		// exact end match turns every multi-connection block into a failure.
+		// Accept any end at or past the requested end and read exactly the n
+		// bytes asked for; a short end is still a definitive mismatch.
 		if end < off+n-1 {
-			return fmt.Errorf("206 Content-Range ends at %d, but %d was requested", end, off+n-1)
+			return fmt.Errorf("%w: server stopped at %d, asked through %d", ErrRangeUnusable, end, off+n-1)
 		}
 		if total >= 0 && s.probe.Size >= 0 && total != s.probe.Size {
-			return fmt.Errorf("resource changed size mid-download: Content-Range says %d, probe said %d", total, s.probe.Size)
+			return fmt.Errorf("%w: server now says the file is %d bytes, probe said %d", ErrRangeUnusable, total, s.probe.Size)
 		}
 		return nil
 
@@ -1216,7 +1282,7 @@ func (s *session) runSingle(ctx context.Context) (*Result, error) {
 
 	for attempt := 0; attempt <= b.MaxTries; attempt++ {
 		if attempt > 0 {
-			s.d.retries.Add(1)
+			s.d.retryCounter().Add(1)
 			if err := b.Sleep(ctx, attempt-1); err != nil {
 				return nil, err
 			}
@@ -1297,7 +1363,7 @@ func (s *session) singleAttempt(ctx context.Context, offset int64, canResume boo
 	case http.StatusPartialContent:
 		start, _, _, ok := parseContentRange(resp.Header.Get("Content-Range"))
 		if !ok || start != offset {
-			return offset, fmt.Errorf("206 Content-Range does not match the requested offset %d", offset)
+			return offset, fmt.Errorf("%w: 206 starts at %d, asked from %d", ErrRangeUnusable, start, offset)
 		}
 	case http.StatusRequestedRangeNotSatisfiable:
 		if s.probe.Size >= 0 && offset == s.probe.Size {
@@ -1336,7 +1402,7 @@ func (s *session) singleAttempt(ctx context.Context, offset int64, canResume boo
 				if s.mgr != nil {
 					s.mgr.commit(s.mgr.segs[0], 0, offset)
 				}
-				if err := s.d.opt.Limiter.Wait(ctx, wn); err != nil {
+				if err := s.d.opt.Limiter.Wait(ctx, int64(wn)); err != nil {
 					return offset, err
 				}
 			}
@@ -1369,8 +1435,11 @@ func (s *session) publish(res *Result) (*Result, error) {
 
 	// The finished length is always checked against the announced size when one
 	// is known. A truncated download with plausible contents is otherwise
-	// indistinguishable from a complete one. VerifySize remains as the switch
-	// for additional, stronger verification.
+	// indistinguishable from a complete one. VerifySize adds the second arm:
+	// the file must also hold exactly the bytes this session reports as
+	// downloaded, which is where a mis-accounted write would show up (right
+	// length, wrong provenance). Before this it was a switch nothing read: the
+	// option, and the CLI flag that set it, changed no behaviour at all.
 	if s.probe.Size >= 0 {
 		st, err := s.file.Stat()
 		if err != nil {
@@ -1378,6 +1447,16 @@ func (s *session) publish(res *Result) (*Result, error) {
 		}
 		if st.Size() != s.probe.Size {
 			return nil, fmt.Errorf("%w: file holds %d bytes, expected %d", ErrSizeMismatch, st.Size(), s.probe.Size)
+		}
+		if s.d.opt.VerifySize {
+			var reported int64
+			if s.track != nil {
+				reported = s.track.reported()
+			}
+			if reported != st.Size() {
+				return nil, fmt.Errorf("%w: %d bytes were downloaded but the file holds %d",
+					ErrSizeMismatch, reported, st.Size())
+			}
 		}
 	}
 
@@ -1467,6 +1546,13 @@ func isRetryable(err error) bool {
 		return false
 	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	// Definite answers. Each of these will be the same answer when asked
+	// again, so a retry only delays the report: a refused HEAD replayed three
+	// times (about 3.5 s), or a server whose Content-Range never matches the
+	// request retried for a couple of minutes.
+	if errors.Is(err, errNotRetryable) {
 		return false
 	}
 	// A refused resume is a strategy problem, not a transient fault.
@@ -1689,7 +1775,8 @@ type progressTracker struct {
 	saveInterval time.Duration
 	saveStep     int64
 	// saveFails counts sidecar flush failures. The watermark below only moves
-	// on success, so this is what distinguishes "saved rarely" from "failing".
+	// on success, so this is what distinguishes "saved rarely" from "failing";
+	// saveFailures() exposes it so a run can report it (Result.StateSaveErrors).
 	saveFails int64
 	// savePct is a size-relative save trigger (percent of total, 0 disables).
 	savePct int64
@@ -1698,8 +1785,13 @@ type progressTracker struct {
 
 	report   func(Progress)
 	save     func() error
+	log      func(string)
 	segments func() (total, done int)
 }
+
+// reportEverySaveFailure is the cadence of user-visible warnings about a
+// sidecar that keeps failing to save: the first one, then every Nth.
+const reportEverySaveFailure = 100
 
 func (p *progressTracker) add(n int64) {
 	if n <= 0 {
@@ -1736,12 +1828,22 @@ func (p *progressTracker) add(n int64) {
 
 	// Disk IO stays off every lock: a slow flush must serialise neither the
 	// workers nor the callbacks.
+	// A failed flush is reported to the caller's Logger (when one is set) on
+	// the way to being counted. The count alone made the failure invisible in
+	// the app: nothing read it, and the only trace was an opt-in debug line.
 	if save && p.save != nil {
 		if err := p.save(); err != nil {
 			debugf("save-state failed: %v", err)
 			p.mu.Lock()
 			p.saveFails++
+			fails := p.saveFails
 			p.mu.Unlock()
+			if p.log != nil && (fails == 1 || fails%reportEverySaveFailure == 0) {
+				// The first failure and then every Nth: a failing target often
+				// fails every few hundred milliseconds, and a line per flush
+				// would bury everything else in the log.
+				p.log(fmt.Sprintf("进度记录写入失败（第 %d 次），断点续传信息可能落后于已下载的数据: %v", fails, err))
+			}
 		} else {
 			// Only a successful flush may advance the watermark: it describes
 			// what is durable, not what was attempted. The snapshot is kept
@@ -1761,6 +1863,32 @@ func (p *progressTracker) add(n int64) {
 		return
 	}
 	p.emit(bytes, total, speed)
+}
+
+// reported returns the byte count under the tracker lock. It is the snapshot
+// publish compares against the finished file size for VerifySize.
+func (p *progressTracker) reported() int64 {
+	if p == nil {
+		return 0
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.bytes
+}
+
+// saveFailures reports how many sidecar flushes have failed so far.
+//
+// Without a reader this counter was dead weight: a flush that kept failing
+// (a full disk, a permissions problem, a target on a network share) looked
+// exactly like a download that simply saved rarely, and the only trace was a
+// debug line nobody had turned on.
+func (p *progressTracker) saveFailures() int64 {
+	if p == nil {
+		return 0
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.saveFails
 }
 
 // reset returns the tracker to zero after a restart from scratch.
@@ -1852,7 +1980,19 @@ func (p *progressTracker) emitLocked(bytes, total int64, speed float64) {
 		// time.Second before the conversion to a Duration. Converting the
 		// second count first and multiplying afterwards would interpret it as
 		// nanoseconds and inflate the estimate by 1e9.
-		prog.ETA = time.Duration((float64(total-bytes) / speed) * float64(time.Second))
+		//
+		// The result is clamped: a speed measured over a sub-millisecond
+		// window can be enormous or, with a NaN rounding, produce a conversion
+		// whose result is not a valid Duration at all. Either one reached the
+		// UI as a nonsense countdown.
+		secs := float64(total-bytes) / speed
+		if !math.IsNaN(secs) && !math.IsInf(secs, 0) && secs > 0 {
+			const maxETA = float64(math.MaxInt64) / float64(time.Second)
+			if secs > maxETA {
+				secs = maxETA
+			}
+			prog.ETA = time.Duration(secs * float64(time.Second))
+		}
 	}
 	p.report(prog)
 }

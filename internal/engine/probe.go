@@ -11,6 +11,7 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 // ProbeResult is everything the engine learned about a resource before it
@@ -45,11 +46,25 @@ type ProbeResult struct {
 }
 
 // Validator returns the value to send in If-Range on resume, preferring ETag.
+//
+// A weak validator (ETag "W/...") is never returned: RFC 9110 forbids using it
+// in If-Range, and the server would either reject the header or ignore it, so a
+// resume built on one mixes bytes from two representations. Last-Modified is
+// the standard fallback and is never the weak-syntax form.
 func (p *ProbeResult) Validator() string {
-	if p.ETag != "" {
-		return p.ETag
+	if v := strings.TrimSpace(p.ETag); v != "" && !isWeakValidator(v) {
+		return v
 	}
 	return p.LastModified
+}
+
+// isWeakValidator reports whether v uses the weak entity-tag syntax, "W/"….
+func isWeakValidator(v string) bool {
+	v = strings.TrimSpace(v)
+	if len(v) < 2 || v[0] != 'W' && v[0] != 'w' {
+		return false
+	}
+	return v[1] == '/'
 }
 
 // probeBodyLimit is how much of a probe response body is drained before the
@@ -192,7 +207,13 @@ func looksLikeHTML(contentType string) bool {
 // errHeadUnavailable means the server declined the HEAD request. It is expected
 // rather than fatal: servers answer 405, 501 or 403 to HEAD routinely, and the
 // ranged GET that follows settles both the size and range support anyway.
-var errHeadUnavailable = errors.New("server declined HEAD")
+//
+// It is deliberately unwrapped into the errNotRetryable family (see
+// isRetryable): replaying a HEAD that was refused is pure waste. A server that
+// answers 405 to HEAD answers 405 to the retry as well, and each retry also
+// pays the backoff sleep, so a refusal that is an invitation to try the GET
+// cost three extra HEADs and roughly 3.5 s before the same GET ran anyway.
+var errHeadUnavailable = fmt.Errorf("%w: server declined HEAD", errNotRetryable)
 
 // probeHead issues the HEAD request and folds whatever it learns into res.
 //
@@ -230,7 +251,10 @@ func (d *Downloader) probeHead(ctx context.Context, rawURL string, res *ProbeRes
 			resp.StatusCode == http.StatusForbidden:
 			return errHeadUnavailable
 		case resp.StatusCode >= 400:
-			return &statusError{Code: resp.StatusCode, Detail: "HEAD " + rawURL}
+			// The raw URL is left out on purpose: this error can reach the
+			// user and the job file, and a signed link's query string is a
+			// credential that must not be copied there.
+			return &statusError{Code: resp.StatusCode, Detail: "HEAD"}
 		}
 
 		res.AdvertisedRange = strings.EqualFold(resp.Header.Get("Accept-Ranges"), "bytes")
@@ -288,8 +312,13 @@ func (d *Downloader) probeRange(ctx context.Context, rawURL string, res *ProbeRe
 	if res.LastModified == "" {
 		res.LastModified = resp.Header.Get("Last-Modified")
 	}
-	if res.ContentType == "" {
-		res.ContentType = resp.Header.Get("Content-Type")
+	// The GET is the transfer that will actually run, so its Content-Type wins
+	// over whatever HEAD claimed. The two disagree often (a HEAD answered by a
+	// generic handler that says text/html, or a GET that adds charset), and the
+	// expensive question this field answers — "is this a web page instead of a
+	// file?" — has to be answered about the bytes that will be stored.
+	if ct := resp.Header.Get("Content-Type"); ct != "" {
+		res.ContentType = ct
 	}
 	// A Content-Disposition learned here outranks a URL fallback assigned
 	// earlier: probeHead fills SuggestedName from the URL token when HEAD
@@ -320,14 +349,25 @@ func (d *Downloader) probeRange(ctx context.Context, rawURL string, res *ProbeRe
 			res.Note = "206 response without a parsable Content-Range"
 			return nil
 		}
-		if start != 0 {
+		// A 206 whose Content-Range does not describe the requested one-byte
+		// range is also a failure to honour Range, however confidently it was
+		// labelled. Accepting it and taking Size from its total is what lets a
+		// broken range server be planned as segmented, so every later block
+		// mismatches and the download dies with an error that points at the
+		// blocks rather than at the probe.
+		if start != 0 || end != 0 {
 			res.RangeSupported = false
-			res.Note = fmt.Sprintf("206 response started at %d, want 0", start)
+			res.Note = fmt.Sprintf("206 claimed bytes %d-%d for a bytes=0-0 request", start, end)
 			return nil
 		}
-		if total >= 0 {
-			res.Size = total
+		if total < 0 {
+			// A 206 that does not disclose the total cannot be planned or
+			// validated, whatever the response claimed about ranges.
+			res.RangeSupported = false
+			res.Note = "206 Content-Range did not disclose the total size"
+			return nil
 		}
+		res.Size = total
 		res.RangeSupported = true
 		res.Note = fmt.Sprintf("verified with 206 Content-Range bytes %d-%d/%d", start, end, total)
 		return nil
@@ -356,7 +396,9 @@ func (d *Downloader) probeRange(ctx context.Context, rawURL string, res *ProbeRe
 		return nil
 
 	default:
-		return &statusError{Code: resp.StatusCode, Detail: "GET with Range " + rawURL}
+		// The URL is deliberately left out: this error reaches the user and the
+		// job file, and a signed link's query string is a credential.
+		return &statusError{Code: resp.StatusCode, Detail: "GET with Range"}
 	}
 }
 
@@ -379,11 +421,13 @@ func (d *Downloader) probeRangeFetch(ctx context.Context, rawURL string) (*http.
 		}
 		// A 5xx is transient and worth replaying; the body is released here
 		// because this attempt is being discarded. Everything else is a real
-		// answer and travels back to the caller untouched.
+		// answer and travels back to the caller untouched. The raw URL is
+		// deliberately absent from the error: it can surface in the UI and the
+		// job file, where a signed link's query string is a credential.
 		if resp.StatusCode >= 500 {
 			_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<12))
 			_ = resp.Body.Close()
-			return &statusError{Code: resp.StatusCode, Detail: "GET with Range " + rawURL}
+			return &statusError{Code: resp.StatusCode, Detail: "GET with Range"}
 		}
 		out = resp
 		return nil
@@ -507,21 +551,84 @@ func filenameFromDisposition(v string) string {
 		return ""
 	}
 	// Some servers emit a bare "filename=foo.zip" with no disposition type,
-	// which mime.ParseMediaType rejects. Scan for it manually.
+	// which mime.ParseMediaType rejects. Scan for it manually, preferring the
+	// RFC 5987/6266 extended form ("filename*=UTF-8''..."), whose percent
+	// escapes hold the real name for anything non-ASCII.
+	var plain, extended string
 	for _, part := range strings.Split(v, ";") {
 		part = strings.TrimSpace(part)
-		if len(part) < len("filename=") {
+		before, _, hadEq := strings.Cut(part, "=")
+		if !hadEq {
 			continue
 		}
-		if !strings.EqualFold(part[:len("filename=")], "filename=") {
-			continue
+		key := strings.ToLower(strings.TrimSpace(before))
+		var val string
+		if key == "filename*" {
+			val = strings.TrimSpace(part[len(before)+1:])
+		} else {
+			val = strings.Trim(strings.TrimSpace(part[len(before)+1:]), `"'`)
 		}
-		val := strings.Trim(strings.TrimSpace(part[len("filename="):]), `"`)
-		if val != "" {
-			return sanitizeFilename(val)
+		switch key {
+		case "filename*":
+			if dec := decodeExtValue(val); dec != "" && extended == "" {
+				extended = sanitizeFilename(dec)
+			}
+		case "filename":
+			if plain == "" {
+				plain = sanitizeFilename(val)
+			}
 		}
 	}
-	return ""
+	if extended != "" {
+		return extended
+	}
+	return plain
+}
+
+// decodeExtValue decodes an RFC 5987 ext-value: charset'language'percent-escaped.
+// Only the UTF-8 and ISO-8859-1 charsets are honoured; anything else is left to
+// the plain filename= parameter, which is what a browser does too.
+func decodeExtValue(raw string) string {
+	raw = strings.Trim(strings.TrimSpace(raw), `"'`)
+	first := strings.IndexByte(raw, '\'')
+	if first < 0 {
+		return ""
+	}
+	second := strings.IndexByte(raw[first+1:], '\'')
+	if second < 0 {
+		return ""
+	}
+	charset := strings.ToLower(raw[:first])
+	encoded := raw[first+1+second+1:]
+
+	switch charset {
+	case "utf-8", "utf8":
+		dec, err := url.PathUnescape(encoded)
+		if err != nil {
+			return ""
+		}
+		return dec
+	case "iso-8859-1", "latin1", "":
+		// Each %XX is one Latin-1 byte; anything not escaped is literal ASCII.
+		var b []byte
+		for i := 0; i < len(encoded); i++ {
+			if encoded[i] == '%' && i+2 < len(encoded) {
+				if v, err := strconv.ParseUint(encoded[i+1:i+3], 16, 8); err == nil {
+					b = append(b, byte(v))
+					i += 2
+					continue
+				}
+			}
+			b = append(b, encoded[i])
+		}
+		out := make([]rune, len(b))
+		for i, c := range b {
+			out[i] = rune(c)
+		}
+		return string(out)
+	default:
+		return ""
+	}
 }
 
 // filenameFromURL takes the last path segment of a URL.
@@ -589,15 +696,41 @@ func sanitizeFilename(name string) string {
 	if isWindowsDeviceName(out) {
 		out = "_" + out
 	}
-	if len(out) > 180 {
+	// The cap is applied in characters, not bytes: slicing a UTF-8 string at
+	// byte 180 used to cut a multi-byte character in half and leave a torn
+	// sequence in the name.
+	if utf8.RuneCountInString(out) > maxNameRunes {
 		ext := path.Ext(out)
-		if len(ext) >= len(out) {
+		if utf8.RuneCountInString(ext) >= maxNameRunes {
 			ext = ""
 		}
-		out = out[:180-len(ext)] + ext
+		runes := []rune(out)
+		keep := maxNameRunes - utf8.RuneCountInString(ext)
+		out = string(runes[:keep]) + ext
+	}
+	// Windows limits a file name to 255 UTF-16 units. Counting the UTF-8 form
+	// in bytes is a conservative bound (UTF-8 is never shorter than UTF-16
+	// units / 3), so staying under maxNameBytes keeps the name legal there
+	// while never splitting a character.
+	if len(out) > maxNameBytes {
+		ext := path.Ext(out)
+		runes := []rune(out)
+		keep := len(runes) - utf8.RuneCountInString(ext)
+		for keep > 1 && len(string(runes[:keep])+ext) > maxNameBytes {
+			keep--
+		}
+		out = string(runes[:keep]) + ext
 	}
 	return out
 }
+
+// maxNameRunes is the character cap for a server-supplied name; maxNameBytes
+// bounds the same name in UTF-8 bytes, a conservative bound on NTFS's 255
+// UTF-16 unit limit.
+const (
+	maxNameRunes = 180
+	maxNameBytes = 240
+)
 
 // isWindowsDeviceName reports whether a name refers to a reserved DOS device.
 func isWindowsDeviceName(name string) bool {

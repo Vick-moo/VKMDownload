@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"math"
 	"math/rand/v2"
 	"time"
 )
@@ -38,6 +39,11 @@ func DefaultBackoff() Backoff {
 }
 
 // normalized returns b with invalid fields replaced by defaults.
+//
+// Non-finite values (NaN, ±Inf) are treated as invalid too: NaN comparisons are
+// all false, so a NaN Factor or Jitter skips every bound below and turns the
+// computed delay into NaN, which converts to a meaningless Duration (in
+// practice zero or a negative number) and silently bypasses the backoff.
 func (b Backoff) normalized() Backoff {
 	if b.Base <= 0 {
 		b.Base = 500 * time.Millisecond
@@ -45,8 +51,11 @@ func (b Backoff) normalized() Backoff {
 	if b.Max <= 0 {
 		b.Max = 30 * time.Second
 	}
-	if b.Factor < 1 {
+	if math.IsNaN(b.Factor) || math.IsInf(b.Factor, 0) || b.Factor < 1 {
 		b.Factor = 2
+	}
+	if math.IsNaN(b.Jitter) || math.IsInf(b.Jitter, 0) {
+		b.Jitter = 0
 	}
 	if b.Jitter < 0 {
 		b.Jitter = 0
@@ -70,12 +79,14 @@ func (b Backoff) Delay(attempt int) time.Duration {
 	d := float64(b.Base)
 	for i := 0; i < attempt; i++ {
 		d *= b.Factor
-		if d >= float64(b.Max) {
+		// +Inf and NaN both end the climb at the cap; NaN can only appear from
+		// an overflowed product and would otherwise poison everything below.
+		if !(d < float64(b.Max)) {
 			d = float64(b.Max)
 			break
 		}
 	}
-	if d > float64(b.Max) {
+	if !(d <= float64(b.Max)) {
 		d = float64(b.Max)
 	}
 
@@ -84,7 +95,7 @@ func (b Backoff) Delay(attempt int) time.Duration {
 	if b.Jitter > 0 {
 		d *= 1 - b.Jitter + rand.Float64()*2*b.Jitter
 	}
-	if d < 0 {
+	if !(d > 0) {
 		d = 0
 	}
 	return time.Duration(d)
