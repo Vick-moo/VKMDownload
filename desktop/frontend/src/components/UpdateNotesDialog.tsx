@@ -20,7 +20,7 @@ type Props = {
 const APP_NOTES_END = "<!-- app-notes-end -->";
 const APP_NOTES_MAX = 1200;
 
-function toDialogText(body: string): string {
+export function toDialogText(body: string): string {
   let text = body.includes(APP_NOTES_END)
     ? body.slice(0, body.indexOf(APP_NOTES_END))
     : body;
@@ -34,7 +34,11 @@ function toDialogText(body: string): string {
       line
         .replace(/^#{1,6}\s*/, "")
         .replace(/\*\*/g, "")
-        .replace(/`/g, ""),
+        .replace(/`/g, "")
+        // A pipe that survived the table-row filter is mid-sentence noise.
+        .replace(/\|/g, " ")
+        .replace(/ {2,}/g, " ")
+        .trim(),
     )
     .join("\n");
   if (text.length > APP_NOTES_MAX) {
@@ -70,8 +74,9 @@ export function UpdateNotesDialog({
       .releaseNotes(version)
       .then((body) => {
         if (cancelled) return;
-        if (body && body.trim() !== "") {
-          setNotes(body);
+        const summary = toDialogText(body);
+        if (summary !== "") {
+          setNotes(summary);
         } else {
           setFailed(true);
         }
