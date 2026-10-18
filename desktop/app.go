@@ -89,6 +89,11 @@ type App struct {
 	quit     func(ctx context.Context)
 	sleepFor func(d time.Duration)
 	exePaths func() (exe, staged string, err error)
+	// selfPath reports this process's own image; see App.runningExe.
+	selfPath func() (string, error)
+	// fetchRelease asks GitHub for the newest release. Injectable so the update
+	// paths can be driven without a real network round trip.
+	fetchRelease func(context.Context) (releaseAsset, error)
 
 	// clipboard monitoring state
 	lastClip    string
@@ -138,6 +143,8 @@ func NewApp() *App {
 	a.sys = realUpdateSys{}
 	a.sleepFor = time.Sleep
 	a.exePaths = stagedUpdatePath
+	a.selfPath = os.Executable
+	a.fetchRelease = fetchLatestRelease
 	a.mgr = NewManager(a)
 	return a
 }

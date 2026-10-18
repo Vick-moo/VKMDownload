@@ -20,6 +20,7 @@ package main
 
 import (
 	"crypto/rand"
+	"sync/atomic"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -189,8 +190,13 @@ type updateState struct {
 	// OldSHA/NewSHA let the next launch tell which of the two builds is
 	// actually running now, which is the only reliable way to know whether an
 	// update that was never confirmed in fact succeeded.
-	OldSHA   string `json:"oldSha256"`
-	NewSHA   string `json:"newSha256"`
+	OldSHA string `json:"oldSha256"`
+	NewSHA string `json:"newSha256"`
+	// NewSize is the byte count verified at download time. The helper re-checks
+	// it before swapping: a staged file that was truncated after it was
+	// verified (a partial antivirus quarantine, a half-written copy) would
+	// otherwise be installed as the program.
+	NewSize int64 `json:"newSize,omitempty"`
 	Failed   string `json:"failedPath,omitempty"`
 	Reason   string `json:"reason,omitempty"`
 	Notified bool   `json:"notified,omitempty"`
@@ -231,12 +237,63 @@ func updateStateLoad(path string) (*updateState, error) {
 	return &st, nil
 }
 
+// stateLockTries/stateLockWait bound how long a writer waits for the marker's
+// lock file before going ahead anyway. Waiting forever would hang the helper on
+// a crashed peer; not writing at all would lose the record of an update that
+// really happened, which is the worse failure of the two.
+const (
+	stateLockTries = 100
+	stateLockWait  = 20 * time.Millisecond
+)
+
+// updateStateSave writes the marker as one process at a time.
+//
+// Two writers share this file: the running app (prepared/backed-up/confirmed)
+// and the helper it launches (replaced/launched/rolled-back/aborted). They used
+// to read-modify-write it independently, so a helper's "launched" could be
+// overwritten by the app's stale "backed-up" — after which the next start said
+// the update never happened and offered a restore of a healthy build. A lock
+// file makes the whole read-modify-write exclusive; markStage is the caller that
+// needs the merge to be atomic.
 func updateStateSave(path string, st updateState) error {
+	unlock := lockUpdateState(path)
+	defer unlock()
+	return writeStateLocked(path, st)
+}
+
+// writeStateLocked writes the marker; the caller holds the lock.
+func writeStateLocked(path string, st updateState) error {
 	b, err := json.MarshalIndent(st, "", "  ")
 	if err != nil {
 		return err
 	}
 	return writeFileAtomic(path, b)
+}
+
+// lockUpdateState takes an exclusive lock file next to the marker and returns
+// the release func. A lock that cannot be taken within the budget is reported
+// and then ignored: correctness of the record beats mutual exclusion, and the
+// atomic rename still prevents a torn file.
+func lockUpdateState(path string) func() {
+	lock := path + ".lock"
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return func() {}
+	}
+	for i := 0; i < stateLockTries; i++ {
+		f, err := os.OpenFile(lock, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+		if err == nil {
+			_, _ = f.WriteString(fmt.Sprintf("%d", os.Getpid()))
+			_ = f.Close()
+			return func() { _ = os.Remove(lock) }
+		}
+		time.Sleep(stateLockWait)
+	}
+	// A lock left behind by a crashed process is worth clearing once, so the
+	// next writer is not blocked for the life of the install.
+	if st, err := os.Stat(lock); err == nil && time.Since(st.ModTime()) > time.Minute {
+		_ = os.Remove(lock)
+	}
+	return func() {}
 }
 
 // writeFileAtomic writes through a temporary file and a rename, so a crash can
@@ -245,7 +302,11 @@ func writeFileAtomic(path string, b []byte) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
+	// The temporary name carries the pid and a counter. Both the app and the
+	// update helper write this marker, and they are separate processes: with a
+	// fixed ".tmp" name they truncated each other's write and whichever
+	// renamed last won, so a stage one of them had just recorded vanished.
+	tmp := fmt.Sprintf("%s.%d-%d.tmp", path, os.Getpid(), nextTmpSeq())
 	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
 	if err != nil {
 		return err
@@ -430,23 +491,30 @@ func readPrefix(path string, n int) ([]byte, error) {
 }
 
 // backupExe keeps the running version under a second name before anything is
-// replaced. A hard link is preferred: it is free, and it makes the backup the
-// *same* file, so no crash window exists between "backup made" and "backup
-// complete". Copying is the fallback for a filesystem without links.
+// replaced. It always copies.
+//
+// The backup used to be a hard link when the filesystem allowed one, on the
+// argument that it is free and that no crash window can exist between "backup
+// made" and "backup complete". Measured on this machine (Windows 11 26100,
+// NTFS, same volume) that combination does work — the helper running from the
+// link, the original path replaced in about 2 ms — because replacing a name
+// only deletes a directory entry, and the running image keeps its data alive
+// through the other link. It is not worth relying on. A real copy removes the
+// shared-identity property entirely, so "the backup", "the running image" and
+// "the file being replaced" are three independent things: rollback can rename
+// and replace without reasoning about link semantics, and a future change that
+// deletes one path cannot pull the rug out from under a running process. The
+// price is one ~13 MB copy per update.
 func backupExe(sys updateSys, exe, bak string) error {
 	if sys.exists(bak) {
 		if err := sys.remove(bak); err != nil {
 			return fmt.Errorf("清理上次的备份失败: %w", err)
 		}
 	}
-	if err := sys.hardLink(exe, bak); err == nil {
-		sys.logf("backup of %s created as a hard link", exe)
-		return nil
-	}
 	if err := sys.copyFile(exe, bak); err != nil {
 		return fmt.Errorf("备份当前版本失败: %w", err)
 	}
-	if a, b := sys.size(exe), sys.size(bak); a != b {
+	if a, b := sys.size(exe), sys.size(bak); a < 0 || a != b {
 		return fmt.Errorf("备份大小不一致：%d 与 %d", a, b)
 	}
 	sys.logf("backup of %s created by copy", exe)
@@ -551,6 +619,13 @@ const (
 // mistaken for this one's confirmation.
 func awaitHandshake(sys updateSys, okPath string, pid int, timeout time.Duration) hsOutcome {
 	start := sys.now()
+	// Whether a window was ever seen, not whether one is on screen at the
+	// deadline. A new build that showed its window and then minimised itself
+	// (or was minimised by the user, or painted and hid during startup) is
+	// running; judging only the final instant demoted it to "never came up"
+	// and rolled a working update back. The reverse — no window at any point —
+	// is still a timeout.
+	sawWindow := false
 	for {
 		if got, ok := readHandshakePID(sys, okPath); ok && got == pid {
 			sys.logf("handshake confirmed by pid %d", pid)
@@ -560,12 +635,16 @@ func awaitHandshake(sys updateSys, okPath string, pid int, timeout time.Duration
 			sys.logf("pid %d exited without a handshake", pid)
 			return hsExited
 		}
+		if !sawWindow && sys.processHasWindow(pid) {
+			sawWindow = true
+			sys.logf("pid %d showed a window", pid)
+		}
 		if sys.now().Sub(start) >= timeout {
-			if sys.processHasWindow(pid) {
-				sys.logf("pid %d alive with a window but no handshake after %s", pid, timeout)
+			if sawWindow {
+				sys.logf("pid %d showed a window but never confirmed after %s", pid, timeout)
 				return hsUnconfirmed
 			}
-			sys.logf("pid %d alive but no window and no handshake after %s", pid, timeout)
+			sys.logf("pid %d alive but never showed a window and never confirmed after %s", pid, timeout)
 			return hsTimeout
 		}
 		sys.sleep(handshakePoll)
@@ -615,6 +694,12 @@ func writeHandshake(path string, pid int) error {
 // success that has already been proven, leaving the next launch to claim the
 // update never happened.
 func markStage(sys updateSys, statePath, stage, reason string) {
+	// Held across the read, the merge and the write: the running app writes
+	// this marker too, and an unlocked read-modify-write is how a helper's
+	// "launched" got overwritten by the app's stale "backed-up".
+	unlock := lockUpdateState(statePath)
+	defer unlock()
+
 	st, err := updateStateLoad(statePath)
 	if err != nil || st == nil {
 		// A marker that cannot be read is not a reason to touch the files
@@ -632,7 +717,7 @@ func markStage(sys updateSys, statePath, stage, reason string) {
 		st.Reason = reason
 	}
 	st.Time = sys.now().Format(time.RFC3339)
-	if err := updateStateSave(statePath, *st); err != nil {
+	if err := writeStateLocked(statePath, *st); err != nil {
 		sys.logf("cannot write update state %s: %v", statePath, err)
 	}
 }
@@ -653,6 +738,7 @@ func runHelper(args helperArgs, sys updateSys) int {
 		}
 	}
 
+
 	// Nothing may be touched while the old process still holds its image: the
 	// one thing this order guarantees is that a stuck exit costs nothing.
 	if err := waitForExit(sys, args.Parent, helperParentTimeout); err != nil {
@@ -666,10 +752,34 @@ func runHelper(args helperArgs, sys updateSys) int {
 		return rollback(sys, args, 0, "用户手动还原")
 	}
 
+	// The helper re-checks the staged file against the hashes the app recorded.
+	// It used to trust only "starts with MZ and is bigger than 1 MiB", which is
+	// satisfied by any executable — including a truncated download whose first
+	// megabyte happens to be intact.
+	var wantSHA string
+	var wantSize int64
+	if st, err := updateStateLoad(args.State); err == nil && st != nil {
+		wantSHA, wantSize = st.NewSHA, st.NewSize
+	}
+	if err := validateStaged(sys, args.Staged, wantSize, wantSHA); err != nil {
+		markStage(sys, args.State, stageAborted, fmt.Sprintf("新版文件校验失败：%v", err))
+		// Nothing was touched: bring the current build back up rather than
+		// leaving the machine with no running program.
+		if _, serr := sys.startProcess(args.Exe); serr != nil {
+			sys.logf("could not restart %s after a failed validation: %v", args.Exe, serr)
+		}
+		return 1
+	}
+
 	if err := swapExe(sys, args.Exe, args.Staged, args.Bak); err != nil {
 		// The atomic replace left the old executable untouched, so there is
-		// nothing to roll back; the staged file stays for another attempt.
+		// nothing to roll back — but nothing is running either, because the
+		// process that started this helper has already quit. Leaving it at
+		// that is how a failed update ends with no program on screen at all.
 		markStage(sys, args.State, stageAborted, fmt.Sprintf("替换文件失败：%v", err))
+		if _, serr := sys.startProcess(args.Exe); serr != nil {
+			sys.logf("could not restart the old version at %s: %v", args.Exe, serr)
+		}
 		return 1
 	}
 	markStage(sys, args.State, stageReplaced, "")
@@ -721,10 +831,19 @@ func rollback(sys updateSys, args helperArgs, pid int, reason string) int {
 	}
 
 	failed := args.Exe + ".failed-" + sys.now().Format("20060102-150405")
-	if err := sys.rename(args.Exe, failed); err != nil {
-		sys.logf("cannot move the bad executable aside: %v", err)
-		markStage(sys, args.State, stageAborted, fmt.Sprintf("回滚失败：%v", err))
-		return 1
+	// The executable may already be gone: a swap that renamed it aside and
+	// then failed leaves no path to move, and "restore the old version" from
+	// the UI hit exactly that state and refused. With the target missing there
+	// is nothing to preserve, so the backup simply takes its place.
+	if sys.exists(args.Exe) {
+		if err := sys.rename(args.Exe, failed); err != nil {
+			sys.logf("cannot move the bad executable aside: %v", err)
+			markStage(sys, args.State, stageAborted, fmt.Sprintf("回滚失败：%v", err))
+			return 1
+		}
+	} else {
+		sys.logf("no executable at %s; restoring the backup directly", args.Exe)
+		failed = ""
 	}
 	if err := sys.replaceFile(args.Bak, args.Exe); err != nil {
 		// The failed build is out of the way and the backup is still on disk;
@@ -736,10 +855,8 @@ func rollback(sys updateSys, args helperArgs, pid int, reason string) int {
 		return 1
 	}
 
+	unlock := lockUpdateState(args.State)
 	st, _ := updateStateLoad(args.State)
-	if st != nil {
-		st.Failed = failed
-	}
 	if st == nil {
 		st = &updateState{}
 	}
@@ -747,14 +864,28 @@ func rollback(sys updateSys, args helperArgs, pid int, reason string) int {
 	st.Reason = reason
 	st.Failed = failed
 	st.Time = sys.now().Format(time.RFC3339)
-	if err := updateStateSave(args.State, *st); err != nil {
+	if err := writeStateLocked(args.State, *st); err != nil {
 		sys.logf("cannot write update state: %v", err)
 	}
+	unlock()
 
 	if _, err := sys.startProcess(args.Exe); err != nil {
 		sys.logf("old version restored but not restarted: %v", err)
 	}
 	return 1
+}
+
+// tmpSeq numbers temporary files within this process, so two writers that share
+// a data directory never pick the same name twice in the same millisecond.
+var tmpSeq atomic.Uint64
+
+func nextTmpSeq() uint64 { return tmpSeq.Add(1) }
+
+// samePathText compares two paths for identity, tolerant of case and separator
+// spelling: Windows paths are case-insensitive and the same file is routinely
+// spelled with either separator.
+func samePathText(a, b string) bool {
+	return strings.EqualFold(filepath.Clean(a), filepath.Clean(b))
 }
 
 // hashFileSHA256 is the one hashing routine the update path uses, both to

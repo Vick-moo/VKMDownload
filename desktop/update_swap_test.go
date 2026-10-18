@@ -260,8 +260,11 @@ func TestSwapFailureLeavesTheOldVersionInPlace(t *testing.T) {
 	if !f.sys.exists(f.bak) {
 		t.Error("the backup was removed; it is the only other copy of the old version")
 	}
-	if len(f.sys.started) != 0 {
-		t.Errorf("a process was started after a failed swap: %v", f.sys.started)
+	// The old version must be running again: the process that launched this
+	// helper has already quit, so a failed swap that starts nothing leaves the
+	// machine with the program icon on the desktop and nothing behind it.
+	if len(f.sys.started) != 1 || len(f.sys.started[0]) == 0 || f.sys.started[0][0] != f.exe {
+		t.Errorf("started = %v, want exactly the old version relaunched at %s", f.sys.started, f.exe)
 	}
 	if got := f.stage(t); got != stageAborted {
 		t.Errorf("stage = %q, want %q", got, stageAborted)
@@ -996,6 +999,9 @@ func TestWriteUpdateHandshakeIsWhatConfirmsTheUpdate(t *testing.T) {
 	exe := filepath.Join(dir, "VKMDownload.exe")
 	writeFile(t, exe, "NEW-BUILD")
 	sha, _ := hashFileSHA256(exe)
+	// The confirmation is only allowed from the build the record names, so the
+	// running image has to be the fixture rather than the test binary.
+	a.selfPath = func() (string, error) { return exe, nil }
 	st := updateState{Stage: stageLaunched, Exe: exe, NewSHA: sha, Version: "0.2.7",
 		Bak: filepath.Join(dir, "VKMDownload.exe.bak")}
 	writeFile(t, st.Bak, oldExeContent)
@@ -1026,5 +1032,57 @@ func TestWriteUpdateHandshakeIsWhatConfirmsTheUpdate(t *testing.T) {
 	}
 	if after.Stage != stageConfirmed {
 		t.Errorf("stage = %q, want %q", after.Stage, stageConfirmed)
+	}
+}
+
+// TestHandshakeWillNotConfirmFromAnotherBuild pins the P2-6 rule: the evidence
+// must come from the build the record names. Otherwise any executable launched
+// with the flag stamps somebody else's update as done, and the next start then
+// deletes the backup of a version that was never replaced.
+func TestHandshakeWillNotConfirmFromAnotherBuild(t *testing.T) {
+	cases := map[string]func(*App, string){
+		"different image": func(a *App, exe string) {
+			a.selfPath = func() (string, error) { return exe + ".other", nil }
+		},
+		"same path, wrong bytes": func(a *App, exe string) {
+			a.selfPath = func() (string, error) { return exe, nil }
+			// Corrupt the file after the record was written: the path matches,
+			// the bytes no longer do, and the hash check must catch it.
+			writeFile(t, exe, "TAMPERED")
+		},
+		"record has no hash": func(a *App, exe string) {
+			a.selfPath = func() (string, error) { return exe, nil }
+		},
+	}
+	for name, setup := range cases {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			a := NewAppWithDataDir(dir)
+			a.emit = func(string, ...any) {}
+			exe := filepath.Join(dir, "VKMDownload.exe")
+			writeFile(t, exe, "NEW-BUILD")
+			sha, _ := hashFileSHA256(exe)
+			st := updateState{Stage: stageLaunched, Exe: exe, NewSHA: sha, Version: "0.2.7",
+				Bak: filepath.Join(dir, "VKMDownload.exe.bak")}
+			if name == "record has no hash" {
+				st.NewSHA = ""
+			}
+			writeFile(t, st.Bak, oldExeContent)
+			if err := updateStateSave(a.updateStatePath(), st); err != nil {
+				t.Fatal(err)
+			}
+			setup(a, exe)
+
+			a.updateToken = strings.Repeat("ef", 32)
+			a.writeUpdateHandshake()
+
+			after, err := updateStateLoad(a.updateStatePath())
+			if err != nil || after == nil {
+				t.Fatalf("state: %v", err)
+			}
+			if after.Stage == stageConfirmed {
+				t.Errorf("stage = confirmed, want it left at %q", stageLaunched)
+			}
+		})
 	}
 }

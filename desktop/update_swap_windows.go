@@ -77,11 +77,13 @@ func (realUpdateSys) hardLink(src, dst string) error {
 // destination path does not exist, which is the property the old
 // rename-then-move script lacked.
 //
-// MOVEFILE_WRITE_THROUGH makes the call return only once the change is on disk,
-// so a power loss immediately afterwards cannot leave the directory entry
-// half-committed. GetLastError is folded into the error because the difference
-// between "sharing violation, retry" and "access denied, stop" is otherwise
-// invisible.
+// MOVEFILE_WRITE_THROUGH asks the filesystem to flush before returning. It is a
+// request, not a guarantee: NTFS honours it for the rename itself, but it says
+// nothing about data the caller wrote earlier through another handle — which is
+// why the staged file is fsynced by its writer before the swap, and why the
+// comment here does not claim the call makes the file durable. GetLastError is
+// folded into the error because the difference between "sharing violation,
+// retry" and "access denied, stop" is otherwise invisible.
 func (s realUpdateSys) replaceFile(src, dst string) error {
 	from, err := syscall.UTF16PtrFromString(src)
 	if err != nil {

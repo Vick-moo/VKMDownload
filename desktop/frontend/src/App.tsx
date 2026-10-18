@@ -597,6 +597,13 @@ function App(): JSX.Element {
     setUpdPct("");
     try {
       const s = await api.startUpdate();
+      if (s.state === "current") {
+        // Nothing to install: the poll loop below only exits on ready/failed,
+        // so this has to be handled before entering it.
+        setUpdating(false);
+        flash(s.version ? `已是最新版本（${s.version}）` : "已是最新版本");
+        return;
+      }
       if (s.state === "failed") {
         setUpdating(false);
         flash(`更新失败：${s.error || "未知错误"}`);
@@ -627,6 +634,11 @@ function App(): JSX.Element {
             setUpdating(false);
             flash(`更新失败：${e instanceof Error ? e.message : String(e)}`);
           }
+          return;
+        }
+        if (p.state === "current") {
+          setUpdating(false);
+          flash("已是最新版本");
           return;
         }
         if (p.state === "failed") {

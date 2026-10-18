@@ -266,6 +266,10 @@ export function SettingsPage({
       return `正在下载新版${upd.version}${pct}…`;
     }
     if (upd.state === "ready") return `新版 ${upd.version} 已下好，重启即生效。`;
+    // "current" is the normal answer when there is nothing to install. It is a
+    // separate state rather than "failed" so the row does not paint an error
+    // and offer a retry for the expected outcome of pressing the button.
+    if (upd.state === "current") return `已是最新版本（${upd.version}）。`;
     if (upd.state === "failed" && upd.error) return `更新失败：${upd.error}`;
     return "自动检查新版本，有更新时顶部会出现横幅。";
   }

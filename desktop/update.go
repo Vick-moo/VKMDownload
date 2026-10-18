@@ -275,34 +275,61 @@ func stagedUpdatePath() (exe, staged string, err error) {
 // the download engine, and touches neither the running file nor any task.
 // Applying (ApplyUpdate) is what pauses everything first.
 func (a *App) StartUpdate() (UpdateStatus, error) {
+	// The claim and the check happen in one critical section. They used to be
+	// separated by the whole network round trip, so two clicks in the same
+	// instant both saw "not downloading", both fetched the release and both
+	// opened the same staged file with O_TRUNC — interleaving two downloads
+	// into one file that then failed every checksum, permanently, until the
+	// app was restarted.
 	a.updMu.Lock()
-	if a.upd.State == "downloading" {
+	switch a.upd.State {
+	case "downloading":
 		st := a.upd
 		a.updMu.Unlock()
 		return st, nil
+	case "applying":
+		// The executable is being replaced right now. A download started here
+		// would write the staged file the helper is about to install.
+		st := a.upd
+		a.updMu.Unlock()
+		return st, fmt.Errorf("更新正在进行中，请稍候")
 	}
+	a.upd = UpdateStatus{State: "downloading"}
+	// Whatever was verified before belongs to the previous attempt.
+	a.updStagedSHA, a.updStagedSize = "", 0
 	a.updMu.Unlock()
+
+	failAndClear := func(err error) (UpdateStatus, error) {
+		return a.updateFailed(err), err
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	rel, err := fetchLatestRelease(ctx)
+	fetch := a.fetchRelease
+	if fetch == nil {
+		fetch = fetchLatestRelease
+	}
+	rel, err := fetch(ctx)
 	if err != nil {
-		return a.updateFailed(err), err
+		return failAndClear(err)
 	}
 	if !isNewerVersion(appVersion, rel.tag) {
-		err := fmt.Errorf("已是最新版本")
-		return a.updateFailed(err), err
+		// "Already current" is not a failure. Recording it as failed painted a
+		// red error row and a retry button for the normal, expected answer.
+		a.updMu.Lock()
+		a.upd = UpdateStatus{State: "current", Version: strings.TrimPrefix(strings.TrimPrefix(rel.tag, "v"), "V")}
+		st := a.upd
+		a.updMu.Unlock()
+		return st, fmt.Errorf("已是最新版本")
 	}
 
 	_, staged, err := stagedUpdatePath()
 	if err != nil {
-		return a.updateFailed(err), err
+		return failAndClear(err)
 	}
 
 	a.updMu.Lock()
 	a.upd = UpdateStatus{State: "downloading", Version: strings.TrimPrefix(strings.TrimPrefix(rel.tag, "v"), "V")}
-	// Whatever was verified before belongs to the previous attempt.
-	a.updStagedSHA, a.updStagedSize = "", 0
 	st := a.upd
 	a.updMu.Unlock()
 
@@ -366,6 +393,29 @@ func (a *App) downloadUpdate(rel releaseAsset, staged string) {
 		fail(err)
 		return
 	}
+	// Every exit below has to release this handle. The success path used to
+	// return with it still open, and the failure paths called os.Remove on a
+	// file they were still writing: on Windows that delete fails with a sharing
+	// violation, the error was discarded with `_ =`, and "the bad file was
+	// discarded" became a lie — the file stayed, and the next attempt tripped
+	// over it.
+	closed := false
+	closeOut := func() error {
+		if closed {
+			return nil
+		}
+		closed = true
+		return out.Close()
+	}
+	defer closeOut()
+	discardStaged := func() {
+		if cerr := closeOut(); cerr != nil {
+			a.debugLog("closing the staged update file failed: %v", cerr)
+		}
+		if rerr := os.Remove(staged); rerr != nil && !os.IsNotExist(rerr) {
+			a.debugLog("cannot discard the staged update file: %v", rerr)
+		}
+	}
 
 	h := sha256.New()
 	total := resp.ContentLength
@@ -375,7 +425,7 @@ func (a *App) downloadUpdate(rel releaseAsset, staged string) {
 		n, rerr := resp.Body.Read(buf)
 		if n > 0 {
 			if _, werr := out.Write(buf[:n]); werr != nil {
-				_ = out.Close()
+				discardStaged()
 				fail(werr)
 				return
 			}
@@ -387,13 +437,26 @@ func (a *App) downloadUpdate(rel releaseAsset, staged string) {
 			a.updMu.Unlock()
 		}
 		if rerr != nil {
-			_ = out.Close()
 			if rerr != io.EOF {
+				discardStaged()
 				fail(rerr)
 				return
 			}
 			break
 		}
+	}
+
+	// Flushed before anything trusts the file: the checks below read it back,
+	// and the helper re-reads it minutes later in another process.
+	if serr := out.Sync(); serr != nil {
+		discardStaged()
+		fail(serr)
+		return
+	}
+	if cerr := closeOut(); cerr != nil {
+		discardStaged()
+		fail(cerr)
+		return
 	}
 
 	// The digest is the one check that ties the bytes on disk to the release
@@ -404,10 +467,18 @@ func (a *App) downloadUpdate(rel releaseAsset, staged string) {
 	if rel.digest != "" {
 		want := strings.TrimPrefix(rel.digest, "sha256:")
 		if !strings.EqualFold(sum, want) {
-			_ = os.Remove(staged)
+			discardStaged()
 			fail(fmt.Errorf("新版文件校验失败，已丢弃"))
 			return
 		}
+	} else if total <= 0 {
+		// No digest *and* no length: nothing at all ties the bytes on disk to
+		// what the release published. A truncated download would satisfy the
+		// remaining checks whenever its first megabyte survived, and the result
+		// would be installed as the program.
+		discardStaged()
+		fail(fmt.Errorf("服务器没有提供文件长度，无法确认下载完整，已放弃本次更新"))
+		return
 	} else {
 		a.debugLog("release %s reported no digest; relying on length and header checks", rel.tag)
 	}
@@ -415,17 +486,17 @@ func (a *App) downloadUpdate(rel releaseAsset, staged string) {
 	// A truncated transfer that still returns 200 is the classic silent
 	// failure here: the file exists, is large, and is not the program.
 	if total > 0 && written != total {
-		_ = os.Remove(staged)
+		discardStaged()
 		fail(fmt.Errorf("下载不完整：收到 %d 字节，应为 %d", written, total))
 		return
 	}
 	if written < 1<<20 {
-		_ = os.Remove(staged)
+		discardStaged()
 		fail(fmt.Errorf("下载到的新版文件过小（%d 字节）", written))
 		return
 	}
 	if magic, err := readPrefix(staged, 2); err != nil || string(magic) != "MZ" {
-		_ = os.Remove(staged)
+		discardStaged()
 		fail(fmt.Errorf("下载到的文件不是可执行文件"))
 		return
 	}
@@ -475,6 +546,16 @@ func (a *App) executablePaths() func() (string, string, error) {
 	return a.exePaths
 }
 
+// runningExe is this process's own image. Injectable for the same reason
+// executablePaths is: a test cannot make os.Executable describe a fixture, and
+// the update confirmation has to be checked against a file a test can write.
+func (a *App) runningExe() (string, error) {
+	if a.selfPath == nil {
+		return os.Executable()
+	}
+	return a.selfPath()
+}
+
 // updateStatePath is the marker the helper and the next launch share. It sits
 // next to tasks.json in the data directory, never next to the executable: an
 // install under Program Files is not writable for the user running the app.
@@ -495,10 +576,31 @@ func (a *App) freezeForUpdate() (func(), error) {
 	a.mgr.mu.Lock()
 	a.mgr.updating = true
 	a.mgr.mu.Unlock()
+
+	// What was transferring before the freeze. If the update is abandoned the
+	// user expects those downloads to carry on: before this they came back
+	// paused, which looks like the app quietly stopped their work.
+	var wasRunning []string
+	for _, v := range a.mgr.List() {
+		if v.Status == StatusDownloading || v.Status == StatusQueued {
+			wasRunning = append(wasRunning, v.ID)
+		}
+	}
+
 	unfreeze := func() {
 		a.mgr.mu.Lock()
 		a.mgr.updating = false
 		a.mgr.mu.Unlock()
+		if len(wasRunning) == 0 {
+			return
+		}
+		a.mgr.batch(func() {
+			for _, id := range wasRunning {
+				if v, ok := a.mgr.view(id); ok && v.Status == StatusPaused {
+					_ = a.mgr.Resume(id)
+				}
+			}
+		})
 	}
 
 	a.mgr.StopAll()
@@ -518,6 +620,15 @@ func (a *App) freezeForUpdate() (func(), error) {
 // the user a click; failing after the helper was launched costs a restart with a
 // frozen task list.
 func preflightExeDir(exe string, need int64) error {
+	// The updater appends ".bak", ".new" and ".failed-<stamp>" to this path,
+	// and the Win32 file APIs used for the swap reject anything past MAX_PATH
+	// unless it is explicitly long-path prefixed. Refusing here names the cause
+	// and suggests the fix; discovering it after the process has quit leaves
+	// the user with no running program and no explanation.
+	const maxPlainPath = 259
+	if len(exe)+len(".failed-20060102-150405") > maxPlainPath {
+		return fmt.Errorf("程序路径太长（%d 个字符），更新需要在其后追加备份名；请把程序移到更短的目录（例如 C:\\VKMDownload\\）后再更新", len(exe))
+	}
 	dir := filepath.Dir(exe)
 	f, err := os.CreateTemp(dir, ".vkmdownload-writable-*")
 	if err != nil {
@@ -613,6 +724,7 @@ func (a *App) ApplyUpdate() error {
 		Staged:  staged,
 		OldSHA:  oldSHA,
 		NewSHA:  newSHA,
+		NewSize: wantSize,
 		Time:    sys.now().Format(time.RFC3339),
 	}
 	if err := updateStateSave(args.State, st); err != nil {
@@ -809,10 +921,37 @@ func (a *App) writeUpdateHandshake() {
 	// Confirming the record here is what lets the *next* start clean up the
 	// backup: this process cannot have its own directory entry edited into
 	// place, and the helper it is talking to runs from that backup.
-	if st, err := updateStateLoad(a.updateStatePath()); err == nil && st != nil {
-		st.Stage = stageConfirmed
-		st.Time = time.Now().Format(time.RFC3339)
-		_ = updateStateSave(a.updateStatePath(), *st)
+	//
+	// The stamp is evidence, so it is only written by the build the record
+	// names. Without this check any executable that happened to be launched
+	// with the handshake flag confirmed somebody else's update, and the next
+	// start then deleted the backup of a version that was never replaced.
+	sys := a.syscalls()
+	st, err := updateStateLoad(a.updateStatePath())
+	if err != nil || st == nil {
+		return
+	}
+	exe, eerr := a.runningExe()
+	if eerr != nil {
+		a.debugLog("cannot identify the running executable: %v", eerr)
+		return
+	}
+	if st.Exe != "" && !samePathText(exe, st.Exe) {
+		a.debugLog("not confirming the update record: running %s, record names %s", exe, st.Exe)
+		return
+	}
+	if st.NewSHA == "" {
+		a.debugLog("not confirming the update record: it carries no hash for the new build")
+		return
+	}
+	if sha, herr := sys.sha256File(exe); herr != nil || !strings.EqualFold(sha, st.NewSHA) {
+		a.debugLog("not confirming the update record: the running image is not the one it names")
+		return
+	}
+	st.Stage = stageConfirmed
+	st.Time = time.Now().Format(time.RFC3339)
+	if serr := updateStateSave(a.updateStatePath(), *st); serr != nil {
+		a.debugLog("cannot confirm the update record: %v", serr)
 	}
 }
 
@@ -828,17 +967,51 @@ func (a *App) cleanupStaleUpdate() {
 		a.debugLog("update state unreadable: %v", err)
 	} else if st != nil && st.Stage == stageConfirmed && st.Bak != "" {
 		sys := a.syscalls()
-		if sha, herr := sys.sha256File(st.Exe); herr == nil &&
-			(st.NewSHA == "" || strings.EqualFold(sha, st.NewSHA)) {
-			if rerr := sys.remove(st.Bak); rerr != nil {
-				a.debugLog("cannot remove the update backup %s: %v", st.Bak, rerr)
-			} else {
-				a.debugLog("removed the update backup %s", st.Bak)
+		// A confirmed record with no hash proves nothing about which build is
+		// running, and the backup may be the only copy of a working version.
+		// The old code treated "no hash" as "matches", deleted the backup on
+		// that basis, and dropped the marker whether or not the delete worked.
+		if st.NewSHA == "" {
+			a.debugLog("keeping the update backup: the record carries no hash to verify it against")
+		} else if sha, herr := sys.sha256File(st.Exe); herr != nil || !strings.EqualFold(sha, st.NewSHA) {
+			a.debugLog("keeping the update backup: the running image is not the one the record names")
+		} else if rerr := sys.remove(st.Bak); rerr != nil {
+			// The marker stays: it is the only thing that still says a backup
+			// exists and is safe to remove later.
+			a.debugLog("cannot remove the update backup %s: %v", st.Bak, rerr)
+		} else {
+			a.debugLog("removed the update backup %s", st.Bak)
+			if merr := sys.remove(path); merr != nil {
+				a.debugLog("cannot remove the update record: %v", merr)
 			}
-			_ = sys.remove(path)
 		}
+	} else if st != nil && st.Stage != stageConfirmed {
+		// An update that never reached "confirmed" leaves its staged file
+		// behind. It is another full copy of the program and nothing will ever
+		// use it once the helper is gone, so it is swept after a day — long
+		// enough that a retry in the same session still finds it.
+		a.cleanupStaleStaged()
 	}
 	a.cleanupHandshakeFiles()
+}
+
+// cleanupStaleStaged removes a downloaded replacement that no longer belongs to
+// an update in progress. Only files older than a day go: a retry within the same
+// session must still be able to reuse the download.
+func (a *App) cleanupStaleStaged() {
+	_, staged, err := a.executablePaths()()
+	if err != nil {
+		return
+	}
+	info, serr := os.Stat(staged)
+	if serr != nil || time.Since(info.ModTime()) < 24*time.Hour {
+		return
+	}
+	if rerr := os.Remove(staged); rerr != nil {
+		a.debugLog("cannot remove the stale staged update %s: %v", staged, rerr)
+	} else {
+		a.debugLog("removed the stale staged update %s", staged)
+	}
 }
 
 // cleanupHandshakeFiles drops handshake files left by earlier attempts. The one

@@ -2,6 +2,7 @@ package main
 
 import (
 	"embed"
+	"fmt"
 	"os"
 	"path/filepath"
 
@@ -31,6 +32,17 @@ func main() {
 	// single-instance lock or the WebView2 runtime from a process that is about
 	// to be replaced would be pointless at best.
 	if args, ok := parseHelperArgs(os.Args[1:]); ok {
+		// The helper exists to replace one specific executable with another, and
+		// it is started from a backup copy of itself. Without this check the
+		// program is a general-purpose "replace any file with any other file"
+		// tool for anyone who can pass it arguments — it would happily overwrite
+		// a document with an arbitrary executable. The check lives here rather
+		// than in runHelper because this is the only place the real running
+		// image is known (tests drive runHelper through an injected sys).
+		if self, err := os.Executable(); err == nil && args.Bak != "" && !samePathText(self, args.Bak) {
+			fmt.Fprintf(os.Stderr, "refusing to run as an update helper: --bak %q is not this process (%q)\n", args.Bak, self)
+			os.Exit(2)
+		}
 		os.Exit(runHelper(args, realUpdateSys{
 			logPath: filepath.Join(filepath.Dir(args.State), "vkmdownload.log"),
 		}))

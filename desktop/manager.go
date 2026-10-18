@@ -440,6 +440,15 @@ func (m *Manager) taskStillListed(t *task) bool {
 	return m.tasks[t.view.ID] == t
 }
 
+// view returns one task's view by id, and whether it exists.
+func (m *Manager) view(id string) (TaskView, bool) {
+	t := m.get(id)
+	if t == nil {
+		return TaskView{}, false
+	}
+	return snapshot(t), true
+}
+
 // snapshot copies a task's view.
 func snapshot(t *task) TaskView {
 	t.mu.Lock()
