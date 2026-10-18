@@ -195,6 +195,23 @@ host manifest）或 TLS 证书固定，属于架构改动，需要你拍板；�
 - 文档：`PRIVACY.md` 的"已知取舍"第 1 条从"Cookie 明文"改写为"Cookie 已加密 + DPAPI 挡不住
   什么"，第 4 条改为"更新检查可关闭"。
 
+### 56. 0.2.8（2026-10-19）发版内容
+- 版本号：应用 `0.2.8`，扩展 `1.0.3`（`desktop/app.go`、`desktop/wails.json`、
+  `extension/manifest.json`、`extension/package.json`）。
+- 设置页新增「隐私」标签：显示本机保留了多少条下载记录 / 其中多少条带登录信息（已加密）/
+  多少条链接带签名参数 / 日志多大，并提供「清除下载记录与日志」（不删已下载的文件、设置和配对密钥）。
+  后端 `StoredSecrets` / `ClearDownloadHistory` 之前只有 Go 侧方法、界面上点不到，这次接上。
+- WebView2 的缓存目录改为 `%LOCALAPPDATA%\VKMDownload\webview2`（`desktop/main.go` 的
+  `webviewDataDir`）。默认位置是 `%APPDATA%\<exe 名>`：浏览器缓存没有理由跟着漫游配置跨机器同步，
+  而且该目录一旦被删掉，某些环境下 WebView2 重建失败，表现为程序完全打不开窗口
+  （`error creating controller with 8000ffff`）。
+- 新增 `release-notes-0.2.8.md`（按 §21 结构：短摘要 + `<!-- app-notes-end -->` + 详细说明）。
+- 验证：根与 desktop 两个 module 的 `go vet`、`go test`、`internal/engine` 与 desktop 的 `-race`、
+  `GOOS=linux go vet`、前端 `tsc --noEmit` 与 `vitest`（30 例）、扩展 `node --test`（32 例）全绿；
+  真机启动确认窗口出现、`local api listening on 127.0.0.1:18888` 写入日志、新缓存目录生成。
+- 说明：`exe 属性 → 详细信息` 里的版本号仍为空，是 Wails v2.16 资源块生成的老问题（README「已知边界」
+  已记录）；程序自己报告的版本（设置页底部、更新检查、`/ping`）是 0.2.8。
+
 ## 2026-10-18 — 0.2.7
 
 ### 48. 稳定性收尾批：测试基建、重启语义、并发防护、更新说明与大小交接（UNRELEASED）

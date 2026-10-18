@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { JSX } from "react";
 import { main } from "../../wailsjs/go/models";
 import { api } from "../api";
-import type { Config, OrganizeGroup, UpdateStatus } from "../types";
+import type { Config, OrganizeGroup, StoredSecretSummary, UpdateStatus } from "../types";
 import { IconFolder } from "./Icons";
 import { UpdateNotesDialog } from "./UpdateNotesDialog";
 
@@ -108,6 +108,42 @@ export function SettingsPage({
   const [upd, setUpd] = useState<UpdateStatus | null>(null);
   const [updMsg, setUpdMsg] = useState("");
   const [updBusy, setUpdBusy] = useState(false);
+  // What the app keeps on disk, read when the 隐私 tab is opened, and the busy
+  // flag for the one action that removes it.
+  const [stored, setStored] = useState<StoredSecretSummary | null>(null);
+  const [clearing, setClearing] = useState(false);
+
+  async function refreshStored() {
+    try {
+      setStored(await api.storedSecrets());
+    } catch {
+      // Leaving the previous numbers is better than showing a fabricated zero.
+    }
+  }
+
+  /** One sentence describing what is on disk, in counts only. */
+  function storedLine(): string {
+    if (!stored) return "正在读取…";
+    const parts = [`${stored.taskCount} 条下载记录`];
+    if (stored.withCookie > 0) parts.push(`${stored.withCookie} 条带登录信息（已加密）`);
+    if (stored.withQueryUrl > 0) parts.push(`${stored.withQueryUrl} 条链接带签名参数`);
+    const log = stored.logBytes > 0 ? `${(stored.logBytes / 1024).toFixed(0)} KB 日志` : "没有日志";
+    return `${parts.join("、")}，${log}。`;
+  }
+
+  async function clearHistory() {
+    setClearing(true);
+    setUpdMsg("");
+    try {
+      await api.clearDownloadHistory();
+      await refreshStored();
+      setUpdMsg("已清除下载记录与日志。已下载的文件仍然保留。");
+    } catch (e) {
+      setUpdMsg(`清除失败：${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setClearing(false);
+    }
+  }
   // The version whose "what's new" dialog is open; the actual download starts
   // from the dialog's confirm, not straight from the button.
   const [notesVer, setNotesVer] = useState<string | null>(null);
@@ -282,7 +318,13 @@ export function SettingsPage({
     );
   }
 
-  const TABS = ["下载", "浏览器扩展", "计划下载", "剪贴板", "完成后", "窗口", "软件更新"];
+  const TABS = ["下载", "浏览器扩展", "计划下载", "剪贴板", "完成后", "窗口", "软件更新", "隐私"];
+
+  // Read the on-disk summary when the tab is opened, so the numbers are not a
+  // stale snapshot from whenever the page loaded.
+  useEffect(() => {
+    if (tab === "隐私") void refreshStored();
+  }, [tab]);
 
   /** Applies a partial change to the draft. */
   function patch(p: Partial<Draft>) {
@@ -992,6 +1034,41 @@ export function SettingsPage({
             测试
           </button>
         </div>
+      </section>
+
+      <section className="settings-section" hidden={tab !== "隐私"}>
+        <h3 className="settings-section__title">本机数据</h3>
+
+        <div className="setting">
+          <span className="setting__text">
+            <span className="setting__title">程序在这台电脑上保留了什么</span>
+            <span className="setting__hint">{storedLine()}</span>
+          </span>
+        </div>
+
+        <div className="setting">
+          <span className="setting__text">
+            <span className="setting__title">清除下载记录与日志</span>
+            <span className="setting__hint">
+              删掉任务列表与日志（含旧版本留下的副本）。**已下载的文件、你的设置、配对密钥不会被删。**
+            </span>
+          </span>
+          <span className="field__row" style={{ flex: "0 0 auto" }}>
+            <button
+              type="button"
+              className="btn"
+              disabled={clearing}
+              onClick={() => void clearHistory()}
+            >
+              {clearing ? "清除中…" : "清除"}
+            </button>
+          </span>
+        </div>
+
+        <p className="settings-section__note">
+          未完成任务的登录信息用 Windows 自带的加密保存，拷到别的电脑解不开；
+          但以你的身份运行的恶意程序仍能解密。详见仓库里的 PRIVACY.md。
+        </p>
       </section>
 
       <section className="settings-section" hidden={tab !== "软件更新"}>

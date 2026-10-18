@@ -13,6 +13,8 @@ export type StartRequest = main.StartRequest;
 export type UpdateInfo = main.UpdateInfo;
 export type UpdateStatus = main.UpdateStatus;
 export type OrganizeGroup = main.OrganizeGroup;
+/** What the app keeps on disk, as counts only. See desktop/privacy.go. */
+export type StoredSecretSummary = main.StoredSecretSummary;
 
 /** Task lifecycle, matching the TaskStatus constants in manager.go. */
 export type TaskStatus =

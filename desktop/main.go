@@ -26,6 +26,19 @@ const (
 	minHeight    = 600
 )
 
+// webviewDataDir is where WebView2 keeps its cache and local storage.
+//
+// UserCacheDir is %LOCALAPPDATA% on Windows: per-machine, never roamed, and
+// removed by the usual cleanup tools. Falling back to the temp directory keeps
+// the app starting even if that call fails.
+func webviewDataDir() string {
+	base, err := os.UserCacheDir()
+	if err != nil || base == "" {
+		base = os.TempDir()
+	}
+	return filepath.Join(base, appDirName, "webview2")
+}
+
 func main() {
 	// The update helper is this same executable, started from its own backup
 	// copy. It must never reach wails.Run: it needs no window, and creating the
@@ -86,6 +99,14 @@ func main() {
 			// Keep the window responsive while a large download is running.
 			WebviewIsTransparent: false,
 			WindowIsTranslucent:  false,
+
+			// WebView2's cache lives under the local app data directory, named
+			// explicitly. The default put it under Roaming (keyed by the exe
+			// name), which is wrong on two counts: a browser cache has no
+			// business being copied between machines by a roaming profile, and a
+			// stale folder there could not be recreated after it was removed,
+			// leaving the app unable to open a window at all.
+			WebviewUserDataPath: webviewDataDir(),
 		},
 
 		Bind: []interface{}{

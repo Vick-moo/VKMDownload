@@ -18,6 +18,8 @@ import {
   ListTasks,
   NewTask,
   OpenFile,
+  ClearDownloadHistory,
+  StoredSecrets,
   OpenReleasePage,
   PauseTask,
   ReleaseNotes,
@@ -38,7 +40,15 @@ import {
   Version,
 } from "../wailsjs/go/main/App";
 import { EventsOn } from "../wailsjs/runtime/runtime";
-import type { Config, OrganizeGroup, StartRequest, TaskView, UpdateInfo, UpdateStatus } from "./types";
+import type {
+  Config,
+  OrganizeGroup,
+  StartRequest,
+  StoredSecretSummary,
+  TaskView,
+  UpdateInfo,
+  UpdateStatus,
+} from "./types";
 export const api = {
   version: (): Promise<string> => Version(),
   bringToFront: (): Promise<void> => BringToFront(),
@@ -49,6 +59,10 @@ export const api = {
   consumeUpdateNotice: (): Promise<string> => ConsumeUpdateNotice(),
   rollbackUpdate: (): Promise<void> => RollBackUpdate(),
   defaultOrganizeGroups: (): Promise<OrganizeGroup[]> => DefaultOrganizeGroups(),
+  // What the app currently keeps on disk, as counts only — never values — plus
+  // the one action that removes it.
+  storedSecrets: (): Promise<StoredSecretSummary> => StoredSecrets(),
+  clearDownloadHistory: (): Promise<void> => ClearDownloadHistory(),
   openReleasePage: (url: string): Promise<void> => OpenReleasePage(url),
   releaseNotes: (version: string): Promise<string> => ReleaseNotes(version),
   listTasks: (): Promise<TaskView[]> => ListTasks(),
