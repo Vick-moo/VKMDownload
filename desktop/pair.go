@@ -32,8 +32,10 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 const (
@@ -128,6 +130,69 @@ func proofFor(key, challenge string) string {
 // pairKeyForThisInstall is the app's key, generating it when needed.
 func (a *App) pairKeyForThisInstall() (string, error) {
 	return loadOrCreatePairKey(a.dataDir())
+}
+
+// Request authentication, app side.
+//
+// The peer check answers "is the caller a real browser process?" and the pairing
+// key answers "is the responder really this app?". Neither answers "is this
+// caller our extension?": any extension in the same browser passes the peer
+// check, and the Origin header only says "some extension". Since /add enqueues a
+// download with attacker-chosen cookies and URL — an SSRF primitive against the
+// user's intranet — and /settings can switch interception off, both mutations now
+// require proof that the caller holds the per-install key.
+//
+// The proof is HMAC(key, method + "\n" + path + "\n" + unix) with a two-minute
+// window. A timestamp rather than a server-issued nonce keeps the endpoint
+// stateless; replay inside the window needs the ability to read loopback traffic,
+// which on Windows already means administrator.
+const (
+	authHeader = "X-VKMDownload-Auth"
+	// authWindow bounds clock skew and replay together.
+	authWindow = 2 * time.Minute
+)
+
+// requestAuthValue is the string that gets signed for this request.
+func requestAuthValue(method, path, stamp string) string {
+	return method + "\n" + path + "\n" + stamp
+}
+
+// signedRequest produces the header value for a request, given the key.
+func signedRequest(key, method, path string, now time.Time) string {
+	stamp := strconv.FormatInt(now.Unix(), 10)
+	return stamp + ":" + proofFor(key, requestAuthValue(method, path, stamp))
+}
+
+// requestAuthentic reports whether the request carries a valid, fresh proof.
+//
+// A missing or malformed header is refused; so is one that signs a different
+// method or path, which stops a proof captured for /ping from being replayed
+// onto /add.
+func (a *App) requestAuthentic(r *http.Request) bool {
+	raw := strings.TrimSpace(r.Header.Get(authHeader))
+	if raw == "" {
+		return false
+	}
+	stamp, sig, ok := strings.Cut(raw, ":")
+	if !ok || sig == "" {
+		return false
+	}
+	when, err := strconv.ParseInt(stamp, 10, 64)
+	if err != nil {
+		return false
+	}
+	skew := time.Since(time.Unix(when, 0))
+	if skew > authWindow || skew < -authWindow {
+		return false
+	}
+	key, kerr := a.pairKeyForThisInstall()
+	if kerr != nil || key == "" {
+		return false
+	}
+	want := proofFor(key, requestAuthValue(r.Method, r.URL.Path, stamp))
+	// Constant-time compare: a byte-at-a-time comparison leaks how much of a
+	// forged proof was correct, which is enough to forge one byte at a time.
+	return hmac.Equal([]byte(sig), []byte(want))
 }
 
 // apiPair hands the key to a caller that has already passed the origin and peer

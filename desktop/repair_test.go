@@ -615,10 +615,15 @@ func TestDebugLogConcurrent(t *testing.T) {
 func stubPeer(t *testing.T, exe string, trust bool, tableErr error) {
 	t.Helper()
 	oldTable, oldImage, oldTrust := tcpOwnerOfPort, processImageOf, verifyTrustOf
-	tcpOwnerOfPort = func(uint16) (uint32, error) { return 4242, tableErr }
+	oldRoot := browserRootCheck
+	tcpOwnerOfPort = func(string, uint16) (uint32, error) { return 4242, tableErr }
 	processImageOf = func(uint32) (string, error) { return exe, nil }
 	verifyTrustOf = func(string) bool { return trust }
-	t.Cleanup(func() { tcpOwnerOfPort, processImageOf, verifyTrustOf = oldTable, oldImage, oldTrust })
+	browserRootCheck = func(string) bool { return true }
+	t.Cleanup(func() {
+		tcpOwnerOfPort, processImageOf, verifyTrustOf = oldTable, oldImage, oldTrust
+		browserRootCheck = oldRoot
+	})
 }
 
 func peerReq() *http.Request {
@@ -673,10 +678,13 @@ func TestPeerCheckRejectsBadSignature(t *testing.T) {
 	}
 }
 
-func TestPeerCheckFailOpenOnLookupError(t *testing.T) {
+// The peer check is a security control, so a caller it cannot identify is a
+// caller it does not trust. This used to fail open, which is what made a
+// 127.0.0.2 source address (loopback is a whole /8) enough to skip it entirely.
+func TestPeerCheckFailsClosedOnLookupError(t *testing.T) {
 	app := newTestApp(t)
 	stubPeer(t, "", false, errPeerCheckUnsupported)
-	if ok, _ := app.checkPeerProcess(peerReq()); !ok {
+	if ok, _ := app.checkPeerProcess(peerReq()); ok {
 		t.Fatal("infrastructure failure must fail open, not lock the user out")
 	}
 }
@@ -732,7 +740,7 @@ func TestPeerTrustCacheHonored(t *testing.T) {
 		t.Fatal(err)
 	}
 	oldTable, oldImage, oldTrust := tcpOwnerOfPort, processImageOf, verifyTrustOf
-	tcpOwnerOfPort = func(uint16) (uint32, error) { return 4242, nil }
+	tcpOwnerOfPort = func(string, uint16) (uint32, error) { return 4242, nil }
 	processImageOf = func(uint32) (string, error) { return exe, nil }
 	verifyTrustOf = func(string) bool { return true }
 	t.Cleanup(func() { tcpOwnerOfPort, processImageOf, verifyTrustOf = oldTable, oldImage, oldTrust })

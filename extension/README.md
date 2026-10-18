@@ -8,6 +8,9 @@
 
 Firefox 需要单独适配（扩展 API 不同），目前不支持。
 
+隐私（扩展经手哪些数据、存到哪）：见 [PRIVACY.md](PRIVACY.md)；
+桌面端存了什么、发到哪，见产品级说明 [../PRIVACY.md](../PRIVACY.md)。
+
 ---
 
 ## ⚠️ 装之前：先关掉 IDM 的扩展

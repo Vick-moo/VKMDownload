@@ -1,5 +1,11 @@
 # Privacy Policy — VKMDownload Browser Extension
 
+> This file covers the extension only. The desktop app also keeps records on disk and
+> checks GitHub for updates; see the product-level [`../PRIVACY.md`](../PRIVACY.md)
+> for that side. Where the two disagree, the product-level file wins.
+
+
+
 ## What this extension does
 
 VKMDownload hands browser downloads over to the VKMDownload desktop
@@ -11,18 +17,23 @@ download them itself.
 | Data | Why | Where it goes |
 |---|---|---|
 | Download URL, file name, referrer | To start the download in the desktop app | `http://127.0.0.1` (your own machine only) |
-| Browser cookies for the download URL (only on hosts the extension may read: `*.google.com`, `*.googleusercontent.com`; empty elsewhere) | Some hosts require a login; without the browser's cookies the desktop app looks like a stranger and gets rejected | `http://127.0.0.1` (your own machine only) |
+| Browser cookies for the download URL (only on hosts the extension may read: `*.google.com`, `*.googleusercontent.com`; empty elsewhere, and never for loopback or private addresses) | Some hosts require a login; without the browser's cookies the desktop app looks like a stranger and gets rejected. This includes HttpOnly cookies, which a page's own scripts cannot read | `http://127.0.0.1`; the app then replays them to the download site. For unfinished downloads the app may also keep them on disk so the transfer can resume |
 | Browser user-agent string | Some hosts/WAFs refuse non-browser clients | `http://127.0.0.1` (your own machine only) |
 | Download-result notifications | Telling you whether a handover succeeded | Shown locally, never sent anywhere |
-| Own-download IDs (session storage) | So the extension does not intercept its own fallback downloads | Browser session storage, cleared when the browser exits |
+| Own-download IDs, plus the ids of downloads handed over but not yet cancelled (session storage) | So the extension does not intercept its own downloads, and can finish a cancellation after its service worker restarts | Browser session storage, cleared when the browser exits |
+| Pairing key (local storage, `vkmPairKey`) | Proves to the desktop app that a request comes from this extension, and proves to the extension that the responder is the app itself | Browser profile storage; removed when the extension is uninstalled |
 
 ## What it does NOT do
 
 - No data is sent to any third party. All traffic stays on loopback
   (`127.0.0.1`) between the extension and your local VKMDownload app.
-- No browsing history, tabs, passwords, or page contents are read. The
-  extension cannot see them: it holds no `tabs`, `history`, or `<all_urls>`
-  permission.
+- No browsing history, passwords, or page contents are read. The extension
+  holds no `tabs`, `history`, or `<all_urls>` permission and injects no scripts.
+  Two exceptions worth naming: clicking the context menu item hands us the URL of
+  the page you clicked on (used as the download's referrer, with its query string
+  stripped) and any text you had selected; and the `downloads` permission lets us
+  see a download's URL, filename and referrer.
+- Downloads started in an incognito window are never taken over.
 - No remote code. Every file the extension runs ships inside its own
   package (Manifest V3, no remotely hosted code).
 - No analytics, no tracking, no advertising.

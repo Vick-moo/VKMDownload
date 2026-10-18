@@ -190,7 +190,30 @@ export function groupOf(name: string): string {
  * row something recognisable to show.
  */
 export function taskLabel(task: { name: string; url: string }): string {
-  return task.name || task.url;
+  return task.name || displayURL(task.url);
+}
+
+/**
+ * A URL with its query string and fragment removed, for display.
+ *
+ * Signed download links carry their credential in the query (`token=`, `sig=`,
+ * `X-Amz-Signature=`, Azure's `se`/`skt`), so rendering one puts a working
+ * credential on screen — where a screenshot, a screen share or the person
+ * standing next to the user hands it on. Host and path are what the row needs;
+ * the rest stays in memory and on the wire, never in the UI.
+ */
+export function displayURL(raw: string): string {
+  if (!raw) return "";
+  try {
+    const u = new URL(raw);
+    if (!u.search && !u.hash) return raw;
+    return `${u.origin}${u.pathname}`;
+  } catch {
+    // Not a parseable URL: strip anything after a query marker so a malformed
+    // link cannot leak a query by accident.
+    const cut = raw.search(/[?#]/);
+    return cut >= 0 ? raw.slice(0, cut) : raw;
+  }
 }
 
 /**

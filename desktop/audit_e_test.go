@@ -204,7 +204,7 @@ func TestPairRefusedWithoutASignedBrowser(t *testing.T) {
 		processImageOf = origImage
 		tcpOwnerOfPort = origOwner
 	})
-	tcpOwnerOfPort = func(uint16) (uint32, error) { return 4321, nil }
+	tcpOwnerOfPort = func(string, uint16) (uint32, error) { return 4321, nil }
 	processImageOf = func(uint32) (string, error) { return `C:\Windows\System32\curl.exe`, nil }
 
 	rec := httptest.NewRecorder()
@@ -248,7 +248,7 @@ func TestPairKeyNeverReachesTheLog(t *testing.T) {
 		tcpOwnerOfPort = origOwner
 		verifyTrustOf = origTrust
 	})
-	tcpOwnerOfPort = func(uint16) (uint32, error) { return 4321, nil }
+	tcpOwnerOfPort = func(string, uint16) (uint32, error) { return 4321, nil }
 	processImageOf = func(uint32) (string, error) { return exe, nil }
 	verifyTrustOf = func(string) bool { return true }
 

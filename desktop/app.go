@@ -207,12 +207,21 @@ func (a *App) startup(ctx context.Context) {
 	// touches anything unless the record proves the update succeeded.
 	go a.cleanupStaleUpdate()
 
+	// Credentials written by earlier versions are removed before the tasks are
+	// loaded, so nothing downstream ever holds a URL it does not need.
+	a.scrubStoredSecrets()
+
 	a.mgr.loadTasks()
 	go a.mgr.Run(ctx)
 	// Tasks that were queued when the app closed resume waiting for a slot;
 	// without this pump they would display as queued while the queue stood
 	// still.
 	a.mgr.pumpQueue()
+
+	// Old finished records are dropped in the background: the history is a
+	// privacy liability that grows forever, and a startup that walks the list is
+	// no place to risk a slow disk.
+	go a.trimHistory()
 
 	// The browser extension's endpoint. It lives and dies with the app's
 	// context rather than the window's, so closing the window to the tray does

@@ -8,6 +8,7 @@
 const dot = document.getElementById("dot");
 const state = document.getElementById("state");
 const toggle = document.getElementById("toggle");
+const repair = document.getElementById("repair");
 const hint = document.getElementById("hint");
 const ver = document.getElementById("ver");
 
@@ -29,8 +30,14 @@ function render(status, enabled) {
 
   if (typeof status.minSizeKb === "number") lastMinSizeKb = status.minSizeKb;
 
+  // The app is unreachable. An existing pairing is never replaced silently —
+  // doing so would let anything that grabs the port hand the extension its own
+  // key — so a reinstall or a deleted pair.key looks exactly like "not running".
+  // The way out therefore has to be visible.
+  if (repair) repair.hidden = running;
+
   if (!running) {
-    hint.textContent = "启动 VKMDownload 后，下载会交给它。";
+    hint.textContent = "启动 VKMDownload 后，下载会交给它。若已启动仍显示未运行，点「重新配对」。";
   } else if (!enabled) {
     hint.textContent = "接管已暂停，下载仍由浏览器完成。";
   } else if (status.minSizeKb > 0) {
@@ -69,19 +76,46 @@ async function refresh() {
 }
 
 toggle.addEventListener("click", async () => {
+  // Disabled for the round trip so a double click cannot send two toggles.
+  // Every way out has to put it back: when the service worker is gone (it was
+  // stopped, or the extension was just reloaded) sendMessage rejects, and the
+  // old code left the button greyed out for good with no explanation.
   toggle.disabled = true;
-  const result = await chrome.runtime.sendMessage("toggle");
-  if (!result) {
-    // The app went away between the status check and the click.
+  try {
+    const result = await chrome.runtime.sendMessage("toggle");
+    if (!result) {
+      // The app went away between the status check and the click.
+      hint.textContent = "应用没有响应，请确认它还在运行。";
+      return;
+    }
+    if (showRefused(result)) return;
+    render({ running: true, minSizeKb: lastMinSizeKb }, result.enabled);
+  } catch (error) {
+    hint.textContent = `无法联系扩展后台，请重新加载扩展后重试（${shortError(error)}）`;
+  } finally {
     void refresh();
-    return;
   }
-  if (showRefused(result)) {
-    toggle.disabled = false;
-    return;
-  }
-  render({ running: true, minSizeKb: lastMinSizeKb }, result.enabled);
-  void refresh();
 });
+
+if (repair) {
+  repair.addEventListener("click", async () => {
+    repair.disabled = true;
+    try {
+      await chrome.runtime.sendMessage("forgetPairing");
+      hint.textContent = "已清除配对，正在重新连接…";
+    } catch (error) {
+      hint.textContent = `清除配对失败：${shortError(error)}`;
+    } finally {
+      repair.disabled = false;
+      void refresh();
+    }
+  });
+}
+
+/** A one-line, bounded description of an error for the hint line. */
+function shortError(error) {
+  const text = String((error && error.message) || error || "未知错误");
+  return text.length > 80 ? `${text.slice(0, 80)}…` : text;
+}
 
 void refresh();

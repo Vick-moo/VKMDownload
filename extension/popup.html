@@ -30,6 +30,12 @@
       color: #7ba9ff; font: inherit; font-weight: 600;
     }
     button:hover { background: rgba(76, 141, 255, 0.14); }
+    #repair {
+      margin-top: 8px;
+      border-color: #3a4256;
+      color: #9aa6bd;
+      font-weight: 500;
+    }
     /* Long messages (a refusal reason, an error string) must wrap inside this
        narrow popup instead of stretching it or being clipped. */
     .hint {
@@ -55,6 +61,8 @@
   </div>
 
   <button id="toggle" type="button">…</button>
+
+  <button id="repair" type="button" hidden>重新配对</button>
 
   <p class="hint" id="hint"></p>
 

@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime/debug"
 	"sort"
 	"strconv"
@@ -56,7 +57,13 @@ func (a *App) debugLog(format string, args ...any) {
 		return
 	}
 	defer f.Close()
-	_, _ = fmt.Fprintf(f, "%s %s\n", time.Now().Format(time.RFC3339), fmt.Sprintf(format, args...))
+	// Sanitised on the way out, not at each call site. One call site that
+	// forgets logURL is all it takes for a signed link to be written here for
+	// good, and this file is exactly what gets attached to a bug report. The
+	// existing line above still uses logURL for its own readability; this is the
+	// backstop that makes a mistake in a new call site harmless.
+	line := sanitizeLogText(fmt.Sprintf(format, args...))
+	_, _ = fmt.Fprintf(f, "%s %s\n", time.Now().Format(time.RFC3339), line)
 }
 
 // TaskStatus is the lifecycle of a task; types.ts mirrors these values.
@@ -660,6 +667,21 @@ func logURL(raw string) string {
 	}
 	return u.Host + p
 }
+
+// sanitizeLogText rewrites every URL in text to its log-safe form.
+//
+// Query strings and fragments carry session tokens, single-use signatures and
+// SAS credentials. The regex is deliberately greedy up to whitespace or a
+// closing quote, which is how these URLs appear inside Go error strings such as
+// `Get "https://host/f?token=...": dial tcp ...`.
+func sanitizeLogText(text string) string {
+	return reURLQuery.ReplaceAllStringFunc(text, func(m string) string {
+		return logURL(m)
+	})
+}
+
+// reURLQuery matches an absolute http(s) URL up to the next delimiter.
+var reURLQuery = regexp.MustCompile(`https?://[^\s"'<>]+`)
 
 // urlHost returns the lower-cased hostname without a www. prefix, or "".
 func urlHost(raw string) string {
@@ -1288,6 +1310,14 @@ func (m *Manager) Resume(id string) error {
 		st := t.view.Status
 		t.mu.Unlock()
 		return fmt.Errorf("当前状态无法继续（%s）", st)
+	}
+	// A completed task whose file was moved away is reported as failed, but its
+	// stored URL has already been redacted — credentials are dropped once a
+	// download finishes. Retrying it would replay a link without its signature and
+	// fail for a reason that has nothing to do with the real problem.
+	if t.view.Error == fileGoneMessage && !strings.Contains(t.view.URL, "?") {
+		t.mu.Unlock()
+		return fmt.Errorf("原文件已不在保存位置，请重新添加下载链接")
 	}
 	t.mu.Unlock()
 
@@ -2591,6 +2621,34 @@ func (m *Manager) saveTasks() error {
 	return os.Rename(tmp, path)
 }
 
+// redactedForHistory returns the URL a finished task should keep on disk.
+//
+// A signed download link carries its own credential in the query string —
+// token=, sig=, X-Amz-Signature=, se/skt (Azure SAS) and friends — and a
+// completed task will never be fetched again, so keeping the credential serves
+// no purpose. It only leaks: tasks.json is a plain file in the user's profile,
+// routinely swept up by backup tools and sync clients. Host and path stay, which
+// is what the row needs to display and what the user needs to recognise it.
+func redactedForHistory(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return raw
+	}
+	if u.RawQuery == "" && u.Fragment == "" {
+		return raw
+	}
+	u.RawQuery = ""
+	u.Fragment = ""
+	return u.String()
+}
+
+// finishedForHistory reports whether a task will never be fetched again, which
+// is what makes redacting its URL safe. Cancelled tasks are deliberately not
+// included: Resume restarts them, so their URL is still needed.
+func finishedForHistory(s TaskStatus) bool {
+	return s == StatusCompleted
+}
+
 // persistedList snapshots every task into its on-disk form.
 func (m *Manager) persistedList() []persistedTask {
 	m.mu.Lock()
@@ -2604,13 +2662,21 @@ func (m *Manager) persistedList() []persistedTask {
 			continue
 		}
 		t.mu.Lock()
-		out = append(out, persistedTask{
-			TaskView:  t.view,
-			Manual:    t.manual,
-			Referer:   t.referer,
-			Cookie:    t.cookie,
-			UserAgent: t.userAgent,
-		})
+		p := persistedTask{
+			TaskView: t.view,
+			Manual:   t.manual,
+		}
+		// Credentials are only persisted while they can still be used. A finished
+		// download replayed no credentials, so storing them is pure exposure:
+		// cookie is plaintext, and the URL may carry a signed token.
+		if !finishedForHistory(t.view.Status) {
+			p.Referer = t.referer
+			p.Cookie = t.cookie
+			p.UserAgent = t.userAgent
+		} else {
+			p.TaskView.URL = redactedForHistory(p.TaskView.URL)
+		}
+		out = append(out, p)
 		t.mu.Unlock()
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Created > out[j].Created })
@@ -2707,7 +2773,7 @@ func (m *Manager) loadTasks() {
 		// so a flaky disk cannot mass-fail the library.
 		if gone[i] {
 			v.Status = StatusFailed
-			v.Error = "文件已被移动或删除"
+			v.Error = fileGoneMessage
 		}
 		m.tasks[v.ID] = &task{
 			view:      v,
@@ -2725,6 +2791,12 @@ func (m *Manager) loadTasks() {
 		}
 	}
 }
+
+// fileGoneMessage marks a task whose finished file has disappeared. Resume
+// refuses it: the stored URL has no credentials any more (they are dropped when a
+// download completes), so retrying would fail for a reason unrelated to the real
+// problem.
+const fileGoneMessage = "文件已被移动或删除"
 
 // parseTaskSeq extracts the sequence suffix from an id of the form
 // t<millis>-<seq> minted by Start.

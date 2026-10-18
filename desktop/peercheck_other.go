@@ -4,7 +4,7 @@ package main
 
 // Non-Windows builds (dev only; the app ships on Windows): the peer table
 // and Authenticode APIs do not exist, so verification is unavailable.
-func tcpOwnerPid(port uint16) (uint32, error) {
+func tcpOwnerPid(clientAddr string, serverPort uint16) (uint32, error) {
 	return 0, errPeerCheckUnsupported
 }
 

@@ -16,11 +16,32 @@ import (
 )
 
 // startAPI launches the loopback endpoint and waits for it to accept requests.
+// currentTestApp is the app instance whose local API the helpers are driving.
+// It exists so postJSON can sign requests without every call site passing the
+// app through; the package does not run tests in parallel.
+var currentTestApp *App
+
+// signForApp produces the auth header for a request to the app, using
+// the app instance the test is driving. It reads the key through the same path
+// production code does, so a broken key store shows up here too.
+func signForApp(t *testing.T, method, path string) string {
+	t.Helper()
+	if currentTestApp == nil {
+		return ""
+	}
+	key, err := currentTestApp.pairKeyForThisInstall()
+	if err != nil || key == "" {
+		return ""
+	}
+	return signedRequest(key, method, path, time.Now())
+}
+
 func startAPI(t *testing.T, app *App) string {
 	t.Helper()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
+	currentTestApp = app
 	app.startLocalAPI(ctx)
 
 	port := 0
@@ -32,6 +53,9 @@ func startAPI(t *testing.T, app *App) string {
 }
 
 // postJSON sends a request with the Origin a browser extension would use.
+// postJSON sends a POST the way the extension does: with an Origin and with the
+// pairing proof. Mutations require both now, because an Origin alone says "some
+// extension" and /add takes caller-supplied cookies and URLs.
 func postJSON(t *testing.T, url, origin, body string) *http.Response {
 	t.Helper()
 
@@ -42,6 +66,9 @@ func postJSON(t *testing.T, url, origin, body string) *http.Response {
 	req.Header.Set("Content-Type", "application/json")
 	if origin != "" {
 		req.Header.Set("Origin", origin)
+	}
+	if h := signForApp(t, req.Method, req.URL.Path); h != "" {
+		req.Header.Set(authHeader, h)
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -334,8 +361,14 @@ func TestLocalAPIPreflightAnswers(t *testing.T) {
 	if resp.StatusCode != http.StatusNoContent {
 		t.Errorf("status = %d, want 204", resp.StatusCode)
 	}
-	if got := resp.Header.Get("Access-Control-Allow-Origin"); got != "*" {
-		t.Errorf("Access-Control-Allow-Origin = %q, want *", got)
+	// The header echoes the caller's origin rather than "*". Only an extension
+	// origin reaches this point, so * was not exploitable, but echoing keeps a
+	// future guard regression from turning into a readable reply.
+	if got := resp.Header.Get("Access-Control-Allow-Origin"); got != "chrome-extension://abc" {
+		t.Errorf("Access-Control-Allow-Origin = %q, want the caller's origin", got)
+	}
+	if got := resp.Header.Get("Vary"); got != "Origin" {
+		t.Errorf("Vary = %q, want Origin", got)
 	}
 }
 

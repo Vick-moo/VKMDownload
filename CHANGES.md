@@ -69,6 +69,108 @@
 - 门槛：根 `go vet` / `go test ./... -count=1`（engine 44.9s、cmd/idm 1.4s）、`GOOS=linux go vet ./...`、desktop `go vet` / `go test`（34.6s）、desktop `-race`（38.1s）、desktop `GOOS=linux go vet`、前端 `tsc --noEmit` / `vitest run`（30/30）、扩展 `node --test`（32/32）全部通过。
 - 顺带修掉的测试脆弱点：`TestStartEmitsProgressImmediately` 原来用"立刻连接失败"的地址，两个任务可能在 StartAll 走到第三个之前就失败并释放槽位，使"启动了 3 个"变成合法结果；现改用慢速真实服务器，断言才有意义。
 
+### 54. 第 4 阶段：专项安全/隐私审计与修复（UNRELEASED）
+审计方式：4 个只读 subagent 分头做（S1 落盘与外发、S2 本地 API 攻击面、S3 扩展隐私、隐私文档对账），
+执行者只读复核后自己动手修。审计基线 `e1da072`，修复见 `desktop/privacy.go`、`desktop/pair.go`、
+`desktop/peercheck*.go`、`desktop/api.go`、`extension/background.js`、`PRIVACY.md`。
+新测试：`desktop/audit_hardening_test.go`、`desktop/audit_stage4_test.go`、`extension/test/pairing.test.js`。
+
+**先说最要紧的三条（都是审计实测/推理确认的真问题）：**
+
+1. **peer check 可用 `127.0.0.2` 绕过（高危）**：`tcpOwnerPid` 只匹配"本地地址 == 127.0.0.1"，而
+   Windows 的 loopback 是整个 `/8`。任何本机程序把源地址绑到 `127.0.0.2` 再连 18888，查表查不到
+   → 旧代码 fail-open → 直接放行，`/pair` 的密钥、`/add`、`/settings` 全部可用。现在：查表同时
+   匹配对端（本地端口 = 客户端端口、远端 = 本监听端口、两端都在 127/8），且**任何查不到/进程读不到
+   一律 fail-closed**。验收：`TestPeerCheckFailsClosedOnLookupError`、`TestPeerCheckAdmitsSignedBrowser`。
+2. **peer check 只认文件名 + 任意有效签名（高危）**：把系统签名的 `curl.exe` 复制成
+   `%TEMP%\chrome.exe` 即可通过（复制不改内容、签名仍有效）。现在额外要求映像位于浏览器安装根
+   （Program Files / Program Files (x86) / LOCALAPPDATA），拒绝时日志写明路径。验收：
+   `TestPeerCheckRejectsUnknownExe` 等 + 新增根目录检查。
+3. **`/add` 与 `/settings` POST 不校验调用者是不是"我们的扩展"（中高）**：Origin 只能说明"某个
+   扩展"，peer check 只能说明"某个浏览器"。于是任何已安装扩展都能往队列塞下载（可带任意 Cookie
+   访问内网 = SSRF）。现在这两个写操作要求 `X-VKMDownload-Auth: <unix>:HMAC(key, method\npath\nunix)`
+   （±2 分钟窗口、常量时间比较、绑定方法与路径），扩展侧同步实现签名。验收：
+   `TestSignedRequestIsBoundToMethodAndPath`、`TestStartUpdateRefusesWhileApplying` 同层、
+   扩展 `pairing.test.js`。
+
+**落盘数据（S1）：**
+
+4. `tasks.json` 曾把**每一次**下载的完整 URL 连同签名参数一起存下来（本机实测：329 条里 69 条带
+   query，含 `token`、`sig`、`jwt`、`X-Amz-Signature`、Azure SAS 的 `se/skt/skoid`）。现在
+   **已完成**的任务落盘时 URL 去掉查询串、Cookie/Referer/UA 直接清空；未完成（暂停/失败/取消）
+   仍保留，因为续传要原样重放。验收：`TestFinishedTaskLosesItsSignedURL`、
+   `TestUnfinishedTaskKeepsWhatItNeeds`。
+5. 日志曾是凭据仓库：本机实测 900 行里 173 行带签名 URL（历史版本写的）。现在 `debugLog` 在写入
+   前统一脱敏（所有 http(s) URL 只留 host+path，正则大小写不敏感），User-Agent 只记长度，更新握手
+   的文件名（含 token）不再写日志；启动时一次性清洗已有的 `tasks.json` 与日志。验收：
+   `TestDebugLogSanitisesEveryLine`、`TestLogsDoNotCarryUserAgentOrHandshakeToken`。
+6. 崩溃/损坏留下的副本也是同一个泄露面：`tasks.json.corrupt-*`、`tasks.json.*.tmp`、
+   `tasks.backup-*`。现在启动时一并清洗（带 cookie 的直接删除，其余去 URL 查询串），
+   `ClearDownloadHistory` 也会删掉它们。验收：`TestScrubRemovesCorruptAndTemporaryCopies`、
+   `TestClearHistoryRemovesCopiesToo`。
+7. "清除数据"以前有竞态：清空内存表后直接删文件，并发的 `saveTasks` 可能把旧记录写回来。现在整段
+   持 `saveMu`；并且**绝不删用户下载好的文件**。验收：`TestClearDownloadHistoryKeepsTheFiles`。
+8. 记录保留期：已完成/已取消/已失败超过 90 天的记录在启动时清理，未完成的不动。验收：
+   `TestTrimHistoryDropsOnlyOldFinishedTasks`。
+9. 文件被移走的任务以前会被标成 failed，用户点"继续"却因为 URL 已被脱敏而永远失败。现在这种任务
+   的 Resume 直接给出"原文件已不在保存位置，请重新添加下载链接"。验收：`TestFileGoneTaskRefusesResume`。
+
+**本机接口（S2）：**
+
+10. **无 Host 头校验（DNS rebinding 纵深缺失）**：现在只接受 `127.0.0.1` / `localhost` / `[::1]`
+    （可带端口），其他 Host 一律 403。验收：`TestHostHeaderMustNameThisMachine`、
+    `TestLoopbackHostAcceptsEverySpelling`。
+11. CORS 从 `*` 改为回显调用方 Origin + `Vary: Origin`（`*` 本身不可利用，但没有理由留着一个
+    "任何来源可读"的头）。
+12. `/ping` 只接受 GET/HEAD；`/add` 入口统一校验 scheme（以前 `file://`、`javascript:` 会被转发到
+    新建任务弹窗，等用户确认后才在 Start 里失败）。验收：`TestAddRejectsNonHTTPSchemes`。
+13. 配对证明的挑战规则收紧：空挑战不回 HMAC（否则空串的 HMAC 可被重放）、非 hex、超长一律拒绝。
+    验收：`TestPingAnswersOnlyAWellFormedChallenge`。
+
+**扩展（S3）：**
+
+14. **每次交接前重新证明应用身份**：以前 `apiBase` 缓存后不再验证，应用退出后任何程序占同一端口
+    就能直接收到 URL + Cookie。现在 `ensureApp()` 在每次 `/add` 前重新做一次 HMAC 挑战（多一次
+    本机往返，几毫秒）。配对失败也不再静默重配：已存密钥但证明不过时按"应用未运行"处理，弹窗提供
+    「重新配对」按钮——静默重配等于把密钥交给先占端口的程序。
+15. **先证明、再读 Cookie**：拦截与右键两条路径以前是先 `cookiesFor()` 组 payload、再找应用，现在
+    顺序反过来；本机/内网地址**不读 Cookie**（manifest 给了 `127.0.0.1` 权限，否则本地开发站的
+    会话 cookie 也会被读走）。
+16. **隐身模式不接管**（`item.incognito` / `tab.incognito` 直接返回）：否则隐身下载会出现在任务
+    列表、`tasks.json`、日志和通知里。
+17. 来源页只发"协议 + 主机 + 路径"，去掉查询串（搜索词、文档 ID 不再进任务记录）。
+18. 通知与提示统一脱敏（`sanitizeText` 以前是死代码）：URL 只留 host+path、去控制字符、超长截断；
+    `/add` 请求加 `redirect: "error"`（带 Cookie 的 body 不该被重定向到别处）。
+19. 不接管其他扩展发起的下载（`item.byExtensionId`）。
+
+**隐私文档（对账结论：不是"承诺了没做到"，而是"只写了扩展"）：**
+
+20. 仓库里唯一一份隐私声明是 `extension/PRIVACY.md`，只覆盖扩展；桌面端把 Cookie/URL 写盘、
+    启动访问 GitHub、删除能力有限，文档一句没提。现在新增产品级 `PRIVACY.md`（根目录），逐项写明：
+    每个文件存什么、为什么、何时清；外发只有"下载本身 + 启动查更新"（不含安装 ID/机器标识/任务
+    数据）；配对密钥是什么；怎么清除；以及 5 条**明确标注的取舍**（未完成任务 Cookie 明文、sidecar
+    含签名链接、日志不脱敏文件名与路径、更新检查无开关、同步盘会带走这些文件）。扩展那份补上配对
+    密钥、`pendingCancel`、HttpOnly/父域 Cookie、沉浸式例外，并在顶部指向产品级文档；两份 README
+    都加了链接。
+21. 更新检查的 User-Agent 从 Go 默认的 `Go-http-client/1.1` 改成 `VKMDownload/<版本>`，防火墙日志
+    里能看出是谁在访问。README 里"需要登录的网盘链接无法下载"已过时（扩展会带 Cookie），一并更正。
+
+**门槛**：根 `go vet` / `go test ./... -count=1`（engine 46.4s、cmd/idm 1.4s）、`internal/engine`
+`-race`（65.5s）、`GOOS=linux go vet ./...`、desktop `go vet` / `go test`（35.1s）、desktop `-race`
+（39.2s）、desktop `GOOS=linux go vet`、前端 `tsc --noEmit` / `vitest`（30/30）、扩展 `node --test`
+（32/32）全部通过。
+
+**明确未验证（不猜测）**：浏览器在 no-cors GET 时是否发送 Origin；`cookies.getAll` 在无站点权限时
+返回空还是抛错；`storage.session` 在崩溃恢复场景是否严格清空；Chrome PNA 对删除 `127.0.0.1`
+host 权限的影响；`prepare`/`Compose` 类命令在真机的实际行为；更新请求的实际网络字节（未抓包，
+代码层面确认只发 `Accept` 与 `User-Agent`）。
+
+**残余风险（已记录，未修）**：配对没有 native messaging 那种真正的信任锚点——如果恶意程序在用户
+**首次**配对的那一刻就占住端口，它仍可能被当成应用。修法需要加 native messaging host（注册表 +
+host manifest）或 TLS 证书固定，属于架构改动，需要你拍板；当前缓解是"配对一次后不再静默重配"、
+"每次交接重新证明"、"`/pair` 强制 peer check"。另外未完成任务仍明文存 Cookie（续传需要），
+如需加密需要引入 DPAPI 与密钥管理。
+
 ## 2026-10-18 — 0.2.7
 
 ### 48. 稳定性收尾批：测试基建、重启语义、并发防护、更新说明与大小交接（UNRELEASED）

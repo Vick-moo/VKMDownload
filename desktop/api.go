@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -130,13 +131,47 @@ func (a *App) apiGuard(next http.Handler) http.Handler {
 			return
 		}
 
-		w.Header().Set("Access-Control-Allow-Origin", "*")
+		// The Host header has to name this machine. Binding to 127.0.0.1 stops
+		// anything off-box from connecting, but it does not stop DNS rebinding:
+		// a page on http://rebind.evil/ whose domain resolves to 127.0.0.1 sends
+		// requests that reach this listener and carry that name in Host. The
+		// Origin check rejects its Origin, but a Host check is the layer that
+		// makes the whole class impossible rather than merely blocked.
+		if !loopbackHost(r.Host) {
+			writeJSON(w, http.StatusForbidden, map[string]string{
+				"error": "unexpected Host header",
+			})
+			return
+		}
+
+		// Echo the caller's origin instead of "*". Only an extension origin gets
+		// this far, so * was not exploitable â€” but a wildcard would let a future
+		// regression that admits some page read the reply, and it is exactly the
+		// kind of header nobody re-checks.
+		if origin != "" {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Vary", "Origin")
+		}
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return
+		}
+
+		// Mutations must prove they hold the pairing key. The Origin check says
+		// "some browser extension" and the peer check says "a real browser", but
+		// neither says "our extension": any installed extension passes both, and
+		// /add enqueues a download with caller-supplied cookies and URL. The proof
+		// makes the endpoint useless to anything that merely looks like a browser.
+		if r.Method == http.MethodPost || r.URL.Path == "/add" {
+			if !a.requestAuthentic(r) {
+				writeJSON(w, http.StatusForbidden, map[string]string{
+					"error": "request is not authenticated by the VKMDownload extension",
+				})
+				return
+			}
 		}
 		// Peer verification likewise reads its switch live, so toggling it
 		// applies to the very next download with no restart.
@@ -155,6 +190,27 @@ func (a *App) apiGuard(next http.Handler) http.Handler {
 	})
 }
 
+// loopbackHost reports whether a Host header names this machine.
+//
+// The port is irrelevant (the listener only ever binds a loopback address), so
+// only the host part is compared. An empty Host is refused: HTTP/1.1 requires
+// it, and its absence means something hand-rolled is talking to the endpoint.
+func loopbackHost(hostport string) bool {
+	if hostport == "" {
+		return false
+	}
+	host := hostport
+	if h, _, err := net.SplitHostPort(hostport); err == nil {
+		host = h
+	}
+	host = strings.TrimSuffix(strings.TrimPrefix(host, "["), "]")
+	switch strings.ToLower(host) {
+	case "127.0.0.1", "localhost", "::1":
+		return true
+	}
+	return false
+}
+
 // exeSuffix names the rejected caller for the user, so a legitimate new
 // browser only needs its exe name reported once to earn an allowlist entry.
 func exeSuffix(exe string) string {
@@ -171,6 +227,12 @@ func exeSuffix(exe string) string {
 // The extension therefore requires the proof header, which only a holder of the
 // per-install key can produce for the nonce it just generated.
 func (a *App) apiPing(w http.ResponseWriter, r *http.Request) {
+	// Only the two read-only methods. The handler has no side effects, but a
+	// service that answers PUT with 200 invites a caller to believe it can.
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
 	if proof := a.answerChallenge(r.URL.Query().Get("challenge")); proof != "" {
 		w.Header().Set(proofHeader, proof)
 	}
@@ -289,6 +351,15 @@ func (a *App) apiAdd(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "url is required"})
 		return
 	}
+	// Same rule as Start, applied at the door. With AskLocation on, the URL is
+	// forwarded to the new-task dialog before Start ever sees it — so without
+	// this a file:// or javascript: string reached the dialog and the user was
+	// asked to place a download that could not exist.
+	if u, uerr := url.Parse(strings.TrimSpace(req.URL)); uerr != nil ||
+		(u.Scheme != "http" && u.Scheme != "https") {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "only http and https URLs are accepted"})
+		return
+	}
 	// Field caps: URL and Referer are attacker-influenced strings that would
 	// otherwise live unbounded in task memory, the index file and the log;
 	// Filename is capped in runes (255, the common filesystem limit) because
@@ -326,8 +397,11 @@ func (a *App) apiAdd(w http.ResponseWriter, r *http.Request) {
 		fn := sanitizeSuggestedName(req.Filename)
 		// The URL is logged desensitised (host+path): query strings carry
 		// session tokens and single-use signatures that must not land on disk.
-		a.debugLog("extension asked %s (origin=%q ua=%q cookie=%dB)",
-			logURL(req.URL), r.Header.Get("Origin"), r.Header.Get("User-Agent"), len(req.Cookie))
+		// The user agent is reduced to a length: it is a fingerprint that says
+		// which browser, build and OS the user is on, and this log is the file a
+		// user is asked to attach to a bug report.
+		a.debugLog("extension asked %s (origin=%q ua=%dB cookie=%dB)",
+			logURL(req.URL), r.Header.Get("Origin"), len(r.Header.Get("User-Agent")), len(req.Cookie))
 		a.emit("location:ask", map[string]string{
 			"url":       req.URL,
 			"filename":  fn,
@@ -375,8 +449,8 @@ func (a *App) apiAdd(w http.ResponseWriter, r *http.Request) {
 	// with no extension installed in any browser, and nothing in the log could
 	// say where they came from — which made it impossible to tell a bug from
 	// something else on the machine calling the endpoint.
-	a.debugLog("extension added %s (origin=%q ua=%q cookie=%dB)",
-		logURL(req.URL), r.Header.Get("Origin"), r.Header.Get("User-Agent"), len(req.Cookie))
+	a.debugLog("extension added %s (origin=%q ua=%dB cookie=%dB)",
+		logURL(req.URL), r.Header.Get("Origin"), len(r.Header.Get("User-Agent")), len(req.Cookie))
 	writeJSON(w, http.StatusOK, map[string]any{"id": task.ID, "name": task.Name})
 }
 

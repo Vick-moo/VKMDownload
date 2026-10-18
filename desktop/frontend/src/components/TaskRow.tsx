@@ -9,7 +9,7 @@ import {
   formatWhen,
   ellipsizeMiddle,
 } from "../format";
-import { STATUS_LABEL, STATUS_TONE, urlTail } from "../types";
+import { STATUS_LABEL, STATUS_TONE, displayURL, urlTail } from "../types";
 import type { TaskStatus, TaskView } from "../types";
 import { ConfirmDialog } from "./ConfirmDialog";
 import {
@@ -118,8 +118,8 @@ export const TaskRow = memo(function TaskRow({
         ) : task.status === "downloading" && task.notice ? (
           <span className="task__url">{task.notice}</span>
         ) : (
-          <span className="task__url" title={task.url}>
-            {task.url}
+          <span className="task__url" title={displayURL(task.url)}>
+            {displayURL(task.url)}
           </span>
         )}
       </div>

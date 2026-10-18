@@ -163,7 +163,9 @@ async function loadPairKey() {
 }
 
 async function savePairKey(key) {
-  pairKey = key;
+  // null forgets the key (used by 重新配对); a real key replaces it.
+  pairKey = key || null;
+  if (!key) return;
   try {
     if (typeof chrome !== "undefined" && chrome.storage && chrome.storage.local) {
       await chrome.storage.local.set({ [KEY_STORAGE]: key });
@@ -224,6 +226,29 @@ async function provePort(base, key) {
   } catch {
     return false;
   }
+}
+
+const AUTH_HEADER = "X-VKMDownload-Auth";
+
+/**
+ * Signs a mutating request: HMAC(key, method + "\n" + path + "\n" + unix).
+ *
+ * The peer check proves the caller is a real browser, and the pairing proof
+ * proves the responder is the real app. Neither says anything about which
+ * extension is calling: any installed extension is also "a browser". Since /add
+ * enqueues a download with caller-supplied cookies and URL, the app demands this
+ * signature, and only a holder of the pairing key can produce it.
+ *
+ * A timestamp inside the signature gives the app a two-minute window, which is
+ * what keeps the endpoint stateless. Returns "" when there is no key, in which
+ * case the caller must not send the request at all.
+ */
+async function signRequest(method, path) {
+  const key = await loadPairKey();
+  if (!key) return "";
+  const stamp = String(Math.floor(Date.now() / 1000));
+  const mac = await hmacHex(key, `${method}\n${path}\n${stamp}`);
+  return `${stamp}:${mac}`;
 }
 
 /**
@@ -289,15 +314,30 @@ async function findApp() {
   if (candidates.length === 0) return null;
 
   let key = await loadPairKey();
-  for (const base of candidates) {
-    if (!key) {
+  if (!key) {
+    // First pairing only. Asking now is safe *because* nothing is trusted yet,
+    // and the app answers /pair only to a signed browser process.
+    //
+    // Once a key is stored it is never silently replaced. The tempting "if the
+    // old key fails, just ask again" would hand the whole scheme to an attacker:
+    // any program that binds the port first could answer /pair with its own key,
+    // and the extension would happily re-pin to it. A lost key (the app was
+    // reinstalled, or pair.key was deleted) therefore looks exactly like "the app
+    // is not running" until the user presses 重新配对 in the popup.
+    for (const base of candidates) {
       const got = await pairWith(base);
-      if (got) {
+      if (!got) continue;
+      if (await provePort(base, got)) {
         await savePairKey(got);
-        key = got;
+        apiBase = base;
+        return apiBase;
       }
     }
-    if (key && (await provePort(base, key))) {
+    return null;
+  }
+
+  for (const base of candidates) {
+    if (await provePort(base, key)) {
       apiBase = base;
       return apiBase;
     }
@@ -308,18 +348,49 @@ async function findApp() {
   return null;
 }
 
+/**
+ * Returns a base URL that has just proven it holds the key.
+ *
+ * The cached one is not trusted as-is. The attack is cheap and concrete: the app
+ * quits, any program on the machine binds the port it used, and a cached base
+ * would receive the next download's URL and cookies without ever seeing a
+ * challenge. Re-proving costs one loopback round trip per handover — a few
+ * milliseconds — which is the right price for not handing a credential to
+ * whatever got to the port first.
+ */
+async function ensureApp() {
+  const cached = apiBase;
+  if (cached) {
+    const key = await loadPairKey();
+    if (key && (await provePort(cached, key))) return cached;
+    // It stopped proving itself: forget the port, then rediscover.
+    apiBase = null;
+  }
+  return findApp();
+}
+
 /** Hands one download to the app. */
 async function handOver(payload) {
-  const base = await findApp();
+  const base = await ensureApp();
   if (!base) {
     return { ok: false, error: "VKMDownload 没有运行" };
+  }
+
+  // Signed before the body is built, so a caller without the key never sends
+  // the URL or the cookie at all.
+  const auth = await signRequest("POST", "/add");
+  if (!auth) {
+    return { ok: false, error: "还没有和 VKMDownload 完成配对" };
   }
 
   try {
     const response = await fetch(`${base}/add`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", [AUTH_HEADER]: auth },
       body: JSON.stringify(payload),
+      // A redirect would carry a body containing cookies and a signed URL
+      // somewhere else entirely. The app never redirects.
+      redirect: "error",
     });
     const body = await response.json().catch(() => ({}));
 
@@ -375,12 +446,18 @@ function sanitizeText(raw, max) {
 
 /** Tells the user what happened, since neither path has a UI of its own. */
 function report(result, fallbackName) {
+  // Everything shown here is built from server- and page-supplied strings, and a
+  // notification is the most public place the app has: it appears on the lock
+  // screen and stays in the notification centre. sanitizeText strips URLs down
+  // to host and path and drops control characters.
+  const name = sanitizeText(result.name || fallbackName || "", 80);
+  const err = sanitizeText(result.error || "", 120);
   if (result.pending) {
     chrome.notifications.create({
       type: "basic",
       iconUrl: "icons/icon128.png",
       title: "已转到应用等确认",
-      message: result.name || fallbackName || "已转到应用，等你在弹窗里确认位置",
+      message: name || "已转到应用，等你在弹窗里确认位置",
       priority: 0,
     });
     return;
@@ -390,7 +467,7 @@ function report(result, fallbackName) {
       type: "basic",
       iconUrl: "icons/icon128.png",
       title: "已在下载列表中",
-      message: result.name || fallbackName || "该链接已在列表中，无需重复添加",
+      message: name || "该链接已在列表中，无需重复添加",
       priority: 0,
     });
     return;
@@ -401,10 +478,10 @@ function report(result, fallbackName) {
     iconUrl: "icons/icon128.png",
     title: succeeded ? "已交给 VKMDownload" : "VKMDownload 没有响应",
     message: succeeded
-      ? fallbackName || result.name || "已加入下载队列"
+      ? name || "已加入下载队列"
       : result.refused
-        ? result.error
-        : `${result.error} · 请先启动 VKMDownload`,
+        ? err
+        : `${err} · 请先启动 VKMDownload`,
     priority: succeeded ? 0 : 2,
   });
 }
@@ -419,6 +496,11 @@ function report(result, fallbackName) {
  * and the handover still proceeds without them.
  */
 async function cookiesFor(raw) {
+  // Never for a loopback or private address. The manifest grants
+  // http://127.0.0.1/* so the extension can reach the app, which incidentally
+  // makes a local development server's session cookies readable — and no
+  // download on a private address needs the user's login.
+  if (isPrivateHost(hostOf(raw))) return "";
   try {
     const list = await chrome.cookies.getAll({ url: raw });
     if (!Array.isArray(list) || list.length === 0) return "";
@@ -538,6 +620,42 @@ async function drainPendingCancels() {
 
 if (hasExtensionApis()) {
   void drainPendingCancels();
+}
+
+/** True for loopback, link-local and RFC1918 hosts. */
+function isPrivateHost(host) {
+  if (!host) return false;
+  if (host === "localhost" || host.endsWith(".localhost")) return true;
+  const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+  if (v4) {
+    const a = Number(v4[1]);
+    const b = Number(v4[2]);
+    if (a === 127 || a === 10) return true;
+    if (a === 192 && b === 168) return true;
+    if (a === 172 && b >= 16 && b <= 31) return true;
+    if (a === 169 && b === 254) return true;
+    return false;
+  }
+  if (host === "::1" || host.startsWith("fc") || host.startsWith("fd") || host.startsWith("fe80")) return true;
+  return false;
+}
+
+/**
+ * The part of a page URL that is safe to replay as a Referer.
+ *
+ * A full page URL carries the user's search terms and document ids in its query
+ * string, and it ends up in the app's task record. Origin plus path is what a
+ * host needs to see the request as same-site; the query is not.
+ */
+function refererFor(raw) {
+  if (!raw) return "";
+  try {
+    const u = new URL(raw);
+    if (u.protocol !== "http:" && u.protocol !== "https:") return "";
+    return `${u.origin}${u.pathname}`;
+  } catch {
+    return "";
+  }
 }
 
 /** The last path segment of a URL, decoded, for display only. */
@@ -663,6 +781,10 @@ if (hasExtensionApis()) {
     // The worker may have just restarted; reload the self-started ids first
     // so a fallback download is not mistaken for a new user download.
     await loadOwn();
+    // An incognito download must not be handed over: the app keeps a task record,
+    // a log line and a notification, and none of them belong to a session the
+    // user asked to leave no trace of.
+    if (item.incognito) return;
     if (!shouldTake(item)) return;
 
     // Ask the app what it wants. When it is not running this returns null, and
@@ -705,6 +827,17 @@ if (hasExtensionApis()) {
       // The item may already be gone; fall back to what onCreated saw.
     }
 
+    // Prove the app before reading the user's cookies, not after. The old order
+    // read them into a payload first and only then looked for an app, so a
+    // download against a port that never proved itself still caused the
+    // cookies to be read — and, with a stale cached port, sent.
+    const base = await ensureApp();
+    if (!base) {
+      // Nothing to hand over to. The browser's own download continues, which is
+      // the only safe outcome: cancelling it here would lose the file.
+      return;
+    }
+
     // Hand over FIRST, cancel only once the app has clearly accepted
     // (ok, duplicate, or pending-awaiting-confirmation): cancelling first and
     // then failing would lose the download entirely. Pending is handed over,
@@ -713,7 +846,7 @@ if (hasExtensionApis()) {
       url,
       filename,
       size,
-      referer: item.referrer || "",
+      referer: refererFor(item.referrer),
       cookie: await cookiesFor(url),
       userAgent: navigator.userAgent || "",
     });
@@ -774,6 +907,7 @@ if (
 ) {
   chrome.contextMenus.onClicked.addListener(async (info, tab) => {
     if (info.menuItemId !== "vkm-add") return;
+    if (tab && tab.incognito) return;
 
     const url = pickUrl(info.linkUrl || info.srcUrl || info.selectionText || "");
     if (!/^https?:/i.test(url)) {
@@ -781,10 +915,17 @@ if (
       return;
     }
 
+    // Same order as the interception path: prove first, read cookies second.
+    const base = await ensureApp();
+    if (!base) {
+      report({ ok: false, error: "VKMDownload 没有运行" }, nameFromUrl(url));
+      return;
+    }
+
     const result = await handOver({
       url,
       filename: nameFromUrl(url),
-      referer: tab && tab.url ? tab.url : "",
+      referer: refererFor(tab && tab.url ? tab.url : ""),
       cookie: await cookiesFor(url),
       userAgent: navigator.userAgent || "",
     });
@@ -826,6 +967,26 @@ if (
       return true;
     }
 
+    if (message === "forgetPairing") {
+      // The only way back from a lost key: the user asks, having just seen the
+      // popup say the app is missing. Silent re-pairing is what the pairing
+      // design exists to prevent.
+      (async () => {
+        await savePairKey(null);
+        try {
+          if (globalThis.chrome && chrome.storage && chrome.storage.local) {
+            await chrome.storage.local.remove(KEY_STORAGE);
+          }
+        } catch {
+          // In-memory clear still applies for this worker.
+        }
+        apiBase = null;
+        policyCache = { at: 0, value: null };
+        sendResponse({ cleared: true });
+      })();
+      return true;
+    }
+
     if (message === "toggle") {
       (async () => {
         const base = await findApp();
@@ -837,10 +998,16 @@ if (
         const current = await getPolicy(true);
         const enabled = !(current && current.enabled);
 
+        const auth = await signRequest("POST", "/settings");
+        if (!auth) {
+          sendResponse({ refused: true, error: "扩展还没有和 VKMDownload 配对" });
+          return;
+        }
+
         try {
           const response = await fetch(`${base}/settings`, {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: { "Content-Type": "application/json", [AUTH_HEADER]: auth },
             body: JSON.stringify({ enabled }),
           });
           if (response.status === 403) {

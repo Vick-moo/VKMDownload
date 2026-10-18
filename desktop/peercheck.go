@@ -63,6 +63,10 @@ var (
 	tcpOwnerOfPort = tcpOwnerPid
 	processImageOf = processImagePath
 	verifyTrustOf  = verifyFileTrust
+	// browserRootCheck reports whether an image lives in an install root. It is
+	// injectable for the same reason as the three above: a test cannot place a
+	// file inside Program Files, and the rule itself is asserted directly.
+	browserRootCheck = browserInstallRootOK
 )
 
 // peerCheckRequired reports whether caller verification is enforced.
@@ -79,29 +83,56 @@ func (a *App) peerCheckRequired() bool {
 // handler, so these mean a transient lookup race rather than an attacker.
 // A known non-browser image or a bad signature fails CLOSED.
 func (a *App) checkPeerProcess(r *http.Request) (bool, string) {
-	_, portStr, err := net.SplitHostPort(r.RemoteAddr)
+	host, portStr, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		a.debugLog("peer check: bad remote addr %q: %v", r.RemoteAddr, err)
-		return true, ""
+		return false, ""
+	}
+	// The peer must be on loopback. A request arriving from anywhere else means
+	// the listener is not the only thing exposed, and treating it as a browser
+	// would be exactly backwards.
+	if ip := net.ParseIP(host); ip == nil || !ip.IsLoopback() {
+		a.debugLog("peer check: peer %q is not loopback", host)
+		return false, ""
 	}
 	port, err := strconv.Atoi(portStr)
 	if err != nil || port <= 0 || port > 65535 {
 		a.debugLog("peer check: bad remote port %q", r.RemoteAddr)
-		return true, ""
+		return false, ""
 	}
-	pid, err := tcpOwnerOfPort(uint16(port))
+	// The server port comes from the listener rather than the request, so a
+	// caller cannot influence which socket is looked up.
+	pid, err := tcpOwnerOfPort(r.RemoteAddr, uint16(a.apiPort()))
 	if err != nil {
-		a.debugLog("peer check: owner lookup failed for %s: %v", r.RemoteAddr, err)
-		return true, ""
+		// Fail CLOSED. This used to fail open, on the argument that a lookup race
+		// meant a vanishing process rather than an attacker — but it also meant a
+		// client that bound its source address to anything other than 127.0.0.1
+		// (loopback is a whole /8 on Windows) was never found, and was therefore
+		// waved through. A caller we cannot identify is a caller we do not trust;
+		// the peer check is a security control, not a convenience.
+		a.debugLog("peer check: cannot identify %s: %v", r.RemoteAddr, err)
+		return false, ""
 	}
 	exe, err := processImageOf(pid)
 	if err != nil || exe == "" {
-		a.debugLog("peer check: pid %d has no image: %v", pid, err)
-		return true, ""
+		// Fail closed for the same reason as the lookup above: an image we
+		// cannot name is not a browser we can vouch for.
+		a.debugLog("peer check: pid %d has no readable image: %v", pid, err)
+		return false, ""
 	}
 	base := strings.ToLower(filepath.Base(exe))
 	if !allowedBrowserExes[base] {
 		a.debugLog("peer check: rejected non-browser caller %s (pid %d)", exe, pid)
+		return false, exe
+	}
+	// A name is not an identity. Copying any validly signed Microsoft binary
+	// (curl.exe is the obvious one) to %TEMP%\chrome.exe satisfies "known name"
+	// and "valid signature" while being neither a browser nor installed in a
+	// browser's directory — the copy keeps its signature, so a signature check
+	// alone cannot tell them apart. Requiring the image to live in an install
+	// root is what makes that copy fail: writing there needs administrator.
+	if !browserRootCheck(exe) {
+		a.debugLog("peer check: rejected %s: not inside a browser install directory", exe)
 		return false, exe
 	}
 	// One Stat shared by the cache lookup and the store below: if the file
@@ -122,6 +153,29 @@ func (a *App) checkPeerProcess(r *http.Request) (bool, string) {
 		return false, exe
 	}
 	return true, ""
+}
+
+// browserInstallRootOK reports whether exe lives under a directory that only an
+// administrator (or the user, for a per-user browser install) can write to.
+//
+// The list is deliberately about *roots*, not about any one vendor's layout:
+// Chrome, Edge, Brave, Opera and Vivaldi all install under Program Files, and
+// per-user installs live under LOCALAPPDATA. A browser the user keeps on another
+// drive is refused — the refusal names the path, so it can be reported and added
+// here rather than silently weakening the check.
+func browserInstallRootOK(exe string) bool {
+	clean := strings.ToLower(filepath.Clean(exe))
+	for _, env := range []string{"ProgramFiles", "ProgramFiles(x86)", "ProgramW6432", "LOCALAPPDATA"} {
+		root := os.Getenv(env)
+		if root == "" {
+			continue
+		}
+		root = strings.ToLower(filepath.Clean(root))
+		if strings.HasPrefix(clean, root+string(os.PathSeparator)) {
+			return true
+		}
+	}
+	return false
 }
 
 // statOf stats once so verification and caching share the same file identity:
@@ -172,6 +226,13 @@ const maxTrustEntries = 64
 
 // cacheKey normalises for Windows' case-insensitive filesystem so
 // C:\X\Chrome.exe and c:\x\chrome.exe share one verdict.
+//
+// The verdict is keyed on the path plus the file's mtime and size, which a
+// determined local attacker can forge (overwrite the image, then restore the
+// timestamp and pad to the same length). That is accepted: the attacker already
+// needs write access to a browser's install directory, which is administrator.
+// The alternative — hashing a 200 MB browser binary on every request — is not
+// worth it for a threat that has already won.
 func cacheKey(exe string) string {
 	return strings.ToLower(filepath.Clean(exe))
 }

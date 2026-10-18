@@ -153,6 +153,7 @@ func (a *App) ReleaseNotes(version string) (string, error) {
 		return "", err
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("User-Agent", "VKMDownload/"+appVersion)
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -223,6 +224,10 @@ func fetchLatestRelease(ctx context.Context) (releaseAsset, error) {
 		return out, err
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
+	// An explicit user agent instead of Go's default. A firewall log showing
+	// "Go-http-client/1.1" reaching GitHub looks like something hiding; this says
+	// which program it is and which build.
+	req.Header.Set("User-Agent", "VKMDownload/"+appVersion)
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
