@@ -23,6 +23,20 @@
 - 命令行：默认 chunk/reserve 改为 0 交给引擎 `Normalize`（以前硬编码 128K/512K，把引擎已否定的旧值打了回去，高延迟源上慢好几倍）；重复 `-H` 改 `Header.Add`（以前用 `"; "` 拼成一个值，两个 Cookie 拼成一条畸形 Cookie，其它头第二个值直接消失）；新增 `-limit`（KiB/s，所有连接共享同一个 Limiter）；文件大小未知时显示 "unknown (server did not say)" 而不是 "-1 B"；进度条以前拿新行长度和旧宽度比，永远不会补空格，旧行尾巴擦不掉；bench 的 `MinSizeForSegments` 改 1。验收：`cmd/idm/main_test.go` 15 个用例（参数重排、布尔 flag 不吃 URL、`--` 后以 `-` 开头的 URL、重复 `-H`、`-limit`、引擎默认值、`humanBytes` 边界、`roundDuration`、进度打印 `-race`），该包此前零测试。
 - 门槛：根 `go vet` / `go test ./... -count=1`（engine 44.2s、cmd/idm 1.3s）、`internal/engine` `-race`（65.4s）、`GOOS=linux go vet ./...`、desktop `go vet` / `go test`（31.8s）、desktop `GOOS=linux go vet`、前端 `tsc --noEmit` / `vitest run`（30/30）、扩展 `node --test`（27/27）全部通过。
 
+### 51. 审计 B 批：下载列表生命周期（UNRELEASED）
+- P1-4 快速"暂停→继续"把任务写成"已取消"：`startRun` 以前先起 goroutine、由 `run` 内部才把任务代数 +1，于是"已发出启动"到"真的跑起来"之间那段窗口里，任务身上还挂着上一轮的代数。用户在这段窗口里连续点暂停+继续，旧那一轮的退出分支看到任务"正在下载"（其实是新一轮刚写的状态），就把旧的意图盖上去——新一轮显示成"已取消"，接着 Cancel 的清理还会删掉刚起步那一轮的半成品。现在代数在 `startRun` 持锁的提交点自增并传给 `run`，退出分支必须 `t.generation == gen` 才能改状态。验收：`TestPauseResumeRaceKeepsStatusHonest`（60 轮背靠背暂停/继续，状态一次都没被旧轮改坏）、以及 `-race` 全套。
+- 顺带修掉同一条链上的竞态：任务在"正在启动"或"最后几字节落地"时被用户删除，旧代码照样把进度、失败或完成写回那条已经不在列表里的记录，屏幕上的行会被"复活"。现在 `taskStillListed` 统一判定，进度回调、失败分支、整理分支、完成分支四处都过这道闸。验收：并发删除的既有用例 + `-race`。
+- P1-5 设置页与后台的 DATA RACE：`normalizeOrganizeGroups` 用 `groups[:0]` 复用调用方的数组原地改写，而 `Config()` 返回的结构体虽然按值拷贝，`OrganizeGroups` 这个切片却仍指向同一块底层数组。于是设置页改一项就等于绕过锁改真实配置——审计用 `-race` 实锤。现在规范化总是新建切片、`Exts` 也拷贝，`Config()` 与 `SetConfig()` 都走 `clone()` 深拷贝。另外 `SetConfig` 落盘失败会回滚内存里的值，不再出现"界面显示已改、磁盘没改"的不一致。验收：`TestConfigAliasCannotMutateLiveSettings`、`TestConfigConcurrentSetAndReadIsRaceFree`（并发 200 轮读写，`-race` 无报警）。
+- P2-8 "重试中"提示被写进 tasks.json：恢复等待期间那条提示以前会在 Pause 时被一起存盘，重启后这条早就不会重试的任务照样闪"N 秒后自动重试"。现在 Pause、Cancel、`loadTasks`（重启恢复）三处都清空提示，停止分支补上了落盘。反过来，提示本身现在会在进入等待时就落盘——等待可能长达一分钟，中途崩溃应该回来看到"当时在等重试"，而不是一条假装还在下载的记录。验收：`TestRecoveryNoticeNeverPersistedForStoppedTask`（进入等待→暂停→读 tasks.json，无 notice；再模拟重启，首帧也无旧 notice）。
+- P2-9 失败提示把带令牌的完整链接写进文件并显示：`humanError` 缺 429/408/500/502/503/504 分支，落到兜底直接返回原始错误，而引擎错误里包着请求 URL——带签名的下载链接 query 就是凭据，于是 `token=...` 同时进了 tasks.json 和屏幕。现在先整段脱敏（`redactURIs` 把每个 http(s) URL 换成"主机+路径"），再按状态码映射，兜底也绝不回原文。验收：`TestHumanErrorNeverLeaksTokens`（六种含 `token=SUPERSECRET123` 的错误形态，输出里都搜不到）。
+- P2-10 全局计划被无关任务干扰：全局计划以前用**整张表**的 paused/failed/canceled 计数判断"用户是否介入"，于是计划跑到一半新加一个无关的暂停任务，计划的完成提示音和关机就被悄悄跳过；而"选中任务计划"只看自己的任务，同一个动作在两个按钮下结果不一样。现在两个 watcher 共用 `planCoverage`（计划任务集合）+ `scanPlan` 一条规则：集合内任务暂停/失败/取消=介入，完成=干净结束，运行/排队=继续等；计划期间新启动的任务会被纳入集合，避免关机切到正在下的文件。验收：`TestPlanIntervenedSemantics`、`TestStartPlanRunsToCompletion`、`TestStartPlanWithFullSlotsStillRuns`、`TestStartPlanSelectedPropagatesFreeze`。
+- P2-11 迟到的进度把失败行"复活"：done/failed 事件直发，进度走队列，于是失败后排队里的旧进度会晚一步到达，把行重新画成"下载中"。前端只有弱守卫，现在后端泵里就丢掉已终结任务（完成/失败/取消/已删除）的进度帧。验收：`TestLateProgressCannotReviveFailedRow`（失败任务的排队帧被丢弃；同一帧对运行中任务仍会投递，证明测的是泵而不是"什么都不发"）。
+- 配置损坏不再静默丢弃：`loadConfig` 以前解析失败直接返回默认值，用户的设置凭空消失且毫无痕迹。现在把坏文件改名留证（`config.json.corrupt-<时间戳>`，与 tasks.json 的做法一致）并写日志。验收：既有配置用例 + 启动路径。
+- `saveConfig` 补 `Sync()`：与 tasks.json 一致，崩溃不会留下"文件名正确、内容没落盘"的设置文件。
+- 其他 manager P3：panic 分支读任务 ID 改为过锁（原来唯一一处裸读 view）；`req.Conns` 在 API 层钳到 [1,64]（与配置上限同一常量 `maxConns`）；`wails.Run` 失败同时写进应用日志（以前只有 `println`，用户找不到）；tasks.json 临时名带 pid，两个实例共用数据目录不再互相截断；引擎的"进度记录写入失败"经 `Request.Logger` 进应用日志。
+- 门槛：根 `go vet` / `go test ./... -count=1`（engine 44.9s、cmd/idm 1.3s）、`internal/engine` `-race`（66.8s）、`GOOS=linux go vet ./...`、desktop `go vet` / `go test`（34.3s）、desktop `-race`（37.5s）、desktop `GOOS=linux go vet`、前端 `tsc --noEmit` / `vitest run`（30/30）、扩展 `node --test`（27/27）全部通过。
+- 审计探针固化：`%TEMP%\opencode` 下三个手工 overlay 探针（config 竞态、Notice 落盘、Pause/Resume 竞态）已改写成 `desktop/audit_b_test.go` 里的正式用例，不再依赖临时目录里的文件。
+
 ## 2026-10-18 — 0.2.7
 
 ### 48. 稳定性收尾批：测试基建、重启语义、并发防护、更新说明与大小交接（UNRELEASED）

@@ -189,9 +189,20 @@ func TestLoadTasksDedupesIDsAndReseedsSeq(t *testing.T) {
 // settle a plan exactly like canceled does — the watcher finishes, and the
 // plan counts as intervened so sound/shutdown are skipped.
 func TestPlanIntervenedSemantics(t *testing.T) {
+	for s, want := range map[TaskStatus]planStatus{
+		StatusCompleted: planSettled, StatusDownloading: planWaiting, StatusQueued: planWaiting,
+		StatusPaused: planIntervene, StatusCanceled: planIntervene, StatusFailed: planIntervene,
+	} {
+		if got := planStatusOf(s); got != want {
+			t.Errorf("planStatusOf(%s) = %v, want %v", s, got, want)
+		}
+	}
+	// intervenedStatus keeps its original meaning: a paused, failed or
+	// cancelled task means someone stepped in, which is what the tally in
+	// Stats reports.
 	for s, want := range map[TaskStatus]bool{
 		StatusCompleted: false, StatusDownloading: false, StatusQueued: false,
-		StatusCanceled: true, StatusPaused: true, StatusFailed: true,
+		StatusPaused: true, StatusCanceled: true, StatusFailed: true,
 	} {
 		if got := intervenedStatus(s); got != want {
 			t.Errorf("intervenedStatus(%s) = %v, want %v", s, got, want)
@@ -239,8 +250,9 @@ func TestPlanIntervenedSemantics(t *testing.T) {
 	}
 	app.mgr.mu.Lock()
 	app.mgr.planRunning = true
+	app.mgr.planTasks = &planCoverage{ids: map[string]bool{tv.ID: true}}
 	app.mgr.mu.Unlock()
-	go app.mgr.watchPlanSelected(map[string]bool{tv.ID: true})
+	go app.mgr.watchPlanSelected()
 
 	waitFor(t, "the scoped plan to settle on a failed task", 10*time.Second, func() bool {
 		mu.Lock()

@@ -416,7 +416,7 @@ func TestLocalAPISettingsRoundTrip(t *testing.T) {
 
 	// And the change survives a reload from disk, which is what makes it a
 	// setting rather than a session flag.
-	if loadConfig(app.configPath()).ExtensionEnabled {
+	if loadConfig(app.configPath(), nil).ExtensionEnabled {
 		t.Error("the switch did not survive a reload")
 	}
 }

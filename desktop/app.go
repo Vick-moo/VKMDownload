@@ -157,7 +157,7 @@ func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
 
 	a.mu.Lock()
-	a.cfg = loadConfig(a.configPath())
+	a.cfg = loadConfig(a.configPath(), a.debugLog)
 	a.mu.Unlock()
 
 	// Write the settings only when the file does not exist yet: a fresh
@@ -312,22 +312,37 @@ func (a *App) configPath() string { return filepath.Join(a.dataDir(), "config.js
 
 // ------------------------------------------------------------------ config
 
-// Config returns a copy of the current settings.
+// Config returns a copy of the current settings. The copy is deep: the value
+// shares no slice with the live settings, so a caller that edits OrganizeGroups
+// (the settings page does exactly that) cannot write into the configuration
+// from outside the lock.
 func (a *App) Config() Config {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return a.cfg
+	return a.cfg.clone()
 }
 
 // SetConfig replaces the settings and persists them.
+//
+// The caller's value is copied before it is normalised: normalize rewrites
+// OrganizeGroups, and doing that to the caller's own slice mutated whatever the
+// caller still held a reference to. A write that fails is rolled back, so the
+// in-memory settings never describe something that is not on disk — the next
+// start would otherwise silently revert, and a failed save is exactly when the
+// user needs the app to stay as it was.
 func (a *App) SetConfig(cfg Config) error {
+	cfg = cfg.clone()
 	cfg.normalize()
 	a.mu.Lock()
+	old := a.cfg
 	oldMax := a.cfg.MaxConcurrent
 	a.cfg = cfg
 	a.mu.Unlock()
 
 	if err := saveConfig(a.configPath(), cfg); err != nil {
+		a.mu.Lock()
+		a.cfg = old
+		a.mu.Unlock()
 		return err
 	}
 	a.RestartClipboardWatch()

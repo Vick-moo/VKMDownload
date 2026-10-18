@@ -326,11 +326,14 @@ func (a *App) apiAdd(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"pending": true, "name": fn})
 		return
 	}
+	// Clamped here as well as in the engine: the setting is user-controlled and
+	// every connection is a live socket plus a worker goroutine, so a bad value
+	// should never reach the task at all.
 	task, err := a.mgr.Start(StartRequest{
 		URL:       req.URL,
 		Filename:  sanitizeSuggestedName(req.Filename),
 		Dest:      cfg.DownloadDir,
-		Conns:     cfg.Connections,
+		Conns:     clampConns(cfg.Connections),
 		Start:     cfg.AutoStart,
 		Referer:   req.Referer,
 		Cookie:    req.Cookie,
@@ -362,6 +365,23 @@ func (a *App) apiAdd(w http.ResponseWriter, r *http.Request) {
 	a.debugLog("extension added %s (origin=%q ua=%q cookie=%dB)",
 		logURL(req.URL), r.Header.Get("Origin"), r.Header.Get("User-Agent"), len(req.Cookie))
 	writeJSON(w, http.StatusOK, map[string]any{"id": task.ID, "name": task.Name})
+}
+
+// maxConns is the ceiling on parallel connections per task. config.normalize
+// enforces the same number, so a value that slipped past it (a hand-edited
+// config.json, a request carrying its own count) still cannot open more than
+// this many sockets per task.
+const maxConns = 64
+
+// clampConns bounds a connection count to [1, maxConns].
+func clampConns(n int) int {
+	if n < 1 {
+		return 1
+	}
+	if n > maxConns {
+		return maxConns
+	}
+	return n
 }
 
 // sanitizeSuggestedName makes a name from the browser safe to join onto a path.

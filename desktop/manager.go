@@ -228,6 +228,18 @@ type Manager struct {
 
 	// planRunning is set while a plan is working through its tasks.
 	planRunning bool
+	// planTasks is the task set the running plan waits for. Membership, not a
+	// global tally, decides when the plan is done and whether it was
+	// intervened with.
+	planTasks *planCoverage
+	// planDone records the tasks that had already completed when the plan
+	// started. They are the only members that may be counted as settled
+	// without the plan having done anything: every other member — running,
+	// queued, or paused at the start and resumed by StartAll — is work the
+	// plan took on. A member that ends paused, failed or cancelled after being
+	// taken on is the user (or the server) stopping it, so the plan settles as
+	// intervened and the end-of-plan actions are skipped.
+	planDone map[string]bool
 
 	// updating freezes scheduling: set while an update is being applied, so
 	// pausing everything for the restart cannot be undone by the queue
@@ -356,9 +368,32 @@ func (m *Manager) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case v := <-m.pump:
+			// Progress travels through this queue while the terminal events
+			// (task:done / task:failed) go out immediately. A frame that was
+			// already queued when the task settled would therefore arrive
+			// afterwards and repaint a finished row as "downloading". The
+			// front-end keeps a weak guard for this; the decision belongs here,
+			// where the task's current status is known exactly.
+			if v.Status == StatusDownloading && m.settledNow(v.ID) {
+				continue
+			}
 			m.app.emit("task:progress", v)
 		}
 	}
+}
+
+// settledNow reports whether the task with this id has already settled: it was
+// removed from the list, or it holds a status that no progress frame may undo.
+func (m *Manager) settledNow(id string) bool {
+	t := m.get(id)
+	if t == nil {
+		return true
+	}
+	switch snapshot(t).Status {
+	case StatusCompleted, StatusFailed, StatusCanceled:
+		return true
+	}
+	return false
 }
 
 // emit queues a progress event. Only progress travels the pump; terminal and
@@ -389,6 +424,20 @@ func (m *Manager) get(id string) *task {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.tasks[id]
+}
+
+// taskStillListed reports whether t is still the record its id maps to. The
+// caller holds t.mu (that is what makes reading the id safe) and this takes
+// m.mu; every m.mu holder only then takes one t.mu, so the two orders cannot
+// deadlock.
+//
+// It detects a task the user removed while its transfer was still unwinding:
+// the record is detached from the map, so anything this run reports — progress,
+// failure, completion — belongs to a row that is gone.
+func (m *Manager) taskStillListed(t *task) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.tasks[t.view.ID] == t
 }
 
 // snapshot copies a task's view.
@@ -982,6 +1031,18 @@ func (m *Manager) startRun(t *task) {
 		m.app.emit("task:progress", snapshot(t))
 		return
 	}
+	// Resolve the filename before spawning, while the task is still queued. The
+	// engine treats Dest as a directory when no name is known and resolves
+	// dir+suggested under it, but the manager's Dest stays the directory — and a
+	// later partial-path computation then pointed at "<dir>.part", which the
+	// engine created as a *directory*. Probing here keeps Dest a file.
+	t.mu.Lock()
+	needName := t.view.Name == "" && !t.manual
+	t.mu.Unlock()
+	if needName {
+		m.fillProbedName(t.view.ID, t.view.URL, StartRequest{})
+	}
+
 	// The done channel is created here, under the same lock as cancel, so a
 	// Pause/Cancel arriving while the goroutine is still starting always finds
 	// something to wait on. Creating it inside run instead left a window where
@@ -1001,11 +1062,23 @@ func (m *Manager) startRun(t *task) {
 		cancel()
 		return
 	}
+	// The generation advances here, at the commit point, and is handed to run.
+	// It used to be bumped inside run, so between "spawned" and "run started"
+	// the task still carried the previous run's generation: a pause followed by
+	// a resume in that window let the old run's exit branch pass its
+	// "still downloading" test and write the new run's status — a fresh
+	// download showing as canceled, with Cancel's cleanup deleting the partial
+	// data of the run that had just started.
+	t.generation++
+	gen := t.generation
 	t.cancel = cancel
 	// A fresh run has no stop to report yet.
 	t.stopIntent = ""
 	t.view.Status = StatusDownloading
 	t.view.Error = ""
+	t.view.Notice = ""
+	t.view.Speed = 0
+	t.view.ETA = 0
 	done := make(chan struct{})
 	t.done = done
 	t.mu.Unlock()
@@ -1015,7 +1088,7 @@ func (m *Manager) startRun(t *task) {
 	// link, and until then the UI shows the pre-start state.
 	m.app.emit("task:progress", snapshot(t))
 
-	m.goBg(func() { m.run(t, ctx, cancel, done) })
+	m.goBg(func() { m.run(t, ctx, cancel, done, gen) })
 }
 
 // refreshInterval maps the UI refresh setting to an engine reporting
@@ -1172,6 +1245,10 @@ func (m *Manager) Pause(id string) error {
 	t.view.Status = StatusPaused
 	t.view.Speed = 0
 	t.view.ETA = 0
+	// The notice belongs to the run being stopped ("retrying in N s"). Left
+	// here it was written to tasks.json by the save below and came back after
+	// a restart, so the row flashed a retry that would never happen.
+	t.view.Notice = ""
 	v := t.view
 	t.mu.Unlock()
 
@@ -1257,6 +1334,8 @@ func (m *Manager) Cancel(id string) error {
 	t.view.Status = StatusCanceled
 	t.view.Speed = 0
 	t.view.ETA = 0
+	// Same reasoning as Pause: a cancelled task must not keep a retry notice.
+	t.view.Notice = ""
 	v := t.view
 	t.mu.Unlock()
 
@@ -1528,27 +1607,36 @@ func (m *Manager) StartPlan() (int, error) {
 		return 0, errUpdating
 	}
 
-	// Try to start everything waiting; tasks beyond the concurrency budget
-	// stay queued and are pulled in by pumpQueue as slots free up.
-	m.StartAll()
-	// A plan covers everything that is running or waiting, not just the tasks
-	// this call managed to start: when every MaxConcurrent slot is already
-	// occupied, StartAll cannot start anything new (started == 0) yet there
-	// is still real work — the running transfers plus the queued ones
-	// pumpQueue pulls in as slots free up. Refusing the plan in that case
-	// ("没有等待下载的任务") made the plan button dead exactly when the list
-	// was full of queued tasks.
-	c := m.countByStatus()
-	covered := int(c.active + c.queued)
-	if covered == 0 {
+	// Membership is fixed here, before anything starts: every task that is
+	// running or waiting right now. A plan covers all of them, not just the
+	// tasks this call managed to start — when every MaxConcurrent slot is
+	// already occupied, StartAll starts nothing new yet there is still real
+	// work, and refusing the plan then ("没有等待下载的任务") made the button
+	// dead exactly when the list was full of queued tasks.
+	plan := &planCoverage{}
+	for _, v := range m.List() {
+		// Everything that is running, waiting or paused: those are exactly the
+		// tasks StartAll is about to resume.
+		if startsWithPlan(v.Status) {
+			plan.add(v.ID)
+		}
+	}
+	if len(plan.ids) == 0 {
 		m.mu.Lock()
 		m.planRunning = false
 		m.mu.Unlock()
 		return 0, fmt.Errorf("没有等待下载的任务")
 	}
+	m.mu.Lock()
+	m.planTasks = plan
+	m.mu.Unlock()
+
+	// Try to start everything waiting; tasks beyond the concurrency budget
+	// stay queued and are pulled in by pumpQueue as slots free up.
+	m.StartAll()
 
 	m.goBg(m.watchPlan)
-	return covered, nil
+	return len(plan.ids), nil
 }
 
 // StartPlanSelected starts the given tasks and, once they have all settled,
@@ -1611,7 +1699,11 @@ func (m *Manager) StartPlanSelected(ids []string) (int, error) {
 		return 0, fmt.Errorf("选中的任务没有可下载的")
 	}
 
-	m.goBg(func() { m.watchPlanSelected(want) })
+	m.mu.Lock()
+	m.planTasks = &planCoverage{ids: want}
+	m.mu.Unlock()
+
+	m.goBg(m.watchPlanSelected)
 	return covered, nil
 }
 
@@ -1622,46 +1714,149 @@ func intervenedStatus(s TaskStatus) bool {
 	return s == StatusCanceled || s == StatusPaused || s == StatusFailed
 }
 
-// watchPlanSelected waits until every planned task has settled, then finishes
-// the plan. Removal or cancellation of a planned task counts as settling but
-// marks the plan as intervened, which skips the end actions — same rule as
-// the global watcher.
-func (m *Manager) watchPlanSelected(want map[string]bool) {
+// planCoverage is the set of tasks a running plan waits for.
+//
+// Membership, not a tally over the whole table, is what decides when the plan
+// is done and whether the user intervened. The global plan used to judge
+// "intervened" from a count of paused/failed/canceled tasks anywhere in the
+// list, so adding an unrelated paused task while a plan ran silently turned its
+// end actions off — no sound, no shutdown, nothing on screen explaining why.
+// The selection plan already looked only at its own tasks, so the same user
+// action gave two different outcomes depending on which button started the
+// plan. Both watchers now walk this set with the one rule in planStatusOf.
+type planCoverage struct {
+	ids map[string]bool
+	// done records members that had already completed when the plan was
+	// captured. Everything else is work the plan took on, so ending paused,
+	// failed or cancelled is an intervention.
+	done map[string]bool
+}
+
+// planStatus is what one planned task contributes to the plan.
+type planStatus int
+
+const (
+	// planWaiting: a running or queued task — the plan is not finished while
+	// one exists. (A task paused at the plan's start is also waiting; that is
+	// handled by scanPlan through planStartPaused.)
+	planWaiting planStatus = iota
+	// planSettled: completed — done, no intervention.
+	planSettled
+	// planIntervene: paused, failed or cancelled — done, the user stepped in,
+	// so the end-of-plan actions (sound, shutdown) are skipped.
+	planIntervene
+)
+
+// planStatusOf maps a task status onto its plan meaning. A task that is gone
+// from the table counts as planIntervene (see scanPlan): removing a planned
+// task is an intervention, not a quiet success.
+//
+// A paused task is an intervention during a plan, but not at its start: the
+// plan resumes the tasks that were paused when it began (see planStartPaused),
+// so those are work it is waiting for; a task paused while the plan runs is the
+// user stopping it, exactly like Cancel.
+func planStatusOf(s TaskStatus) planStatus {
+	switch s {
+	case StatusDownloading, StatusQueued:
+		return planWaiting
+	case StatusCompleted:
+		return planSettled
+	default:
+		return planIntervene
+	}
+}
+
+// startsWithPlan reports whether a task with this status is one a plan takes
+// over: everything except what already settled (completed, failed, canceled).
+// Paused tasks are included — StartAll resumes them.
+func startsWithPlan(s TaskStatus) bool {
+	switch s {
+	case StatusCompleted, StatusFailed, StatusCanceled:
+		return false
+	}
+	return true
+}
+
+func (p *planCoverage) add(id string) {
+	if p == nil {
+		return
+	}
+	if p.ids == nil {
+		p.ids = make(map[string]bool)
+	}
+	p.ids[id] = true
+}
+
+// scanPlan walks a plan's tasks and reports (done, intervened).
+func (m *Manager) scanPlan(plan *planCoverage) (done, intervened bool) {
+	done = true
+	for id := range plan.ids {
+		t := m.get(id)
+		if t == nil {
+			intervened = true
+			continue
+		}
+		switch snapshot(t).Status {
+		case StatusCompleted:
+			// Settled: either it was already done when the plan was captured,
+			// or it finished while the plan ran. Neither is an intervention.
+		case StatusDownloading, StatusQueued:
+			done = false
+		default:
+			// Paused, failed or cancelled: the user stepped in (or the server
+			// did), so the plan did not run to completion.
+			intervened = true
+		}
+	}
+	return done, intervened
+}
+
+// currentPlan returns the plan in flight, or nil.
+func (m *Manager) currentPlan() *planCoverage {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.planTasks
+}
+
+// adoptIntoPlan records a task that started running while a plan was in
+// flight, so the plan waits for it too: the user started it during the plan,
+// and a shutdown that ignored it would power off mid-download.
+func (m *Manager) adoptIntoPlan(id string) {
+	m.mu.Lock()
+	if plan := m.planTasks; plan != nil && m.planRunning {
+		plan.add(id)
+	}
+	m.mu.Unlock()
+}
+
+// watchPlanSelected waits until every task in the selection plan has settled,
+// then finishes the plan.
+func (m *Manager) watchPlanSelected() {
+	plan := m.currentPlan()
+	if plan == nil {
+		m.finishPlan(false)
+		return
+	}
+	m.watchPlanUntilDone(plan)
+}
+
+// watchPlanUntilDone is the poll shared by both watchers: it ends the plan once
+// every covered task has settled, using scanPlan's single rule for what counts
+// as an intervention.
+//
+// It polls rather than being notified: every path that can end a transfer —
+// completion, failure, cancellation, removal — would otherwise have to remember
+// to poke the plan, and the one that forgot would leave it hanging forever.
+func (m *Manager) watchPlanUntilDone(plan *planCoverage) {
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 
 	for range ticker.C {
-		done, intervened := true, false
-		for id := range want {
-			t := m.get(id)
-			if t == nil {
-				intervened = true
-				continue
-			}
-			st := snapshot(t).Status
-			switch st {
-			case StatusDownloading, StatusQueued:
-				done = false
-			default:
-				if intervenedStatus(st) {
-					intervened = true
-				}
-			}
-		}
-		if done {
-			m.finishPlanScoped(intervened)
+		if done, intervened := m.scanPlan(plan); done {
+			m.finishPlan(intervened)
 			return
 		}
 	}
-}
-
-// finishPlanScoped ends a selection-scoped plan. It shares the end actions
-// with the global plan.
-func (m *Manager) finishPlanScoped(intervened bool) {
-	m.mu.Lock()
-	m.planRunning = false
-	m.mu.Unlock()
-	m.finishPlanEnd(intervened)
 }
 
 // PlanRunning reports whether a plan is working.
@@ -1671,39 +1866,31 @@ func (m *Manager) PlanRunning() bool {
 	return m.planRunning
 }
 
-// watchPlan waits until nothing is transferring, then finishes the plan.
-//
-// It polls rather than being notified: every path that can end a transfer —
-// completion, failure, cancellation, removal — would otherwise have to remember
-// to poke the plan, and the one that forgot would leave it hanging forever.
-//
-// Only transferring and queued tasks keep the watch alive: paused, failed and
-// cancelled tasks already settled, so they never block it — but they do mark
-// the plan as intervened in finishPlan, which skips the end actions.
+// watchPlan waits until the global plan's tasks have settled, then finishes
+// the plan. Only the set captured when the plan started is consulted: an
+// unrelated task added or paused mid-plan used to decide whether the user got
+// their sound and shutdown.
 func (m *Manager) watchPlan() {
-	ticker := time.NewTicker(500 * time.Millisecond)
-	defer ticker.Stop()
-
-	for range ticker.C {
-		c := m.countByStatus()
-		if c.active == 0 && c.queued == 0 {
-			m.finishPlan()
-			return
-		}
+	plan := m.currentPlan()
+	if plan == nil {
+		m.finishPlan(false)
+		return
 	}
+	m.watchPlanUntilDone(plan)
 }
 
-// finishPlan performs whatever the user asked for at the end of a plan.
-func (m *Manager) finishPlan() {
+// finishPlan ends the plan in flight.
+func (m *Manager) finishPlan(intervened bool) {
 	m.mu.Lock()
 	m.planRunning = false
+	m.planTasks = nil
 	m.mu.Unlock()
 
 	// A plan that ends with cancelled, paused or failed tasks did not run to
 	// completion: the user intervened (or something broke). Firing the
 	// end-of-plan actions anyway — especially a machine shutdown — would
 	// punish cancelling.
-	m.finishPlanEnd(m.countByStatus().intervened())
+	m.finishPlanEnd(intervened)
 }
 
 // finishPlanEnd emits plan:done and runs the configured end actions, unless
@@ -1803,6 +1990,11 @@ func (m *Manager) awaitRetry(ctx context.Context, t *task, gen int64, attempt in
 	v := t.view
 	t.mu.Unlock()
 	m.app.emit("task:progress", v)
+	// Persisted on purpose: the wait can last a minute, and a crash during it
+	// must come back showing that a retry was pending rather than a task that
+	// silently claims to be downloading. Every path that ends the wait clears
+	// it and saves again, which is what keeps it from outliving the wait.
+	_ = m.saveTasks()
 
 	timer := time.NewTimer(d)
 	defer timer.Stop()
@@ -1834,27 +2026,21 @@ func (m *Manager) awaitRetry(ctx context.Context, t *task, gen int64, attempt in
 
 // run performs the transfer for one task.
 //
-// ctx, cancel and done come from the caller: startRun creates them before
-// launching the goroutine so that a pause arriving immediately still cancels
-// this run and waits on the right channel.
+// ctx, cancel, done and gen come from startRun, which created them under t.mu
+// before launching the goroutine: a pause arriving immediately still cancels
+// this run and waits on the right channel, and a superseded run can always be
+// told apart from the current one.
 //
 // A panic in a task goroutine would otherwise take the whole app down without a
 // word, which is exactly the kind of failure a user can only report as "it
 // crashed". The recover turns it into a failed task plus a log line, so the
 // cause survives.
-func (m *Manager) run(t *task, ctx context.Context, cancel context.CancelFunc, done chan struct{}) {
+func (m *Manager) run(t *task, ctx context.Context, cancel context.CancelFunc, done chan struct{}, gen int64) {
 	// Pump last: queued tasks start only after this run's done channel has
 	// closed, so a waiter on the old run never observes the new one.
 	defer m.pumpQueue()
 
 	t.mu.Lock()
-	t.generation++
-	gen := t.generation
-	t.view.Status = StatusDownloading
-	t.view.Error = ""
-	t.view.Notice = ""
-	t.view.Speed = 0
-	t.view.ETA = 0
 	url, dest, conns := t.view.URL, t.view.Dest, t.view.Conns
 	t.done = done
 	t.mu.Unlock()
@@ -1863,7 +2049,9 @@ func (m *Manager) run(t *task, ctx context.Context, cancel context.CancelFunc, d
 		cancel()
 		close(done)
 		if r := recover(); r != nil {
-			m.app.debugLog("panic in task %s: %v\n%s", t.view.ID, r, debug.Stack())
+			// The id is read through snapshot: this recover path was the one
+			// place that touched the view without taking the task lock.
+			m.app.debugLog("panic in task %s: %v\n%s", snapshot(t).ID, r, debug.Stack())
 			m.fail(t, gen, fmt.Errorf("内部错误: %v", r))
 		}
 	}()
@@ -1921,8 +2109,10 @@ func (m *Manager) run(t *task, ctx context.Context, cancel context.CancelFunc, d
 		Progress: func(p engine.Progress) {
 			t.mu.Lock()
 			// A callback from a superseded run must not resurrect old state;
-			// the generation check is what makes that impossible.
-			if t.generation != gen {
+			// the generation check is what makes that impossible. The removal
+			// test covers a task deleted while it was starting: it is off the
+			// list, so a late frame must not put it back.
+			if t.generation != gen || !m.taskStillListed(t) {
 				t.mu.Unlock()
 				return
 			}
@@ -1989,6 +2179,15 @@ func (m *Manager) run(t *task, ctx context.Context, cancel context.CancelFunc, d
 	}
 
 	if err != nil {
+		// A task the user removed while this run was starting is no longer
+		// in the list; there is nothing to settle, and writing a status to
+		// the detached record only feeds a late event for a row that is gone.
+		t.mu.Lock()
+		listed := m.taskStillListed(t)
+		t.mu.Unlock()
+		if !listed {
+			return
+		}
 		if frozen := m.updateFrozen(); ctx.Err() != nil || frozen {
 			// The transfer was stopped. Whichever action did that also recorded
 			// what it wanted the status to become, and that record is the one to
@@ -1997,7 +2196,12 @@ func (m *Manager) run(t *task, ctx context.Context, cancel context.CancelFunc, d
 			// resume. An update freeze is a pause too: the partial data stays
 			// valid and the task resumes after the restart.
 			t.mu.Lock()
-			if t.view.Status == StatusDownloading {
+			// Only a run that is still the current one may write the status.
+			// Without the generation test, a run that was paused and then
+			// resumed before its goroutine unwound found the task downloading
+			// again — the *new* run's status — and stamped the old intent
+			// ("paused", or "canceled") onto it.
+			if t.generation == gen && t.view.Status == StatusDownloading {
 				switch {
 				case t.stopIntent != "":
 					t.view.Status = t.stopIntent
@@ -2011,6 +2215,10 @@ func (m *Manager) run(t *task, ctx context.Context, cancel context.CancelFunc, d
 			v := t.view
 			t.mu.Unlock()
 			m.app.emit("task:progress", v)
+			// Persist: this branch clears the notice and used to return
+			// without a save, leaving the notice it had just announced in
+			// tasks.json for a task that is no longer retrying.
+			_ = m.saveTasks()
 			return
 		}
 		if recovered > 0 && engine.IsNotFound(err) {
@@ -2026,6 +2234,14 @@ func (m *Manager) run(t *task, ctx context.Context, cancel context.CancelFunc, d
 
 	t.mu.Lock()
 	if t.generation != gen {
+		t.mu.Unlock()
+		return
+	}
+	// The user removed this task while its last bytes were landing. The file
+	// is complete on disk, but the record is gone: resurrecting it would put a
+	// row the user deleted back on screen, and its partial cleanup has already
+	// run against this very file.
+	if !m.taskStillListed(t) {
 		t.mu.Unlock()
 		return
 	}
@@ -2050,14 +2266,14 @@ func (m *Manager) run(t *task, ctx context.Context, cancel context.CancelFunc, d
 				// log-only failure left users hunting a file that was never
 				// where the UI said it was.
 				t.mu.Lock()
-				if t.generation == gen {
+				if t.generation == gen && m.taskStillListed(t) {
 					t.view.Error = "整理失败，已保留在原位置：" + err.Error()
 				}
 				t.mu.Unlock()
 				m.app.debugLog("organize %s: %v", res.Path, err)
 			} else {
 				t.mu.Lock()
-				if t.generation == gen {
+				if t.generation == gen && m.taskStillListed(t) {
 					t.view.Dest = dst
 				}
 				t.mu.Unlock()
@@ -2066,6 +2282,12 @@ func (m *Manager) run(t *task, ctx context.Context, cancel context.CancelFunc, d
 	}
 
 	t.mu.Lock()
+	// Re-checked under one lock: organizing above released it, and a removal
+	// can land in that window.
+	if t.generation != gen || !m.taskStillListed(t) {
+		t.mu.Unlock()
+		return
+	}
 	t.view.Status = StatusCompleted
 	t.view.Size = res.Size
 	t.view.Downloaded = res.Size
@@ -2188,8 +2410,14 @@ func (m *Manager) failMessage(t *task, gen int64, msg string) {
 //
 // "HTTP 403" on its own tells the user nothing; naming the likely cause and
 // what to try next is what makes an error worth showing.
+//
+// No URL leaves this function with its query string. Engine errors wrap the
+// request URL, and every branch below — the per-status mappings included —
+// would otherwise copy a signed link's credential into tasks.json and into the
+// row on screen. The text is rewritten once, up front, into the log-safe form
+// (host and path); the protocol words the status checks look for survive.
 func humanError(err error) string {
-	msg := err.Error()
+	msg := redactURIs(err.Error())
 	lower := strings.ToLower(msg)
 	switch {
 	case errors.Is(err, errServerStalled):
@@ -2214,8 +2442,22 @@ func humanError(err error) string {
 		return "链接不存在（404）· 请检查地址是否写错"
 	case strings.Contains(msg, "HTTP 401") || strings.Contains(msg, "status 401") || strings.Contains(msg, "(401)"):
 		return "需要登录（401）· 该资源要求身份验证"
+	case errors.Is(err, engine.ErrRangeUnusable):
+		return "服务器返回的数据与请求的不一致 · 这个链接不支持分段下载，请稍后重试或改用浏览器下载"
 	case strings.Contains(msg, "HTTP 416") || strings.Contains(msg, "status 416") || strings.Contains(msg, "(416)"):
 		return "服务器无法满足该范围请求（416）· 文件可能已变化"
+	case strings.Contains(msg, "HTTP 429") || strings.Contains(msg, "status 429") || strings.Contains(msg, "(429)"):
+		return "请求太频繁，被服务器限流（429）· 请等几分钟再试，或减少同时下载的任务数"
+	case strings.Contains(msg, "HTTP 408") || strings.Contains(msg, "status 408") || strings.Contains(msg, "(408)"):
+		return "服务器等待超时（408）· 网络太慢或服务器繁忙，请稍后重试"
+	case strings.Contains(msg, "HTTP 500") || strings.Contains(msg, "status 500") || strings.Contains(msg, "(500)"):
+		return "服务器内部出错（500）· 不是你的问题，请稍后重试"
+	case strings.Contains(msg, "HTTP 502") || strings.Contains(msg, "status 502") || strings.Contains(msg, "(502)"):
+		return "网关错误（502）· 服务器上游节点异常，请稍后重试"
+	case strings.Contains(msg, "HTTP 503") || strings.Contains(msg, "status 503") || strings.Contains(msg, "(503)"):
+		return "服务器暂时不可用（503）· 正在维护或过载，请稍后重试"
+	case strings.Contains(msg, "HTTP 504") || strings.Contains(msg, "status 504") || strings.Contains(msg, "(504)"):
+		return "网关超时（504）· 服务器上游响应太慢，请稍后重试"
 	case strings.Contains(lower, "no such host"),
 		strings.Contains(lower, "dial tcp"),
 		strings.Contains(lower, "connection refused"):
@@ -2232,7 +2474,33 @@ func humanError(err error) string {
 	case strings.Contains(lower, "access is denied"), strings.Contains(lower, "permission denied"):
 		return "没有写入权限 · 请换一个保存目录"
 	}
-	return msg
+	return "下载失败：" + msg
+}
+
+// redactURIs replaces every http(s) URL inside text with its log-safe form, so
+// an unmapped error can be shown and stored without carrying a signed link's
+// query string along.
+func redactURIs(text string) string {
+	var b strings.Builder
+	rest := text
+	for {
+		i, j := strings.Index(rest, "http://"), strings.Index(rest, "https://")
+		if i < 0 || (j >= 0 && j < i) {
+			i = j
+		}
+		if i < 0 {
+			b.WriteString(rest)
+			return b.String()
+		}
+		b.WriteString(rest[:i])
+		// A URL runs until whitespace or a closing quote.
+		end := len(rest)
+		if k := strings.IndexAny(rest[i:], " \t\r\n\"'<>"); k >= 0 {
+			end = i + k
+		}
+		b.WriteString(logURL(rest[i:end]))
+		rest = rest[end:]
+	}
 }
 
 // Stats reports the aggregate figures the sidebar shows.
@@ -2419,6 +2687,10 @@ func (m *Manager) loadTasks() {
 		if v.Status == StatusDownloading {
 			v.Status = StatusPaused
 		}
+		// A retry notice describes a wait that the app closing interrupted.
+		// Nothing is waiting now, so keeping it would make the first resume
+		// flash "retrying in N s" before it retried anything.
+		v.Notice = ""
 		v.Speed, v.ETA = 0, 0
 		// A completed task whose file has since vanished must not keep
 		// claiming to be complete. Only a missing file flips it: any other

@@ -2,9 +2,11 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // Config holds every user setting. Each one is an independent switch so the
@@ -215,8 +217,8 @@ func (c *Config) normalize() {
 	if c.Connections < 1 {
 		c.Connections = d.Connections
 	}
-	if c.Connections > 64 {
-		c.Connections = 64
+	if c.Connections > maxConns {
+		c.Connections = maxConns
 	}
 	if c.MinSegmentSize <= 0 {
 		c.MinSegmentSize = d.MinSegmentSize
@@ -298,8 +300,13 @@ func (c *Config) normalize() {
 // absolute Dir carries the location instead, extensions are lower-cased
 // without the dot, and empty entries go away. First group wins on overlap,
 // so order is preserved.
+//
+// It always builds a new slice. The old version reused the caller's backing
+// array (out := groups[:0]) and overwrote it entry by entry, so normalising a
+// copy of the live settings wrote straight into the live settings — the race
+// detector caught exactly that. The Exts slices are copied for the same reason.
 func normalizeOrganizeGroups(groups []OrganizeGroup) []OrganizeGroup {
-	out := groups[:0]
+	out := make([]OrganizeGroup, 0, len(groups))
 	seen := map[string]bool{}
 	for _, g := range groups {
 		name := sanitizeSuggestedName(g.Name)
@@ -323,6 +330,24 @@ func normalizeOrganizeGroups(groups []OrganizeGroup) []OrganizeGroup {
 			continue
 		}
 		out = append(out, OrganizeGroup{Name: name, Exts: exts, Dir: dir})
+	}
+	return out
+}
+
+// clone returns a copy that shares no memory with c. Config() hands out one and
+// SetConfig stores one: every slice a caller can reach must be its own, or a
+// settings dialog (or a test) editing one field mutates the live configuration
+// from outside the lock.
+func (c Config) clone() Config {
+	out := c
+	if c.OrganizeGroups != nil {
+		out.OrganizeGroups = make([]OrganizeGroup, len(c.OrganizeGroups))
+		for i, g := range c.OrganizeGroups {
+			out.OrganizeGroups[i] = g
+			if g.Exts != nil {
+				out.OrganizeGroups[i].Exts = append([]string(nil), g.Exts...)
+			}
+		}
 	}
 	return out
 }
@@ -352,15 +377,25 @@ func organizeTarget(groups []OrganizeGroup, root, name string) string {
 }
 
 // loadConfig reads the settings file, falling back to defaults. A corrupt file
-// is ignored rather than fatal: losing preferences is a nuisance, refusing to
-// start is worse.
-func loadConfig(path string) Config {
+// is kept aside rather than silently dropped: a replaced settings file is
+// indistinguishable from a settings bug, so the bad copy is renamed with a
+// timestamp (the same treatment tasks.json gets) and the event is logged.
+// Losing preferences is a nuisance; refusing to start, or discarding them with
+// no trace, is worse.
+func loadConfig(path string, logf func(string, ...any)) Config {
 	cfg := DefaultConfig()
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return cfg
 	}
 	if err := json.Unmarshal(b, &cfg); err != nil {
+		kept := fmt.Sprintf("%s.corrupt-%s", path, time.Now().Format("20060102-150405.000"))
+		if rerr := os.Rename(path, kept); rerr != nil {
+			kept = "(另存失败: " + rerr.Error() + ")"
+		}
+		if logf != nil {
+			logf("config.json 损坏（%v），已另存为 %s，本次使用默认设置", err, kept)
+		}
 		return DefaultConfig()
 	}
 	cfg.normalize()
@@ -370,6 +405,9 @@ func loadConfig(path string) Config {
 // saveConfig writes the settings atomically, so a crash mid-write cannot leave
 // a half-written file that fails to parse on the next start.
 func saveConfig(path string, cfg Config) error {
+	// Normalised on a copy: normalize rewrites OrganizeGroups, and the caller
+	// may still hold the value it passed in.
+	cfg = cfg.clone()
 	cfg.normalize()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
@@ -379,7 +417,21 @@ func saveConfig(path string, cfg Config) error {
 		return err
 	}
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o644); err != nil {
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(b); err != nil {
+		_ = f.Close()
+		return err
+	}
+	// Flushed before the rename, as tasks.json does: a crash must not leave a
+	// correctly named but incomplete settings file behind.
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
 		return err
 	}
 	return os.Rename(tmp, path)
