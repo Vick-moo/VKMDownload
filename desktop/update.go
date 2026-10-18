@@ -77,7 +77,14 @@ func (a *App) CheckUpdate() (UpdateInfo, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	rel, err := fetchLatestRelease(ctx)
+	// Through the injectable hook, like StartUpdate: one code path means the
+	// startup check and the button cannot disagree about where releases come
+	// from, and neither needs a real network round trip in a test.
+	fetch := a.fetchRelease
+	if fetch == nil {
+		fetch = fetchLatestRelease
+	}
+	rel, err := fetch(ctx)
 	if err != nil {
 		return info, err
 	}

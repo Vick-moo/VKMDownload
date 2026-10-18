@@ -139,9 +139,16 @@ func TestStartupScrubCleansWhatEarlierVersionsWrote(t *testing.T) {
 			t.Errorf("tasks.json still holds %q after the scrub", secret)
 		}
 	}
-	// The paused record keeps what resume needs.
-	if !strings.Contains(string(tasks), "KEEPME") || !strings.Contains(string(tasks), "KEEPCOOKIE") {
-		t.Errorf("the scrub damaged a resumable task:\n%s", tasks)
+	// The paused record keeps what resume needs: its signed URL is still there,
+	// and its cookie is still stored — but sealed, not in the clear.
+	if !strings.Contains(string(tasks), "KEEPME") {
+		t.Errorf("the scrub damaged a resumable task's URL:\n%s", tasks)
+	}
+	if !strings.Contains(string(tasks), secretPrefix) && !strings.Contains(string(tasks), plainPrefix) {
+		t.Errorf("the scrub dropped the cookie of a resumable task:\n%s", tasks)
+	}
+	if strings.Contains(string(tasks), "KEEPCOOKIE") {
+		t.Errorf("the scrub left a resumable task's cookie in the clear:\n%s", tasks)
 	}
 
 	logged, err := os.ReadFile(filepath.Join(app.dataDir(), "vkmdownload.log"))

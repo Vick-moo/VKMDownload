@@ -199,8 +199,9 @@ func (a *App) startup(ctx context.Context) {
 	})
 
 	// Update check never blocks startup and never fails it: offline machines
-	// start exactly as fast as online ones.
-	go a.checkUpdateOnce()
+	// start exactly as fast as online ones. It is also the only outbound request
+	// that is not a download, so the user's setting wins.
+	go a.checkUpdateOnceIfEnabled()
 
 	// Whatever the previous update left behind (a backup copy of the old
 	// version, an old handshake file) is swept in the background. It never
@@ -232,6 +233,16 @@ func (a *App) startup(ctx context.Context) {
 }
 
 // domReady runs after the front-end has loaded.
+// checkUpdateOnceIfEnabled runs the startup update check only when the user has
+// left it on. It is its own method so the rule is testable without a running
+// webview.
+func (a *App) checkUpdateOnceIfEnabled() {
+	if !a.Config().CheckUpdatesOnStart {
+		return
+	}
+	a.checkUpdateOnce()
+}
+
 func (a *App) domReady(ctx context.Context) {
 	_ = ctx
 	// The "restore finished" nudge lives here, not in startup: Wails buffers

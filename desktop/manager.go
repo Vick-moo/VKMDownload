@@ -2671,7 +2671,15 @@ func (m *Manager) persistedList() []persistedTask {
 		// cookie is plaintext, and the URL may carry a signed token.
 		if !finishedForHistory(t.view.Status) {
 			p.Referer = t.referer
-			p.Cookie = t.cookie
+			// The cookie is sealed with DPAPI. It has to be stored — resuming a
+			// login-protected download without it is rejected by the host — but
+			// it does not have to be readable by anything that happens to open
+			// this file.
+			if sealed, serr := sealCookie(t.cookie); serr != nil {
+				m.app.debugLog("cannot encrypt the cookie for task %s, storing the task without it: %v", t.view.ID, serr)
+			} else {
+				p.Cookie = sealed
+			}
 			p.UserAgent = t.userAgent
 		} else {
 			p.TaskView.URL = redactedForHistory(p.TaskView.URL)
@@ -2775,11 +2783,24 @@ func (m *Manager) loadTasks() {
 			v.Status = StatusFailed
 			v.Error = fileGoneMessage
 		}
+		// Decrypted here, once, so the rest of the app keeps working with a plain
+		// value. A cookie that cannot be opened (the file was copied from another
+		// account, the profile was reset) is dropped with a log line: the task
+		// still resumes, just without its session.
+		cookie := p.Cookie
+		if cookie != "" {
+			if plain, cerr := openCookie(cookie); cerr != nil {
+				m.app.debugLog("cannot decrypt the stored cookie for task %s: %v", v.ID, cerr)
+				cookie = ""
+			} else {
+				cookie = plain
+			}
+		}
 		m.tasks[v.ID] = &task{
 			view:      v,
 			manual:    p.Manual,
 			referer:   p.Referer,
-			cookie:    p.Cookie,
+			cookie:    cookie,
 			userAgent: p.UserAgent,
 		}
 		m.order = append(m.order, v.ID)

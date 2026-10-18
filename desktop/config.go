@@ -91,6 +91,17 @@ type Config struct {
 	// MinimizeToTray hides the window instead of exiting, so downloads continue.
 	MinimizeToTray bool `json:"minimizeToTray"`
 
+	// CheckUpdatesOnStart asks GitHub for a newer release once per launch. It is
+	// on by default — an update nobody is told about is not much of a feature —
+	// but it is the only request this program makes that is not a download, so
+	// the user has to be able to turn it off. The manual "check now" button in
+	// settings always works regardless of this switch.
+	//
+	// A pointer would distinguish "unset" from false; instead the default is
+	// written into the file on first run, which is simpler and visible to anyone
+	// who reads config.json.
+	CheckUpdatesOnStart bool `json:"checkUpdatesOnStart"`
+
 	// ClipboardWatch polls the clipboard for URLs.
 	ClipboardWatch bool `json:"clipboardWatch"`
 	// ClipboardAutoStart downloads a captured URL immediately; with it off the
@@ -160,6 +171,7 @@ func DefaultConfig() Config {
 		OpenFileWhenDone:    false,
 		OpenDirWhenDone:     false,
 		MinimizeToTray:      true,
+		CheckUpdatesOnStart: true,
 		ClipboardWatch:      false,
 		ClipboardAutoStart:  false,
 		ClipboardConfirm:    true,

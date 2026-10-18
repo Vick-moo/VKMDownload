@@ -33,8 +33,54 @@ import (
 // and the next launch tries again.
 func (a *App) scrubStoredSecrets() {
 	a.scrubTaskHistory()
+	a.sealStoredCookies()
 	a.scrubTaskBackups()
 	a.scrubLogs()
+}
+
+// sealStoredCookies encrypts cookies that an older build wrote in plaintext.
+//
+// Without this the change would only protect future saves: a record that is
+// never written again (a task paused months ago) would keep its plaintext cookie
+// forever, which is exactly the case the change exists for.
+func (a *App) sealStoredCookies() {
+	path := filepath.Join(a.dataDir(), "tasks.json")
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	var list []persistedTask
+	if err := json.Unmarshal(b, &list); err != nil {
+		return
+	}
+
+	sealed := 0
+	for i := range list {
+		p := &list[i]
+		if p.Cookie == "" || hasSecretPrefix(p.Cookie) || finishedForHistory(p.Status) {
+			continue
+		}
+		if enc, serr := sealCookie(p.Cookie); serr == nil {
+			p.Cookie = enc
+			sealed++
+		} else {
+			// Better to lose the cookie than to keep it in the clear.
+			a.debugLog("privacy: cannot encrypt a stored cookie, dropping it: %v", serr)
+			p.Cookie = ""
+		}
+	}
+	if sealed == 0 {
+		return
+	}
+	out, merr := json.MarshalIndent(list, "", "  ")
+	if merr != nil {
+		return
+	}
+	if werr := writeFileAtomic(path, out); werr != nil {
+		a.debugLog("privacy: cannot rewrite tasks.json with encrypted cookies: %v", werr)
+		return
+	}
+	a.debugLog("privacy: encrypted %d stored cookies", sealed)
 }
 
 // scrubTaskBackups cleans the copies tasks.json leaves behind: the corrupt file

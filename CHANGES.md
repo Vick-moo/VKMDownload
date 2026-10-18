@@ -171,6 +171,30 @@ host manifest）或 TLS 证书固定，属于架构改动，需要你拍板；�
 "每次交接重新证明"、"`/pair` 强制 peer check"。另外未完成任务仍明文存 Cookie（续传需要），
 如需加密需要引入 DPAPI 与密钥管理。
 
+### 55. 收尾两项：未完成任务 Cookie 加密 + 更新检查开关（UNRELEASED）
+- **未完成任务的 Cookie 改为加密存放（Windows DPAPI）**：续传必须能原样重放浏览器的登录态，
+  所以这些 Cookie 不能删；但以前是明文写在 `tasks.json` 里，等于把一份登录会话放进了会被
+  备份、同步、拷贝的文件。现在保存前用 `CryptProtectData` 加密（`dpapi:v1:` 前缀，密钥由
+  用户的 Windows 登录派生、不绑本机共享），读取时解密；解不开（文件被拷到别的账户/机器、
+  配置被重置）时**只丢 Cookie、不丢任务**，下载照常从头开始。启动时会把旧版本留下的明文
+  Cookie 一并加密（`sealStoredCookies`），否则"几个月前暂停、之后没再写过"的记录会永远明文。
+  加密失败时选择"不写 Cookie"而不是"退回明文"——重新下载可以，泄露的会话收不回来。
+  验收：`TestStoredCookieIsNotReadableOnDisk`（盘上搜不到原值、且确实存了密文）、
+  `TestSealedCookieSurvivesARestart`（重启后能解回、续传不受影响）、
+  `TestUnreadableSealedCookieDegradesGracefully`（解不开只清 Cookie）、
+  `TestStartupSealsPlaintextCookiesFromOlderBuilds`（旧明文被就地加密且仍可解）、
+  `TestFinishedTasksStillDropTheirCookie`（已完成任务依旧不留 Cookie）。
+  非 Windows 构建（只用于 `GOOS=linux vet` 与测试）用显式 `plain:v1:` 标记，**不假装加密**。
+- **更新检查可关闭**：新增配置项 `checkUpdatesOnStart`（默认开）与设置页「软件更新 → 启动时
+  自动检查更新」开关。关闭后启动不再联网，手动「检查更新」按钮仍然可用。顺带把 `CheckUpdate`
+  改成走同一个可注入的 release 查询（以前启动检查和按钮各走一条路，测试只能覆盖一条）。
+  验收：`TestUpdateCheckToggleDefaultsOnAndIsHonoured`（关=不请求、开=请求一次）。
+- 门槛：根 `go vet` / `go test ./...`（engine 43.4s、cmd/idm 1.3s）、`GOOS=linux go vet`
+  （两个 module）、desktop `go vet` / `go test`（35.3s）、desktop `-race`（37.0s）、
+  前端 `tsc --noEmit` / `vitest`（30/30）、扩展 `node --test`（32/32）全部通过。
+- 文档：`PRIVACY.md` 的"已知取舍"第 1 条从"Cookie 明文"改写为"Cookie 已加密 + DPAPI 挡不住
+  什么"，第 4 条改为"更新检查可关闭"。
+
 ## 2026-10-18 — 0.2.7
 
 ### 48. 稳定性收尾批：测试基建、重启语义、并发防护、更新说明与大小交接（UNRELEASED）

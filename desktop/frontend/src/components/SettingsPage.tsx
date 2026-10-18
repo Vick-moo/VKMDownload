@@ -1045,6 +1045,13 @@ export function SettingsPage({
           </span>
         </div>
 
+        <Switch
+          title="启动时自动检查更新"
+          hint="关闭后不再自动联网检查；上面的「检查更新」按钮随时可用。这是本程序除下载外唯一的联网请求。"
+          checked={draft.checkUpdatesOnStart}
+          onChange={(v) => patch({ checkUpdatesOnStart: v })}
+        />
+
         <p className="settings-section__note">
           更新会先暂停全部任务再换文件，重启后任务都在，可继续下载。
           下载中的新版文件会做哈希校验，失败就丢弃重来。
