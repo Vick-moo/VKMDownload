@@ -113,8 +113,12 @@ func (s realUpdateSys) logf(format string, args ...any) {
 		return
 	}
 	defer f.Close()
+	// Sanitised for the same reason App.debugLog is: this writes the same file,
+	// and today the call sites only print paths and pids — but the next one that
+	// prints a URL would otherwise put a signed link in the log for good.
+	line := sanitizeLogText(fmt.Sprintf(format, args...))
 	_, _ = fmt.Fprintf(f, "%s [update] %s\n",
-		time.Now().Format(time.RFC3339), fmt.Sprintf(format, args...))
+		time.Now().Format(time.RFC3339), line)
 }
 
 func (realUpdateSys) now() time.Time               { return time.Now() }
