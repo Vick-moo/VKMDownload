@@ -10,6 +10,8 @@ interface Props {
   config: Config | null;
   /** From the binding; shown at the foot of the page. */
   version: string;
+  /** One-sentence report on the last update attempt, from the parent. */
+  updateNotice?: string;
   onSaved: (cfg: Config) => void;
 }
 
@@ -67,6 +69,7 @@ function Switch({
 export function SettingsPage({
   config,
   version,
+  updateNotice,
   onSaved,
 }: Props): JSX.Element {
   const [draft, setDraft] = useState<Draft | null>(config);
@@ -190,6 +193,23 @@ export function SettingsPage({
       setUpdMsg("应用更新失败，程序还在运行。");
     } catch (e) {
       setUpdMsg(`更新失败：${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setUpdBusy(false);
+    }
+  }
+
+  // Manual restore for an update that is running but was never confirmed.
+  // The backend hands off to the same hidden helper an update uses: this
+  // process quits, the helper puts the backup back in place and starts it.
+  // Reaching the line after the call means the quit was refused again.
+  async function restoreOldVersion() {
+    setUpdBusy(true);
+    setUpdMsg("");
+    try {
+      await api.rollbackUpdate();
+      setUpdMsg("还原未开始：程序没有退出。");
+    } catch (e) {
+      setUpdMsg(`还原失败：${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setUpdBusy(false);
     }
@@ -989,6 +1009,17 @@ export function SettingsPage({
                 onClick={applyUpd}
               >
                 重启生效
+              </button>
+            ) : null}
+            {updateNotice && updateNotice.includes("可在设置中手动还原") ? (
+              <button
+                type="button"
+                className="btn"
+                disabled={updBusy}
+                title={updateNotice}
+                onClick={() => void restoreOldVersion()}
+              >
+                还原旧版本
               </button>
             ) : null}
           </span>

@@ -26,6 +26,20 @@
 - 前端小修——列宽防抖在 `TaskList` 卸载时兜底落盘。为什么改：切筛选或打开设置会卸载列表，挂起的 300ms 定时器随组件消失，整段拖拽的宽度改动全部白费。
 - 有意不做（附原因）：程序端不主动探测未知大小——探测请求会消耗一次性下载链接的 token，为了不显示 0B 而把链接烧掉不值，0B 只是难看；`formatWhen` 跨午夜的 60 秒缓存窗口——触发条件苛刻且 60 秒后自愈，记录在案不修。
 
+### 49. 自更新链路重写：换文件搬进程序自身，唯一事实来源是握手文件（UNRELEASED）
+- 事故复盘（0.2.5 →「立即更新 → 重启生效」）：弹出两个黑终端窗口，等了很久，程序没变成新版，事后目录里是主 exe（新版）+ `.bak`（旧版）+ `.new`（又一份新版），没有任何进程在跑。两个根因：(a) `ApplyUpdate` 调 `runtime.Quit` 却没先 `requestQuit()`，而 Wails 的 `Frontend.Quit` 会先问 `OnBeforeClose`，"最小化到托盘"（默认开）把它变成隐藏窗口并否决退出——程序压根没退，旧脚本白等 30 秒，任务永久冻结在 updating；(b) 旧 PowerShell 脚本每轮重试都先 `Remove-Item $Bak`，第一轮改名成功、移动失败后，第二轮就把唯一的旧版删了，循环耗尽后主 exe 与备份都不存在，脚本因 `Test-Path $Exe` 为假而不启动任何程序（临时目录里无签名的 exe 被 Defender 锁住是移动反复失败的原因）。
+- 换文件搬进程序自身（新增 `update_swap.go` / `update_swap_windows.go` / `update_swap_other.go`）：`ApplyUpdate` 先把当前 exe 备份成 `exe.bak`（优先 `CreateHardLink`，同卷零拷贝；不支持时回退 `CopyFile` 并校验大小一致），再用 `exe.bak --apply-update …` 启动助手。助手必须从 `.bak` 启动——Windows 允许重命名运行中的 exe，但不允许覆盖它。
+- 原子替换：`MoveFileEx(staged, exe, REPLACE_EXISTING|WRITE_THROUGH)` 单步完成，主 exe 路径没有空窗，失败时旧版原样留在原地。失败按 0.2s/0.5s/1s/2s/3s 退避重试，总上限 60 秒（对付 Defender 锁新写入的 exe），每次记 `GetLastError`（用 `%w` 包装，可按 errno 判定 sharing violation，不依赖系统语言）。
+- 握手确认：旧进程用 `crypto/rand` 生成 32 字节 token（只允许 64 位十六进制进文件名），新版带 `--update-handshake <token>` 启动，在 `domReady` 原子写 `%AppData%\VKMDownload\update\<token>.ok`（不写 startup：Wails 不缓冲事件，startup 发的 emit 前端收不到）。助手每 200ms 查：文件出现且 pid 匹配=成功；自己启动的 pid 已退出=立即失败；超时 60 秒=失败。超时后唯一的次证据是"pid 还活着**且**有可见主窗口"——只活着不算（活着但没握手按失败回滚），有窗口才算"成功但未确认"：那时保留新 exe 与 bak 并提示，误回滚比不确认更糟。
+- 回滚：失败时 kill 自己记录的那个 pid（不误杀用户手动开的实例）→ 等它退出 → 把坏 exe 改名成 `exe.failed-<时间戳>` 留证 → `MoveFileEx(bak, exe)` 还原 → 启动旧版 → 标记 `rolled-back`。任何一步都不删 bak；只有新版确认活着才由新版在下次启动异步清理（助手运行时删不掉自己的映像），并且 `confirmed` 标记不会被后来失败的助手降级覆盖。
+- 阶段标记 `%AppData%\VKMDownload\update-state.json`（与 tasks.json 同目录；不能放 exe 目录，安装版在 Program Files 不可写）：`prepared → backed-up → replaced → launched → confirmed / rolled-back / aborted`，原子写（tmp+rename），同时记录新旧 exe 的 SHA-256，供下次启动判断当前跑的到底是哪个版本。
+- 下次启动只提示、绝不自动还原：新增 binding `ConsumeUpdateNotice() string`（前端主动拉，返回后写 `notified=true`，保证只提示一次；带 `notified` 字段而不是复用 `a.upd`，免得被 `checkUpdateOnce` 覆盖）+ `RollBackUpdate()` 手动还原。`startup` 里只做纯文件读，并在确认过的情况下清掉 bak 与标记。理由：程序能启动就说明 exe 在，更新其实成功只是没确认时自动还原等于把新版换回旧版。
+- `ApplyUpdate` 加固：`ready → applying` 由后端自己挡重入（前端 disabled 只是辅助）；更新前预检 staged（>1MB、`MZ` 头、SHA-256 与下载时记录一致）、exe 目录可写、磁盘余量，且都放在冻结任务之前（拒绝一次只花一次点击，冻结后拒绝要赔上一次暂停）；`runtime.Quit` 前必须 `requestQuit()`；Quit 后 10 秒看门狗，仍活着就 unfreeze 并报失败。删除 `writeUpdaterScript`。
+- 隐藏终端：统一 `hiddenCmd`（`CREATE_NO_WINDOW` + `HideWindow`；只靠 HideWindow 仍会创建并闪一下），用于启动更新助手、`shutdown`、`app.go` 两处 `cmd /c start`（`explorer` 是 GUI 子系统，不用管）；完成提示音改成直接调 `kernel32!Beep`，不再为一声提示拉 PowerShell。
+- 下载校验补强：`downloadUpdate` 把算出的 SHA-256 存进 App 字段供 `ApplyUpdate` 用；无论 GitHub 是否给 digest，都校验 `written == ContentLength`（已知时）、文件 >1MB、前两字节是 `MZ`；digest 为空时写日志。
+- 测试：换文件逻辑拆成可注入的小函数（`validateStaged` / `backupExe` / `swapExe` / `retryUpdate` / `waitForExit` / `awaitHandshake` / `markStage` / 标记读写），系统调用（复制、硬链接、替换、启进程、等进程、杀进程、时钟、日志）经 `updateSys` 接口注入；全部在 `t.TempDir()` 里用普通文件冒充 exe，注入时钟让 60 秒退避瞬间跑完，绝不碰真实 exe。覆盖：替换失败（旧版内容不变、bak 在、未启动新进程、bak 未删）/ 重试三次后成功且退避序列正确 / 60 秒放弃 / 备份回退到复制 / 截断备份被拒 / staged 各种坏文件 / 握手成功 / 别人的握手不算数 / 新版秒退回滚+失败证据 / 握手超时回滚 / 活着且有窗口不回滚 / 旧进程不退出→不碰文件标 aborted / 启新版失败回滚且旧版不丢 / `ApplyUpdate` 退出被否决必须 unfreeze 并返回错误（本次事故回归）/ 标记损坏不删任何东西 / 通知只消费一次 / 各阶段文案 / confirmed 不被降级 / `hiddenCmd` 带 `CREATE_NO_WINDOW` / Windows 真实锁：`CreateFile` 不带 `FILE_SHARE_DELETE` 打开目标→replace 返回 sharing violation 且旧内容不变，关句柄后同一调用成功。
+- 下一步（未完成）：真机端到端（装 0.2.5 → 更新到 0.2.6）量一下 Defender 锁与 WebView2 冷启动的实际耗时，再决定握手 60 秒超时是否要调大；版本号待 bump。前端已接：`App.tsx` 挂载时拉一次 `ConsumeUpdateNotice`，有话要说的更新事件（回滚/未确认/未开始）以横幅常驻显示直到手动关掉；设置 → 软件更新 里在后端明确"可在设置中手动还原"时显示「还原旧版本」按钮（走 `RollBackUpdate`，同一隐藏助手执行还原）。
+
 ## 2026-10-15 — 0.2.5（已发布，https://github.com/Vick-moo/VKMDownload/releases/tag/v0.2.5）
 
 ### 1. 托盘退出后进程残留（bug）

@@ -54,6 +54,8 @@ function App(): JSX.Element {
   const updateCancelled = useRef(false);
   /** The version whose "what's new" dialog is open, from the banner. */
   const [updateNotesFor, setUpdateNotesFor] = useState<string | null>(null);
+  /** One-sentence report on the last update attempt; empty when there is none. */
+  const [updateNoticeMsg, setUpdateNoticeMsg] = useState("");
   /** The bulk-delete confirmation; the count in it comes from the live list. */
   const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
   /** Generation counter for list reloads; see reload below. */
@@ -211,6 +213,18 @@ function App(): JSX.Element {
       .then((v) => setVersion(v))
       .catch(() => {
         // A missing version is not worth surfacing; the footer just stays empty.
+      });
+    // What became of the last update attempt (rolled back, never confirmed,
+    // never started), pulled once: the backend hands it out exactly once per
+    // attempt, and a pull here is the only channel a page that mounts after
+    // startup can still receive.
+    void api
+      .consumeUpdateNotice()
+      .then((msg) => {
+        if (msg) setUpdateNoticeMsg(msg);
+      })
+      .catch(() => {
+        // No notice or a bridge hiccup is not worth surfacing on its own.
       });
     void reload();
   }, [reload, noteUpdate]);
@@ -683,6 +697,23 @@ function App(): JSX.Element {
       />
 
       <main className="main">
+        {updateNoticeMsg ? (
+          // What became of the last update attempt, told once by the backend
+          // and kept on screen until dismissed: a rollback notice that fades
+          // after five seconds is a notice nobody reads.
+          <div className="updatebar" role="status">
+            <span>{updateNoticeMsg}</span>
+            <span className="updatebar__actions">
+              <button
+                type="button"
+                className="btn"
+                onClick={() => setUpdateNoticeMsg("")}
+              >
+                知道了
+              </button>
+            </span>
+          </div>
+        ) : null}
         {update && (
           <div className="updatebar" role="status">
             <span>
@@ -734,6 +765,7 @@ function App(): JSX.Element {
           <SettingsPage
             config={config}
             version={version}
+            updateNotice={updateNoticeMsg}
             onSaved={(c) => {
               setConfig(c);
               // Re-read from the Go side: normalisation may have adjusted

@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime/debug"
 	"sort"
@@ -1725,20 +1724,21 @@ func (m *Manager) finishPlanEnd(intervened bool) {
 
 // playAlert makes an audible signal, so a plan that finishes while the user is
 // away from the screen is still noticed.
+//
+// Two rising tones through kernel32!Beep, with no asset to ship and no
+// dependency on the user's sound scheme. This used to run PowerShell for the
+// sound, which flashed a console window every time a plan finished.
 func playAlert() {
-	go func() {
-		// Two rising tones through the console. No asset to ship, and it does
-		// not depend on the user's sound scheme being configured.
-		const script = "[console]::beep(880,250); [console]::beep(1175,400)"
-		_ = exec.Command("powershell", "-NoProfile", "-Command", script).Run()
-	}()
+	beepAlert()
 }
 
 // shutdownMachine powers the machine off, with enough delay to change one's
 // mind: "shutdown /a" cancels it.
 func shutdownMachine() {
 	go func() {
-		_ = exec.Command("shutdown", "/s", "/t", "60",
+		// shutdown.exe is a console application; without CREATE_NO_WINDOW it
+		// pops a black window over whatever the user is doing.
+		_ = hiddenCmd("shutdown", "/s", "/t", "60",
 			"/c", "VKMDownload 计划已完成，60 秒后关机（运行 shutdown /a 取消）").Run()
 	}()
 }

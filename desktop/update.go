@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -195,7 +194,9 @@ func safeVersion(v string) bool {
 
 // UpdateStatus is the self-update state machine the front-end polls.
 type UpdateStatus struct {
-	// State is one of idle, downloading, ready, failed.
+	// State is one of idle, downloading, ready, applying, failed. "applying"
+	// is the window between a click on 立即更新 and the process exiting; it
+	// exists so a second click cannot start a second helper.
 	State      string `json:"state"`
 	Version    string `json:"version"`
 	Downloaded int64  `json:"downloaded"`
@@ -300,6 +301,8 @@ func (a *App) StartUpdate() (UpdateStatus, error) {
 
 	a.updMu.Lock()
 	a.upd = UpdateStatus{State: "downloading", Version: strings.TrimPrefix(strings.TrimPrefix(rel.tag, "v"), "V")}
+	// Whatever was verified before belongs to the previous attempt.
+	a.updStagedSHA, a.updStagedSize = "", 0
 	st := a.upd
 	a.updMu.Unlock()
 
@@ -393,38 +396,102 @@ func (a *App) downloadUpdate(rel releaseAsset, staged string) {
 		}
 	}
 
+	// The digest is the one check that ties the bytes on disk to the release
+	// GitHub published. When the release carries none there is nothing to
+	// compare against, so the local checks below have to carry the weight —
+	// and the gap is written to the log rather than silently accepted.
+	sum := hex.EncodeToString(h.Sum(nil))
 	if rel.digest != "" {
 		want := strings.TrimPrefix(rel.digest, "sha256:")
-		if got := hex.EncodeToString(h.Sum(nil)); !strings.EqualFold(got, want) {
+		if !strings.EqualFold(sum, want) {
 			_ = os.Remove(staged)
 			fail(fmt.Errorf("新版文件校验失败，已丢弃"))
 			return
 		}
+	} else {
+		a.debugLog("release %s reported no digest; relying on length and header checks", rel.tag)
+	}
+
+	// A truncated transfer that still returns 200 is the classic silent
+	// failure here: the file exists, is large, and is not the program.
+	if total > 0 && written != total {
+		_ = os.Remove(staged)
+		fail(fmt.Errorf("下载不完整：收到 %d 字节，应为 %d", written, total))
+		return
+	}
+	if written < 1<<20 {
+		_ = os.Remove(staged)
+		fail(fmt.Errorf("下载到的新版文件过小（%d 字节）", written))
+		return
+	}
+	if magic, err := readPrefix(staged, 2); err != nil || string(magic) != "MZ" {
+		_ = os.Remove(staged)
+		fail(fmt.Errorf("下载到的文件不是可执行文件"))
+		return
 	}
 
 	a.updMu.Lock()
 	a.upd.State = "ready"
 	a.upd.Downloaded = written
 	a.upd.Total = written
+	// Kept for the last pre-swap check, and for telling the next launch which
+	// build is which after an update that was never confirmed.
+	a.updStagedSHA, a.updStagedSize = sum, written
 	a.updMu.Unlock()
 }
 
-// ApplyUpdate pauses every transfer, waits for them to settle, then hands off
-// to a helper script that swaps the executable and restarts the app.
-//
-// Pausing (not killing) is what makes updating mid-download safe: partial
-// files and sidecars stay on disk, and after the restart every task loads as
-// paused, ready to resume. The updater script only moves files once this
-// process has exited, so the running image is never replaced under itself.
-func (a *App) ApplyUpdate() error {
-	a.updMu.Lock()
-	ready := a.upd.State == "ready"
-	a.updMu.Unlock()
-	if !ready {
-		return fmt.Errorf("新版还没下载好")
-	}
+// ------------------------------------------------------- injected plumbing
 
-	// Freeze scheduling first, so pausing cannot wake queued work back up.
+// syscalls is the update path's view of the operating system. Tests replace it
+// with a fake so no test can touch a real executable.
+func (a *App) syscalls() updateSys {
+	if a.sys == nil {
+		return realUpdateSys{}
+	}
+	return a.sys
+}
+
+// quitApp is runtime.Quit, injectable for the same reason emit and hide are:
+// tests must be able to observe the "quit was requested and refused" path.
+func (a *App) quitApp() func(context.Context) {
+	if a.quit == nil {
+		return runtime.Quit
+	}
+	return a.quit
+}
+
+func (a *App) pauseFor(d time.Duration) {
+	if a.sleepFor == nil {
+		time.Sleep(d)
+		return
+	}
+	a.sleepFor(d)
+}
+
+func (a *App) executablePaths() func() (string, string, error) {
+	if a.exePaths == nil {
+		return stagedUpdatePath
+	}
+	return a.exePaths
+}
+
+// updateStatePath is the marker the helper and the next launch share. It sits
+// next to tasks.json in the data directory, never next to the executable: an
+// install under Program Files is not writable for the user running the app.
+func (a *App) updateStatePath() string {
+	return filepath.Join(a.dataDir(), "update-state.json")
+}
+
+// updateDir holds the handshake files the new version drops for the helper.
+func (a *App) updateDir() string { return filepath.Join(a.dataDir(), "update") }
+
+// ------------------------------------------------------------ applying
+
+// freezeForUpdate stops scheduling and pauses every transfer, so the executable
+// is swapped under a still machine. Pausing rather than killing is what makes
+// updating mid-download safe: partial files and sidecars stay on disk, and after
+// the restart every task loads as paused, ready to resume.
+func (a *App) freezeForUpdate() (func(), error) {
 	a.mgr.mu.Lock()
 	a.mgr.updating = true
 	a.mgr.mu.Unlock()
@@ -439,64 +506,354 @@ func (a *App) ApplyUpdate() error {
 	for a.mgr.activeCount() > 0 {
 		if time.Now().After(deadline) {
 			unfreeze()
-			return fmt.Errorf("有任务停不下来，已取消更新")
+			return unfreeze, fmt.Errorf("有任务停不下来，已取消更新")
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
+	return unfreeze, nil
+}
 
-	exe, staged, err := stagedUpdatePath()
+// preflightExeDir proves the program directory is writable and has room for one
+// more copy of the executable *before* anything is started. Failing here costs
+// the user a click; failing after the helper was launched costs a restart with a
+// frozen task list.
+func preflightExeDir(exe string, need int64) error {
+	dir := filepath.Dir(exe)
+	f, err := os.CreateTemp(dir, ".vkmdownload-writable-*")
 	if err != nil {
-		unfreeze()
-		return err
+		return fmt.Errorf("程序目录不可写，请把程序移到可写目录或用管理员权限运行：%w", err)
 	}
-	if _, err := os.Stat(staged); err != nil {
-		unfreeze()
-		return fmt.Errorf("新版文件不在了，请重新下载")
-	}
+	name := f.Name()
+	_ = f.Close()
+	_ = os.Remove(name)
 
-	script, err := writeUpdaterScript()
-	if err != nil {
-		unfreeze()
-		return err
+	if need > 0 {
+		if free := freeSpaceBytes(dir); free > 0 && free < need+need/2 {
+			return fmt.Errorf("磁盘空间不足：更新需要约 %d MB", (need+need/2)/(1<<20))
+		}
 	}
-	// #nosec G204 — the script path is created by this app in the temp dir,
-	// not taken from any user input.
-	cmd := exec.Command("powershell", "-NoProfile", "-NonInteractive",
-		"-ExecutionPolicy", "Bypass", "-File", script,
-		"-TargetPid", strconv.Itoa(os.Getpid()),
-		"-Exe", exe, "-Staged", staged)
-	if err := cmd.Start(); err != nil {
-		unfreeze()
-		return err
-	}
-	// The updater waits for this process to exit before touching the files.
-	runtime.Quit(a.ctx)
 	return nil
 }
 
-// writeUpdaterScript renders the file-swap helper. It is ASCII-only on
-// purpose: Windows PowerShell reads a .ps1 as ANSI unless it carries a BOM,
-// and any non-ASCII in it would need that handling.
-func writeUpdaterScript() (string, error) {
-	const script = `param([int]$TargetPid, [string]$Exe, [string]$Staged)
-$Bak = "$Exe.bak"
-try { (Get-Process -Id $TargetPid -ErrorAction Stop).WaitForExit(30000) } catch {}
-for ($i = 0; $i -lt 60; $i++) {
-  if (!(Test-Path $Staged)) { break }
-  try {
-    if (Test-Path $Bak) { Remove-Item $Bak -Force -ErrorAction Stop }
-    if (Test-Path $Exe) { Rename-Item $Exe $Bak -ErrorAction Stop }
-    Move-Item $Staged $Exe -Force -ErrorAction Stop
-    break
-  } catch { Start-Sleep -Milliseconds 500 }
-}
-if (Test-Path $Exe) { Start-Process $Exe }
-Remove-Item $Bak -Force -ErrorAction SilentlyContinue
-Remove-Item $PSCommandPath -Force -ErrorAction SilentlyContinue
-`
-	path := filepath.Join(os.TempDir(), "vkmdownload-update.ps1")
-	if err := os.WriteFile(path, []byte(script), 0o644); err != nil {
-		return "", err
+// ApplyUpdate pauses every transfer, waits for them to settle, then hands off to
+// a helper that swaps the executable and starts the new build.
+//
+// The helper is this same executable, started from a backup copy of itself
+// (exe.bak). It has to be the backup: Windows lets a running image be renamed
+// but never overwritten, so the process that performs the swap must not be the
+// file being swapped.
+func (a *App) ApplyUpdate() error {
+	a.updMu.Lock()
+	if a.upd.State != "ready" {
+		state := a.upd.State
+		a.updMu.Unlock()
+		if state == "applying" {
+			return fmt.Errorf("更新正在进行中")
+		}
+		return fmt.Errorf("新版还没下载好")
 	}
-	return path, nil
+	// ready -> applying inside the same lock the poller reads: the front-end
+	// disables its button, but nothing stops a second binding call.
+	a.upd.State = "applying"
+	wantSize, wantSHA, version := a.updStagedSize, a.updStagedSHA, a.upd.Version
+	a.updMu.Unlock()
+
+	fail := func(err error) error {
+		a.updMu.Lock()
+		a.upd.State = "failed"
+		a.upd.Error = err.Error()
+		a.updMu.Unlock()
+		return err
+	}
+
+	unfreeze := func() {}
+	sys := a.syscalls()
+	exe, staged, err := a.executablePaths()()
+	if err != nil {
+		return fail(err)
+	}
+	// Everything that can be checked without touching the running machine is
+	// checked first: a refusal here costs the user a click, while a refusal
+	// after the freeze costs them a paused download list.
+	if err := validateStaged(sys, staged, wantSize, wantSHA); err != nil {
+		return fail(err)
+	}
+	if err := preflightExeDir(exe, sys.size(staged)); err != nil {
+		return fail(err)
+	}
+
+	unfreeze, err = a.freezeForUpdate()
+	if err != nil {
+		return fail(err)
+	}
+
+	bak := exe + ".bak"
+	if err := backupExe(sys, exe, bak); err != nil {
+		unfreeze()
+		return fail(err)
+	}
+
+	args := helperArgs{
+		Mode:   modeApply,
+		Exe:    exe,
+		Bak:    bak,
+		Staged: staged,
+		State:  a.updateStatePath(),
+		OkDir:  a.updateDir(),
+		Token:  newUpdateToken(),
+		Parent: os.Getpid(),
+	}
+	oldSHA, _ := sys.sha256File(bak)
+	newSHA, _ := sys.sha256File(staged)
+	st := updateState{
+		Stage:   stagePrepared,
+		Version: version,
+		Exe:     exe,
+		Bak:     bak,
+		Staged:  staged,
+		OldSHA:  oldSHA,
+		NewSHA:  newSHA,
+		Time:    sys.now().Format(time.RFC3339),
+	}
+	if err := updateStateSave(args.State, st); err != nil {
+		unfreeze()
+		return fail(fmt.Errorf("写入更新状态失败：%w", err))
+	}
+	markStage(sys, args.State, stageBackedUp, "")
+
+	if err := a.handoffToHelper(args, unfreeze); err != nil {
+		return fail(err)
+	}
+	return nil
+}
+
+// handoffToHelper starts the helper and then gets this process out of the way.
+//
+// requestQuit first, then runtime.Quit: Wails' Windows Frontend.Quit consults
+// OnBeforeClose before doing anything, and with "minimise to tray" on that hook
+// hides the window and vetoes the quit. Without the explicit intent recorded
+// here the process survives, the helper waits out its full timeout and the
+// update is frozen in "updating" forever — which is exactly what was reported
+// as "the update did nothing and the app had to be killed".
+//
+// The loop after the quit is a watchdog: on success this process is gone before
+// the first tick. If it is still here the quit was refused, and the caller must
+// be told rather than left with a frozen scheduler.
+func (a *App) handoffToHelper(args helperArgs, unfreeze func()) error {
+	sys := a.syscalls()
+	pid, err := sys.startProcess(args.Bak, args.argv()...)
+	if err != nil {
+		if unfreeze != nil {
+			unfreeze()
+		}
+		return fmt.Errorf("启动更新助手失败：%w", err)
+	}
+	a.debugLog("update helper started pid=%d mode=%s", pid, args.Mode)
+
+	_ = a.mgr.saveTasks()
+	a.requestQuit()
+	a.quitApp()(a.ctx)
+
+	const quitWatchdog = 10 * time.Second
+	for waited := time.Duration(0); waited < quitWatchdog; waited += 500 * time.Millisecond {
+		a.pauseFor(500 * time.Millisecond)
+	}
+	if unfreeze != nil {
+		unfreeze()
+	}
+	a.debugLog("quit was refused; no update was started")
+	return fmt.Errorf("程序没有退出，更新未开始")
+}
+
+// ------------------------------------------------------- the next launch
+
+// ConsumeUpdateNotice reports what became of the last update attempt, once.
+//
+// The front-end pulls this instead of being told by an event: Wails buffers no
+// events, so anything emitted from startup is gone before a listener exists.
+// Handing it out only once is what keeps a repeated page load from showing a
+// stale warning.
+//
+// Apart from the "already told the user" flag, this touches nothing. An update
+// that was never confirmed must not be undone automatically: reaching this code
+// at all means an executable started, and replacing it with the backup because a
+// handshake file went missing would turn a working new version into a downgrade.
+func (a *App) ConsumeUpdateNotice() string {
+	a.updMu.Lock()
+	defer a.updMu.Unlock()
+
+	path := a.updateStatePath()
+	st, err := updateStateLoad(path)
+	if err != nil {
+		// A marker that cannot be parsed is not a licence to delete anything;
+		// the backup may be the only working copy on this machine.
+		a.debugLog("update state unreadable (%v); leaving every file in place", err)
+		return ""
+	}
+	if st == nil || st.Notified {
+		return ""
+	}
+	msg := a.updateNotice(st)
+	if msg == "" {
+		return ""
+	}
+	st.Notified = true
+	if err := updateStateSave(path, *st); err != nil {
+		a.debugLog("cannot mark the update notice as shown: %v", err)
+	}
+	return msg
+}
+
+// updateNotice turns a marker into one sentence for the user, using the hash of
+// the executable that is actually running to decide which of the two builds this
+// is.
+func (a *App) updateNotice(st *updateState) string {
+	current := ""
+	if st.Exe != "" {
+		if sha, err := a.syscalls().sha256File(st.Exe); err == nil {
+			current = sha
+		}
+	}
+	runningNew := st.NewSHA != "" && strings.EqualFold(current, st.NewSHA)
+
+	switch st.Stage {
+	case stageRolledBack:
+		reason := st.Reason
+		if reason == "" {
+			reason = "新版没有正常启动"
+		}
+		return fmt.Sprintf("上次更新失败，已自动恢复到旧版本（%s）。", reason)
+
+	case stageAborted:
+		msg := "上次更新没有完成，程序仍是旧版本。"
+		if st.Reason != "" {
+			msg += "（" + st.Reason + "）"
+		}
+		return msg
+
+	case stagePrepared, stageBackedUp:
+		return "上次更新没有开始，程序仍是旧版本。请重新检查更新。"
+
+	case stageReplaced, stageLaunched:
+		if runningNew {
+			// The new build is demonstrably running; only the handshake went
+			// missing. Say so, keep the backup and offer the manual restore
+			// instead of guessing.
+			return fmt.Sprintf("新版 %s 已在运行，但更新没有最终确认。旧版本备份仍保留在 %s，可在设置中手动还原。",
+				st.Version, st.Bak)
+		}
+		return "上次更新没有生效，程序仍是旧版本，请重新下载更新。"
+
+	case stageConfirmed:
+		// A confirmed update has nothing to report; the marker is only kept so
+		// the next start can clean up after it.
+		return ""
+
+	default:
+		return "更新状态未知，未改动任何文件。"
+	}
+}
+
+// RollBackUpdate puts the backup of an unconfirmed update back in place.
+//
+// It needs the same hand-off as an update: the running executable cannot be
+// replaced under itself, so a helper started from the backup does the swap.
+func (a *App) RollBackUpdate() error {
+	path := a.updateStatePath()
+	st, err := updateStateLoad(path)
+	if err != nil {
+		return fmt.Errorf("更新状态文件损坏，无法还原")
+	}
+	if st == nil {
+		return fmt.Errorf("没有可还原的更新记录")
+	}
+	exe, _, err := a.executablePaths()()
+	if err != nil {
+		return err
+	}
+	if st.Bak == "" || !a.syscalls().exists(st.Bak) {
+		return fmt.Errorf("旧版本备份已不在，无法还原")
+	}
+
+	unfreeze, err := a.freezeForUpdate()
+	if err != nil {
+		return err
+	}
+	args := helperArgs{
+		Mode:   modeRollback,
+		Exe:    exe,
+		Bak:    st.Bak,
+		State:  path,
+		Parent: os.Getpid(),
+	}
+	return a.handoffToHelper(args, unfreeze)
+}
+
+// writeUpdateHandshake tells the helper this build is up and running.
+//
+// It runs at domReady rather than startup: the window existing is the evidence
+// the helper needs, and startup emits are dropped by Wails anyway. The file
+// names this pid, so a stale handshake from an earlier attempt can never pass
+// for this one's.
+func (a *App) writeUpdateHandshake() {
+	tok := a.updateToken
+	if !safeUpdateToken(tok) {
+		return
+	}
+	path := filepath.Join(a.updateDir(), tok+".ok")
+	if err := writeHandshake(path, os.Getpid()); err != nil {
+		a.debugLog("cannot write the update handshake: %v", err)
+		return
+	}
+	a.debugLog("update handshake written: %s", path)
+	// Confirming the record here is what lets the *next* start clean up the
+	// backup: this process cannot have its own directory entry edited into
+	// place, and the helper it is talking to runs from that backup.
+	if st, err := updateStateLoad(a.updateStatePath()); err == nil && st != nil {
+		st.Stage = stageConfirmed
+		st.Time = time.Now().Format(time.RFC3339)
+		_ = updateStateSave(a.updateStatePath(), *st)
+	}
+}
+
+// cleanupStaleUpdate removes what a finished update leaves behind: the backup
+// copy of the previous version and the marker. It only acts when the record
+// says the update was confirmed *and* the running executable is the one that
+// record describes — the backup is the only other copy of a working program, so
+// a wrong deletion here cannot be undone.
+func (a *App) cleanupStaleUpdate() {
+	path := a.updateStatePath()
+	st, err := updateStateLoad(path)
+	if err != nil {
+		a.debugLog("update state unreadable: %v", err)
+	} else if st != nil && st.Stage == stageConfirmed && st.Bak != "" {
+		sys := a.syscalls()
+		if sha, herr := sys.sha256File(st.Exe); herr == nil &&
+			(st.NewSHA == "" || strings.EqualFold(sha, st.NewSHA)) {
+			if rerr := sys.remove(st.Bak); rerr != nil {
+				a.debugLog("cannot remove the update backup %s: %v", st.Bak, rerr)
+			} else {
+				a.debugLog("removed the update backup %s", st.Bak)
+			}
+			_ = sys.remove(path)
+		}
+	}
+	a.cleanupHandshakeFiles()
+}
+
+// cleanupHandshakeFiles drops handshake files left by earlier attempts. The one
+// just written is minutes old at worst, so only old files go.
+func (a *App) cleanupHandshakeFiles() {
+	entries, err := os.ReadDir(a.updateDir())
+	if err != nil {
+		return
+	}
+	cutoff := time.Now().Add(-24 * time.Hour)
+	for _, e := range entries {
+		info, err := e.Info()
+		if err != nil || info.ModTime().After(cutoff) {
+			continue
+		}
+		_ = os.Remove(filepath.Join(a.updateDir(), e.Name()))
+	}
 }

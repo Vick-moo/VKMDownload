@@ -2,6 +2,8 @@ package main
 
 import (
 	"embed"
+	"os"
+	"path/filepath"
 
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
@@ -24,7 +26,18 @@ const (
 )
 
 func main() {
+	// The update helper is this same executable, started from its own backup
+	// copy. It must never reach wails.Run: it needs no window, and creating the
+	// single-instance lock or the WebView2 runtime from a process that is about
+	// to be replaced would be pointless at best.
+	if args, ok := parseHelperArgs(os.Args[1:]); ok {
+		os.Exit(runHelper(args, realUpdateSys{
+			logPath: filepath.Join(filepath.Dir(args.State), "vkmdownload.log"),
+		}))
+	}
+
 	app := NewApp()
+	app.updateToken = parseHandshakeToken(os.Args[1:])
 
 	err := wails.Run(&options.App{
 		Title:     "VKMDownload",

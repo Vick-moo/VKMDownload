@@ -42,10 +42,30 @@ type App struct {
 	// release-notes cache below.
 	updMu sync.Mutex
 	upd   UpdateStatus
+	// updStagedSHA/updStagedSize identify the downloaded replacement. They are
+	// recorded when the download finished, re-checked immediately before the
+	// swap, and written into the update marker so the next launch can tell
+	// which of the two builds is actually running.
+	updStagedSHA  string
+	updStagedSize int64
 	// notesVersion/notesBody cache the last fetched release notes so opening
 	// the "what's new" dialog twice costs one network round trip.
 	notesVersion string
 	notesBody    string
+
+	// updateToken is the secret this process was started with by an update
+	// helper. Non-empty means "I am the new version": domReady then writes the
+	// handshake file the helper is waiting for, which is the only proof the
+	// update worked.
+	updateToken string
+
+	// sys, quit, sleepFor and exePaths are the update path's outside world,
+	// injected so the whole hand-off (including a quit that never happens) can
+	// be tested without a real executable anywhere near it.
+	sys      updateSys
+	quit     func(ctx context.Context)
+	sleepFor func(d time.Duration)
+	exePaths func() (exe, staged string, err error)
 
 	// clipboard monitoring state
 	lastClip    string
@@ -91,6 +111,10 @@ func NewApp() *App {
 	a.hide = func(ctx context.Context) {
 		runtime.WindowHide(ctx)
 	}
+	a.quit = runtime.Quit
+	a.sys = realUpdateSys{}
+	a.sleepFor = time.Sleep
+	a.exePaths = stagedUpdatePath
 	a.mgr = NewManager(a)
 	return a
 }
@@ -146,6 +170,11 @@ func (a *App) startup(ctx context.Context) {
 	// start exactly as fast as online ones.
 	go a.checkUpdateOnce()
 
+	// Whatever the previous update left behind (a backup copy of the old
+	// version, an old handshake file) is swept in the background. It never
+	// touches anything unless the record proves the update succeeded.
+	go a.cleanupStaleUpdate()
+
 	a.mgr.loadTasks()
 	go a.mgr.Run(ctx)
 	// Tasks that were queued when the app closed resume waiting for a slot;
@@ -172,6 +201,11 @@ func (a *App) domReady(ctx context.Context) {
 	// case where the initial listTasks call slipped in before loadTasks
 	// finished and saw an empty table.
 	a.emit("tasks:loaded", nil)
+
+	// The update handshake belongs here for the same reason: the file it writes
+	// is this process saying "the new build reached a running window", and that
+	// is only true once the page has loaded.
+	a.writeUpdateHandshake()
 }
 
 // shutdown releases resources as the application exits.
@@ -397,8 +431,10 @@ func (a *App) OpenFile(id string) error {
 			return os.ErrNotExist
 		}
 		// "cmd /c start" hands the file to its registered handler, which is
-		// what a double-click in Explorer would do.
-		return exec.Command("cmd", "/c", "start", "", v.Dest).Start()
+		// what a double-click in Explorer would do. It must run without a
+		// console: cmd is a console application, and starting one without
+		// CREATE_NO_WINDOW flashes a black window over the user's work.
+		return hiddenCmd("cmd", "/c", "start", "", v.Dest).Start()
 	}
 	return os.ErrNotExist
 }
@@ -587,6 +623,6 @@ func (a *App) afterTaskFinished(v TaskView) {
 		return
 	}
 	if cfg.OpenFileWhenDone {
-		_ = exec.Command("cmd", "/c", "start", "", v.Dest).Start()
+		_ = hiddenCmd("cmd", "/c", "start", "", v.Dest).Start()
 	}
 }
