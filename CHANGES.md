@@ -205,7 +205,7 @@ host manifest）或 TLS 证书固定，属于架构改动，需要你拍板；�
   `webviewDataDir`）。默认位置是 `%APPDATA%\<exe 名>`：浏览器缓存没有理由跟着漫游配置跨机器同步，
   而且该目录一旦被删掉，某些环境下 WebView2 重建失败，表现为程序完全打不开窗口
   （`error creating controller with 8000ffff`）。
-- 新增 `release-notes-0.2.8.md`（按 §21 结构：短摘要 + `<!-- app-notes-end -->` + 详细说明）。
+- 新增 `release-notes/0.2.8.md`（按 §21 结构：短摘要 + `<!-- app-notes-end -->` + 详细说明）。
 - 验证：根与 desktop 两个 module 的 `go vet`、`go test`、`internal/engine` 与 desktop 的 `-race`、
   `GOOS=linux go vet`、前端 `tsc --noEmit` 与 `vitest`（30 例）、扩展 `node --test`（32 例）全绿；
   真机启动确认窗口出现、`local api listening on 127.0.0.1:18888` 写入日志、新缓存目录生成。
@@ -744,4 +744,4 @@ host manifest）或 TLS 证书固定，属于架构改动，需要你拍板；�
 - Multi-select + multi-edit tasks in the list. Bulk start/stop/remove DONE (2026-10-15, CHANGES #12). Batch field editing (connections/destination) still open.
 
 ## 2026-10-14 — 0.2.4（已发布）
-- 见 `release-notes-0.2.4.md`。
+- 见 `release-notes/0.2.4.md`。
