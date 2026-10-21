@@ -385,6 +385,29 @@ func (a *App) SetConfig(cfg Config) error {
 	return nil
 }
 
+// DefaultDestFor is the folder the placement dialog pre-fills for a filename.
+//
+// With "organize by type" on, a finished automatic download would be moved into
+// its group folder, so the dialog asks for that folder up front instead of
+// showing the download directory and then moving the file after the fact. It
+// returns the download directory when organizing is off, when no group matches,
+// and when the filename is empty or has no extension — those are exactly the
+// cases where organizeTarget has no target.
+//
+// The dialog's own value still wins: the user may type another folder, and a
+// task created from the dialog is Manual, so the organizer leaves it where the
+// user put it.
+func (a *App) DefaultDestFor(filename string) string {
+	cfg := a.Config()
+	if cfg.OrganizeEnabled {
+		if dst := organizeTarget(cfg.OrganizeGroups, cfg.OrganizeDir,
+			sanitizeSuggestedName(filename)); dst != "" {
+			return filepath.Dir(dst)
+		}
+	}
+	return cfg.DownloadDir
+}
+
 // PickDirectory opens a folder chooser and returns the selection.
 func (a *App) PickDirectory() (string, error) {
 	return runtime.OpenDirectoryDialog(a.ctx, runtime.OpenDialogOptions{
@@ -643,13 +666,44 @@ func (a *App) ClipboardProbe() (map[string]string, error) {
 // so the two cannot drift: they did, briefly, because this was a literal.
 func (a *App) Version() string { return appVersion }
 
+// topmostHold is how long the window stays pinned after BringToFront. Long
+// enough for Windows to actually put the window in front of the browser and for
+// the dialog to become visible, short enough that it does not sit on top of
+// everything while the user fills it in.
+const topmostHold = 1200 * time.Millisecond
+
+// topmostGen numbers the current pin. A burst of downloads calls BringToFront
+// several times in quick succession, and the timer of an older call must not
+// release the pin the newer call is relying on — otherwise the window drops
+// behind the browser again just as the second dialog opens.
+var topmostGen atomic.Int64
+
+// holdTopmost pins the window for hold, then releases it, unless a newer call
+// has taken the pin over in the meantime. The setter is a parameter so the
+// bookkeeping can be tested without a Wails frontend.
+func holdTopmost(hold time.Duration, set func(onTop bool)) {
+	gen := topmostGen.Add(1)
+	set(true)
+	time.AfterFunc(hold, func() {
+		if topmostGen.Load() != gen {
+			return
+		}
+		set(false)
+	})
+}
+
 // BringToFront pulls the main window in front of other windows.
 //
 // It exists for the ask-location dialog: a download arrives while the user is
 // in the browser, and the dialog opens inside our window — which sits behind
-// the browser, forcing the user to minimise it to find the question. Wails
-// has no focus API, so this uses the standard always-on-top flash: pin, show,
-// unpin. The window ends up frontmost in z-order without staying pinned.
+// the browser, forcing the user to minimise it to find the question.
+//
+// Restore and show first, then ask Windows for the foreground explicitly
+// (raiseWindow: attach to the foreground thread and set it). That call is
+// allowed to fail — the foreground lock exists to stop exactly this kind of
+// stealing — so the window is also pinned on top for a moment: pin, wait, let
+// go. The earlier pin-then-unpin in the same instant was a no-op, because the
+// two calls arrived before the window manager had applied either.
 func (a *App) BringToFront() {
 	ctx := a.ctx
 	if ctx == nil {
@@ -657,8 +711,13 @@ func (a *App) BringToFront() {
 	}
 	runtime.WindowUnminimise(ctx)
 	runtime.WindowShow(ctx)
-	runtime.WindowSetAlwaysOnTop(ctx, true)
-	runtime.WindowSetAlwaysOnTop(ctx, false)
+	// A window brought up from the tray is shown but not focused; the raise is
+	// what actually puts it in front of the browser. On non-Windows builds this
+	// reports false without doing anything.
+	_ = raiseWindow()
+	holdTopmost(topmostHold, func(onTop bool) {
+		runtime.WindowSetAlwaysOnTop(ctx, onTop)
+	})
 }
 
 // FindUnfinishedByURL returns the id of the unfinished task for url, or "".

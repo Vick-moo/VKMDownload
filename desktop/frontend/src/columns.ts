@@ -9,10 +9,10 @@
  */
 
 /** Preferred column widths in pixels, COLUMNS order plus the action track. */
-export const DEFAULT_WIDTHS = [280, 76, 124, 96, 120, 140];
+export const DEFAULT_WIDTHS = [280, 76, 124, 132, 120, 140];
 
 /** Smallest a column may be. */
-export const MIN_WIDTHS = [140, 62, 104, 78, 96, 112];
+export const MIN_WIDTHS = [140, 62, 104, 110, 96, 112];
 
 /**
  * Returns the widths to render, in column order.

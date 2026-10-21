@@ -3,6 +3,18 @@
 > 每次改完代码都在这里记一笔：日期、改了什么、为什么改。
 > 发版 / push 前看这份文件写 release notes。
 
+### 57. 询问弹窗与进度显示：6 个修复（UNRELEASED，2026-10-21）
+- G2 连续多个下载时，第二个及以后的确认窗文件名为空：Chrome 在 `onCreated` 时常常还没填 `filename`，扩展只做一次 `downloads.search`，第二笔流程更快就输掉 race；应用 ask 分支也没有兜底。现在扩展最多重试 3 次（150ms 间隔）、拿到即停、仍空则用 URL 尾段；应用空名时从 URL 路径派生占位名（无扩展名 → `download`）。验收：`TestLocalAPIAddAskNamesAnUnnamedHandover`（5 例）、扩展 `intercept filename`（3 例，35/35）。
+- G3 "按类型自动整理" + "每次询问位置" 同时开时，弹窗默认目录不是分类目录：ask 确认创建的任务被标记 `manual`，而整理有 `!manual` 闸门，这条路径根本不整理；弹窗也只读 `downloadDir`。现在弹窗打开时按文件名预填分类目录（`DefaultDestFor`，Go 侧唯一真源），用户改过路径就不再覆盖，这类任务完成后仍不搬（语义明确），弹窗内加一行说明。验收：`TestDefaultDestFor`（6 例）。
+- G1 浏览器点下载时确认框停在浏览器后面：`BringToFront` 原来把 topmost 开一瞬间就关，且 Windows 前台锁拒绝 `SetForegroundWindow` 时没人管。现在用 `AttachThreadInput` + `AllowSetForegroundWindow` + `SetForegroundWindow`/`SetFocus` 强激活，失败则 `FlashWindowEx` 闪任务栏；同时保持 1.2 秒 topmost（原子 generation 防止旧定时器关掉新的）。验收：`TestRaiseWindowWithoutATarget`、`TestHoldTopmostReleasesAndRespectsANewerHold`（`-race`）。
+- G4 续传后点「开始选中」报"继续失败"：不是下载失败，而是已在下载/已完成的任务被 `Resume` 拒绝，前端把"没启动"说成"失败"，且每条真实错误被 `catch` 丢弃。现在先按状态分拣（在下载/已完成 → 跳过），提示"已继续 N 个，跳过 M 个（原因），失败 K 个：<第一条原因>"。验收：`resumeTargets.test.ts`（10 例）。
+- G5 下载中大小显示 0 B、百分比不动：服务器不给 `Content-Length` 时引擎用 `-1` 表示未知，前端把 ≤0 画成 `0 B`；且 manager 用 `-1` 覆盖了浏览器带来的真实大小。现在未知显示"未知"，`applyReportedSize` 只在 `total>=0` 时写入。验收：`TestProgressKeepsKnownSizeWhenTotalIsUnknown`、`formatSize` 用例。
+- G6 进度列显示已下载量：`45.2% · 640 MiB`，未知时 `未知 · 640 MiB`；进度列 96→132px。验收：`formatProgress` 用例。
+- 验收：根 `go vet` / `go test ./...`（47.6s）、engine `-race`（65.7s）、desktop `go vet` / `go test`（35.9s）、`GOOS=linux go vet`、前端 `tsc --noEmit` + vitest 45/45、扩展 35/35 全绿；合并审查确认三路交叉处无冲突。
+- 已知边界：completed 的 0 字节文件两列口径不一致（`0 B` / `未知 · 0 B`）；无扩展名 URL 的占位名风格不同（`123` vs `download`），功能无影响。
+- **扩展需要重新加载**（`background.js` 改了），不需要重新配对。
+- 未 push、未发版；本批未做真机验证（需用户点浏览器下载确认 G1/G2）。
+
 ### 50. 审计 A2 批：引擎杂项 + 命令行（UNRELEASED）
 - P2-3 拒 HEAD 的服务器不再傻等：HEAD 回 405/501/403 以前被当作"暂时性"，会再重试 3 次、每次间隔翻倍，共约 3.5 秒才去发第一个真正能用的 GET。现在 HEAD 被拒即放弃，直接走 GET 探测。验收：`TestProbeNoHeadMakesExactlyOneHead`（HEAD 恰好 1 次、探针 < 0.5 秒）、`TestHeadUnavailableIsNotRetryable`（整次下载也只发 1 个 HEAD）。
 - P2-4 服务器返回的数据范围对不上时立刻失败：以前按"暂时性"错误重试，默认退避下最长卡 151 秒才报错。现在归为不可重试，实测 0.01 秒失败、每个连接的请求只发 1 次。验收：`TestBadContentRangeFailsFast`（默认退避下 < 1 秒、请求数 ≤ 连接数）、`TestErrRangeUnusableIsNotRetryable`（起点/终点/总长/缺头四种错都带哨兵且不可重试；"服务器多给了尾部"这种真实行为仍然放行）。

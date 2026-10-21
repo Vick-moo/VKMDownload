@@ -68,6 +68,10 @@ export function NewTaskDialog({
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const urlRef = useRef<HTMLInputElement>(null);
+  // Whether the user has already touched the destination. The type-based
+  // default arrives from the backend asynchronously and must not overwrite a
+  // folder the user typed or picked while that call was in flight.
+  const destTouched = useRef(false);
 
   // Reset the form each time the dialog opens, so a previous attempt's error
   // or half-typed URL does not greet the user.
@@ -80,13 +84,36 @@ export function NewTaskDialog({
     setCookie(initialCookie ?? "");
     setUserAgent(initialUserAgent ?? "");
     setBusy(false);
+    destTouched.current = false;
+    // The download folder is the immediate value, so the field is never empty
+    // while the type-based lookup below is in flight.
     setDest(config?.downloadDir ?? "");
+    // With sorting on, pre-fill the group folder for this file type. The rule
+    // lives in Go (organizeTarget), so the dialog cannot drift from where the
+    // organizer would have put an automatic download. It matters because a
+    // task created here is Manual: the organizer will not move it later, so
+    // the folder has to be right now. An empty name or an unmatched extension
+    // leaves the download folder in place, which is the same fallback Go uses.
+    let cancelled = false;
+    if (config?.organizeEnabled) {
+      void api
+        .defaultDestFor((initialFilename ?? "").trim())
+        .then((dir) => {
+          if (!cancelled && !destTouched.current && dir) setDest(dir);
+        })
+        .catch(() => {
+          // Keep the download folder: a failed lookup is not worth an error.
+        });
+    }
     setConns(config?.connections ?? 8);
     // Focus lands on the field the user most likely wants. The timer is
     // cleared on close/teardown so a late focus cannot land on a field that
     // has already been unmounted.
     const focusTimer = window.setTimeout(() => urlRef.current?.focus(), 30);
-    return () => window.clearTimeout(focusTimer);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(focusTimer);
+    };
   }, [open, initialURL, initialFilename, initialReferer, initialCookie, initialUserAgent, initialSize, fromAsk, config]);
 
   // Esc dismisses the dialog. Captured and stopped on the window, like the
@@ -172,7 +199,10 @@ export function NewTaskDialog({
   async function browse() {
     try {
       const picked = await api.pickDirectory();
-      if (picked) setDest(picked);
+      if (picked) {
+        destTouched.current = true;
+        setDest(picked);
+      }
     } catch {
       // A cancelled dialog is not an error worth reporting.
     }
@@ -217,7 +247,12 @@ export function NewTaskDialog({
                 type="text"
                 value={dest}
                 spellCheck={false}
-                onChange={(e) => setDest(e.target.value)}
+                onChange={(e) => {
+                  // The user's own choice always wins over the pre-filled
+                  // type folder.
+                  destTouched.current = true;
+                  setDest(e.target.value);
+                }}
               />
               <button type="button" className="btn" onClick={browse}>
                 <IconFolder size={16} />
@@ -225,6 +260,12 @@ export function NewTaskDialog({
               </button>
             </div>
           </label>
+
+          {config?.organizeEnabled ? (
+            <p className="field__hint">
+              已按文件类型预填；你改了就按你的位置，下载完成后不会再移动。
+            </p>
+          ) : null}
 
           <div className="field-grid">
             <label className="field">

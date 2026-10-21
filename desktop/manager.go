@@ -463,6 +463,19 @@ func snapshot(t *task) TaskView {
 	return t.view
 }
 
+// applyReportedSize records the total size the engine saw for a transfer.
+//
+// engine.Progress.Total is -1 when the server never said (a chunked response,
+// or a HEAD the host refused). That sentinel is not "zero bytes": writing it
+// over a size that is already known — the browser extension supplies one with
+// StartRequest — made the row show 0 B and a frozen percentage for the whole
+// download. Callers must hold t.mu.
+func (t *task) applyReportedSize(total int64) {
+	if total >= 0 {
+		t.view.Size = total
+	}
+}
+
 // List returns every task, newest first.
 func (m *Manager) List() []TaskView {
 	// One manager lock for the whole sweep: the per-id get() walk took and
@@ -2156,7 +2169,7 @@ func (m *Manager) run(t *task, ctx context.Context, cancel context.CancelFunc, d
 				return
 			}
 			t.view.Downloaded = p.Downloaded
-			t.view.Size = p.Total
+			t.applyReportedSize(p.Total)
 			t.view.Speed = int64(p.Speed)
 			// The server's suggested name arrives with the first progress,
 			// long before completion renames the row. Take it once: a name

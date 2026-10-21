@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -392,6 +393,130 @@ func TestSanitizeSuggestedName(t *testing.T) {
 		if got := sanitizeSuggestedName(c.in); got != c.want {
 			t.Errorf("sanitizeSuggestedName(%q) = %q, want %q", c.in, got, c.want)
 		}
+	}
+}
+
+// TestLocalAPIAddAskNamesAnUnnamedHandover covers the extension handing over a
+// download with no filename. That is what Chrome does when the handover wins
+// the race with the response headers, and it showed up as a blank filename field
+// in the placement dialog from the second browser download onwards. The ask
+// branch creates no task, so there is no probe to fill the name in later: it has
+// to derive a placeholder from the URL itself.
+func TestLocalAPIAddAskNamesAnUnnamedHandover(t *testing.T) {
+	cases := []struct{ name, url, want string }{
+		{"last path segment", "http://127.0.0.1:1/dl/from-url.bin", "from-url.bin"},
+		{"query string is not part of the name", "http://127.0.0.1:1/dl/a.zip?token=abc", "a.zip"},
+		{"no extension gets a placeholder", "http://127.0.0.1:1/api/file/123", "download"},
+		{"trailing slash gets a placeholder", "http://127.0.0.1:1/", "download"},
+		{"bare host gets a placeholder", "http://127.0.0.1:1", "download"},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			app := newTestApp(t)
+
+			var mu sync.Mutex
+			var ask map[string]string
+			app.emit = func(name string, data ...any) {
+				if name != "location:ask" {
+					return
+				}
+				mu.Lock()
+				defer mu.Unlock()
+				if len(data) > 0 {
+					if payload, ok := data[0].(map[string]string); ok {
+						ask = payload
+					}
+				}
+			}
+			base := startAPI(t, app)
+
+			resp := postJSON(t, base+"/add", "chrome-extension://abcdefghijklmnop",
+				fmt.Sprintf(`{"url":%q,"filename":""}`, c.url))
+			defer resp.Body.Close()
+
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("status = %d, want 200", resp.StatusCode)
+			}
+			var out struct {
+				Pending bool   `json:"pending"`
+				Name    string `json:"name"`
+			}
+			if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if !out.Pending {
+				t.Error("pending = false, want the arrival held for placement")
+			}
+			// The dialog reads the event payload, but the reply carries the
+			// name too (the extension shows it in its notification). Both have
+			// to be usable, or one of the two surfaces goes blank again.
+			if out.Name != c.want {
+				t.Errorf("reply name = %q, want %q", out.Name, c.want)
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if ask == nil {
+				t.Fatal("no location:ask payload captured")
+			}
+			if got := ask["filename"]; got != c.want {
+				t.Errorf("location:ask filename = %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
+// TestDefaultDestFor pins the folder the placement dialog pre-fills when
+// "organize by type" is on. The dialog has to ask for the group folder up front:
+// a task created there is Manual, so the organizer leaves it alone afterwards,
+// and pre-filling the download directory would silently lose the sorting the
+// user asked for.
+func TestDefaultDestFor(t *testing.T) {
+	app := newTestApp(t)
+	dl := filepath.Join(t.TempDir(), "Downloads")
+	root := filepath.Join(t.TempDir(), "Sorted")
+	abs := filepath.Join(t.TempDir(), "Papers")
+
+	cfg := app.Config()
+	cfg.DownloadDir = dl
+	cfg.OrganizeEnabled = true
+	cfg.OrganizeDir = root
+	cfg.OrganizeGroups = []OrganizeGroup{
+		{Name: "Archives", Exts: []string{"zip", "7z"}},
+		{Name: "Papers", Exts: []string{"pdf"}, Dir: abs},
+	}
+	if err := app.SetConfig(cfg); err != nil {
+		t.Fatalf("SetConfig: %v", err)
+	}
+
+	if got, want := app.DefaultDestFor("backup.zip"), filepath.Join(root, "Archives"); got != want {
+		t.Errorf("grouped extension: got %q, want %q", got, want)
+	}
+	// A group with an absolute Dir wins over the organize root.
+	if got := app.DefaultDestFor("paper.pdf"); got != abs {
+		t.Errorf("absolute group dir: got %q, want %q", got, abs)
+	}
+	// Unknown extension: no group claims it, so it stays in the download folder.
+	if got := app.DefaultDestFor("notes.xyz"); got != dl {
+		t.Errorf("unknown extension: got %q, want %q", got, dl)
+	}
+	// An extension-less name cannot match a group either.
+	if got := app.DefaultDestFor("README"); got != dl {
+		t.Errorf("no extension: got %q, want %q", got, dl)
+	}
+	// No name at all: nothing to classify, so no guessing.
+	if got := app.DefaultDestFor(""); got != dl {
+		t.Errorf("empty name: got %q, want %q", got, dl)
+	}
+
+	// The switch is what makes the group table relevant at all.
+	cfg = app.Config()
+	cfg.OrganizeEnabled = false
+	if err := app.SetConfig(cfg); err != nil {
+		t.Fatalf("SetConfig: %v", err)
+	}
+	if got := app.DefaultDestFor("backup.zip"); got != dl {
+		t.Errorf("organizing off: got %q, want %q", got, dl)
 	}
 }
 

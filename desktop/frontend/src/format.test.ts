@@ -4,6 +4,8 @@ import {
   formatBytes,
   formatEta,
   formatPercent,
+  formatProgress,
+  formatSize,
   formatSpeed,
   formatWhen,
 } from "./format";
@@ -77,6 +79,42 @@ describe("formatPercent", () => {
     expect(formatPercent(10, 10)).toBe("100.0%");
     expect(formatPercent(15, 10)).toBe("100.0%");
     expect(formatPercent(-1, 10)).toBe("0.0%");
+  });
+});
+
+describe("formatSize", () => {
+  it("renders the engine's unknown-size sentinel as 未知", () => {
+    expect(formatSize(-1)).toBe("未知");
+    expect(formatSize(NaN)).toBe("未知");
+  });
+  it("treats a zero size as unknown until the task completed", () => {
+    // 0 is what a not-yet-probed task carries; only a completed task has a
+    // verified zero (an empty file) worth showing as 0 B.
+    expect(formatSize(0, "downloading")).toBe("未知");
+    expect(formatSize(0, "paused")).toBe("未知");
+    expect(formatSize(0, "completed")).toBe("0 B");
+  });
+  it("formats a known size with binary units", () => {
+    expect(formatSize(1536, "downloading")).toBe("1.5 KiB");
+    expect(formatSize(1073741824, "completed")).toBe("1.0 GiB");
+  });
+});
+
+describe("formatProgress", () => {
+  it("renders percentage and downloaded bytes together", () => {
+    expect(formatProgress(0, 10)).toBe("0.0% · 0 B");
+    expect(formatProgress(10, 10)).toBe("100.0% · 10 B");
+    expect(formatProgress(2 * 1024 ** 3, 4 * 1024 ** 3)).toBe(
+      "50.0% · 2.0 GiB",
+    );
+    expect(formatProgress(3 * 1024 ** 3, 4 * 1024 ** 3)).toBe(
+      "75.0% · 3.0 GiB",
+    );
+  });
+  it("says 未知 instead of faking 0% when the total is unknown", () => {
+    expect(formatProgress(640 * 1024 * 1024, -1)).toBe("未知 · 640 MiB");
+    expect(formatProgress(640 * 1024 * 1024, 0)).toBe("未知 · 640 MiB");
+    expect(formatProgress(0, -1)).toBe("未知 · 0 B");
   });
 });
 

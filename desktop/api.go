@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"path"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -395,6 +396,14 @@ func (a *App) apiAdd(w http.ResponseWriter, r *http.Request) {
 		// The reply stays 200 with no id so the extension does not fall back
 		// to a browser download of something the user is about to place.
 		fn := sanitizeSuggestedName(req.Filename)
+		if fn == "" {
+			// The browser can hand over no name at all — Chrome fills the
+			// filename in from the response headers, and a fast handover can
+			// arrive before that. Unlike the direct-add path there is no probe
+			// to fill the name in later, so the dialog would open blank; derive
+			// a placeholder from the URL instead.
+			fn = fallbackSuggestedName(req.URL)
+		}
 		// The URL is logged desensitised (host+path): query strings carry
 		// session tokens and single-use signatures that must not land on disk.
 		// The user agent is reduced to a length: it is a fingerprint that says
@@ -522,6 +531,27 @@ func sanitizeSuggestedName(name string) string {
 		name += "_"
 	}
 	return name
+}
+
+// fallbackSuggestedName derives a placeholder name from the URL for an arrival
+// the browser could not name.
+//
+// Only the ask path needs this: no task exists yet, so there is no probe to
+// fill the name in later, and an empty name used to reach the placement dialog
+// as an empty filename field (the browser's second and later handovers are fast
+// enough to beat the response headers that carry the real name). The last path
+// segment is used when it looks like a filename; anything else — a bare host, a
+// trailing slash, a segment without an extension such as /api/file/123 — becomes
+// "download". Both are placeholders the user can replace in the dialog, and the
+// app's own sanitising still applies.
+func fallbackSuggestedName(raw string) string {
+	if u, err := url.Parse(strings.TrimSpace(raw)); err == nil {
+		name := sanitizeSuggestedName(path.Base(u.Path))
+		if name != "" && filepath.Ext(name) != "" {
+			return name
+		}
+	}
+	return "download"
 }
 
 func writeJSON(w http.ResponseWriter, status int, body any) {

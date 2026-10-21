@@ -64,7 +64,7 @@
   /* Task list columns. The header and every row share this template, which is
      what keeps the sortable header aligned with the rows it sorts. TaskList
      replaces this at runtime once the user drags a column boundary. */
-  --task-cols: minmax(140px, 1fr) 74px 92px 88px 104px 132px;
+  --task-cols: minmax(140px, 1fr) 74px 92px 132px 104px 132px;
 
   --shadow-raised: 0 4px 16px rgba(0, 0, 0, 0.45);
   --shadow-modal: 0 16px 48px rgba(0, 0, 0, 0.6);

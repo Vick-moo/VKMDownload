@@ -776,6 +776,19 @@ function shouldTake(item) {
   return true;
 }
 
+/**
+ * How long the handover waits for Chrome to fill in a download's name.
+ *
+ * Chrome knows the filename only after the response headers arrive, which is a
+ * moment after onCreated. A single immediate read used to be the whole attempt,
+ * and the second and later handovers of a session — faster, because pairing and
+ * the policy are cached by then — lost that race and sent an empty name to the
+ * app, which opened the placement dialog with an empty filename. Three short
+ * retries cover the usual delay without holding the download up for long.
+ */
+const FILENAME_TRIES = 3;
+const FILENAME_RETRY_MS = 150;
+
 if (hasExtensionApis()) {
   chrome.downloads.onCreated.addListener(async (item) => {
     // The worker may have just restarted; reload the self-started ids first
@@ -815,17 +828,33 @@ if (hasExtensionApis()) {
     // lets the app show the real size the moment the row is created — no
     // "0 B until you press start", and no extra request to learn it.
     let size = Number(item.totalBytes) || 0;
-    try {
-      const [fresh] = await chrome.downloads.search({ id: item.id });
-      if (!fresh) return;
-      if (fresh.filename) filename = fresh.filename.split(/[\\/]/).pop();
-      if (Number(fresh.totalBytes) > 0) size = Number(fresh.totalBytes);
-      // Already finished between onCreated and now: leave it to the browser.
-      // Handing it over now would create a second copy in the app.
-      if (fresh.state === "complete") return;
-    } catch {
-      // The item may already be gone; fall back to what onCreated saw.
+    // Read the item, and keep reading briefly while it has no name: the name
+    // can still be missing on the first read (see FILENAME_TRIES). The first
+    // read always happens, so the size and the finished-state check below are
+    // still made even when onCreated already knew the name.
+    for (let attempt = 0; attempt < FILENAME_TRIES; attempt += 1) {
+      if (attempt > 0) {
+        await new Promise((resolve) => setTimeout(resolve, FILENAME_RETRY_MS));
+      }
+      try {
+        const [fresh] = await chrome.downloads.search({ id: item.id });
+        if (!fresh) return;
+        if (fresh.filename) filename = fresh.filename.split(/[\\/]/).pop();
+        if (Number(fresh.totalBytes) > 0) size = Number(fresh.totalBytes);
+        // Already finished between onCreated and now: leave it to the browser.
+        // Handing it over now would create a second copy in the app.
+        if (fresh.state === "complete") return;
+        if (filename) break;
+      } catch {
+        // The item may already be gone; fall back to what onCreated saw.
+        break;
+      }
     }
+    // Still nameless, so Chrome never filled it in (some servers send no
+    // Content-Disposition and the URL has no useful tail). Hand over the URL's
+    // last segment, which is the name the app would otherwise have to invent
+    // itself, so the placement dialog is prefilled either way.
+    if (!filename) filename = nameFromUrl(url);
 
     // Prove the app before reading the user's cookies, not after. The old order
     // read them into a payload first and only then looked for an app, so a

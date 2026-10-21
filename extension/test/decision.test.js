@@ -311,6 +311,111 @@ describe("intercept fallback order", () => {
   });
 });
 
+// -------------------------------------------------- intercept: the filename
+// Regression: a download handed over while Chrome had not yet filled in the
+// filename reached the app with an empty name, so from the second browser
+// download onwards the placement dialog opened with a blank filename field.
+// The handover must retry briefly, then fall back to the URL's last segment.
+
+/** Full chrome stub plus a fetch that answers /settings and records /add. */
+function stubIntercept({ searchImpl, onAdd }) {
+  const state = stubFullChrome();
+  globalThis.chrome.downloads.search = searchImpl;
+  globalThis.chrome.storage.local.get = async () => ({ vkmPairKey: TEST_KEY });
+  const calls = [];
+  globalThis.fetch = async (url, opts) => {
+    const u = String(url);
+    calls.push({ url: u, body: opts && opts.body });
+    if (u.includes("/ping")) return proofResponse(u);
+    if (u.endsWith("/pair")) {
+      return { ok: true, status: 200, headers: { get: () => null }, json: async () => ({ key: TEST_KEY }) };
+    }
+    if (u.endsWith("/settings")) {
+      return {
+        ok: true,
+        status: 200,
+        headers: { get: () => null },
+        json: async () => ({ enabled: true, minSizeKb: 0, skipHosts: [] }),
+      };
+    }
+    if (u.endsWith("/add")) {
+      if (onAdd) onAdd();
+      return {
+        ok: true,
+        status: 200,
+        headers: { get: () => null },
+        json: async () => ({ pending: true, name: "fallback.bin" }),
+      };
+    }
+    throw new Error(`unexpected fetch: ${u}`);
+  };
+  return { state, calls };
+}
+
+describe("intercept filename", () => {
+  it("retries search, then falls back to the URL name", async () => {
+    let searches = 0;
+    let searchesAtAdd = 0;
+    // What Chrome answers while the response headers have not arrived: the
+    // item exists, it just has no filename yet.
+    const { state, calls } = stubIntercept({
+      searchImpl: async () => {
+        searches += 1;
+        return [{ state: "in_progress", totalBytes: 4096 }];
+      },
+      // Read at handover time: cancelling the browser entry searches again, so
+      // the final count would not say how many reads the name lookup made.
+      onAdd: () => {
+        searchesAtAdd = searches;
+      },
+    });
+    rerequire();
+    assert.equal(typeof state.created, "function", "onCreated listener must be registered");
+
+    await state.created({ id: 9, url: "https://example.com/dl/fallback.bin", totalBytes: 4096 });
+
+    const add = calls.find((c) => c.url.endsWith("/add"));
+    assert.ok(add, "the download must be handed over");
+    assert.equal(
+      JSON.parse(add.body).filename,
+      "fallback.bin",
+      "an unnamed download must fall back to the last URL path segment",
+    );
+    assert.equal(searchesAtAdd, 3, `search was polled ${searchesAtAdd} times, want the full retry`);
+  });
+
+  it("uses the name as soon as search returns it", async () => {
+    let searches = 0;
+    let searchesAtAdd = 0;
+    const { state, calls } = stubIntercept({
+      searchImpl: async () => {
+        searches += 1;
+        // The headers land between the first and the second read.
+        return searches === 1
+          ? [{ state: "in_progress", totalBytes: 4096 }]
+          : [{ state: "in_progress", filename: "C:\\dl\\real-name.bin", totalBytes: 4096 }];
+      },
+      onAdd: () => {
+        searchesAtAdd = searches;
+      },
+    });
+    rerequire();
+
+    await state.created({ id: 9, url: "https://example.com/dl/url-name.bin", totalBytes: 4096 });
+
+    const add = calls.find((c) => c.url.endsWith("/add"));
+    assert.ok(add, "the download must be handed over");
+    assert.equal(JSON.parse(add.body).filename, "real-name.bin");
+    assert.equal(searchesAtAdd, 2, "the poll must stop once the name arrives");
+  });
+
+  it("nameFromUrl takes the last segment, decoded", () => {
+    assert.equal(ext.nameFromUrl("https://example.com/a/%E6%96%87%E4%BB%B6.zip?x=1"), "文件.zip");
+    assert.equal(ext.nameFromUrl("https://example.com/"), "");
+    assert.equal(ext.nameFromUrl("not a url"), "");
+  });
+});
+
 // ------------------------------------------------- coverage: report/toggle/policy/own
 // These pin the paths the earlier suites never asserted: the three report
 // branches, the toggle round trip (including the peer-check 403), the policy

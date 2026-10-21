@@ -4,6 +4,7 @@
  * They live together so a byte count is never rendered two different ways in
  * two different places, which is the usual way a UI starts looking sloppy.
  */
+import type { TaskStatus } from "./types";
 
 /** Formats a byte count with binary units. */
 export function formatBytes(bytes: number): string {
@@ -43,6 +44,32 @@ export function formatPercent(done: number, total: number): string {
   if (!Number.isFinite(total) || total <= 0) return "—";
   const pct = (done / total) * 100;
   return `${Math.max(0, Math.min(100, pct)).toFixed(1)}%`;
+}
+
+/**
+ * Formats a task's total size.
+ *
+ * The engine reports -1 when the server never said how large the file is (a
+ * chunked response, or a HEAD the host refused), and a task that has not been
+ * probed yet carries 0. Both mean "unknown", not "0 B": rendering them as zero
+ * made an in-flight download look empty. A completed task is the exception —
+ * there 0 is a real, verified size.
+ */
+export function formatSize(bytes: number, status?: TaskStatus): string {
+  if (!Number.isFinite(bytes) || bytes < 0) return "未知";
+  if (bytes === 0 && status !== "completed") return "未知";
+  return formatBytes(bytes);
+}
+
+/**
+ * Formats the progress cell: percentage and downloaded bytes together.
+ *
+ * When the total is unknown the percentage becomes "未知" instead of a fake
+ * 0%; the downloaded count is real either way and stays visible.
+ */
+export function formatProgress(done: number, total: number): string {
+  const pct = formatPercent(done, total);
+  return `${pct === "—" ? "未知" : pct} · ${formatBytes(done)}`;
 }
 
 /** Cached "today": the stamp is compared per rendered row, and rebuilding two

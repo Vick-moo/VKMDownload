@@ -4,7 +4,8 @@ import { api } from "../api";
 import {
   formatBytes,
   formatEta,
-  formatPercent,
+  formatProgress,
+  formatSize,
   formatSpeed,
   formatWhen,
   ellipsizeMiddle,
@@ -136,7 +137,9 @@ export const TaskRow = memo(function TaskRow({
       </div>
 
       <div className="task__cell task__cell--center task__meta">
-        <span className="num task__meta-primary">{formatBytes(task.size)}</span>
+        <span className="num task__meta-primary">
+          {formatSize(task.size, task.status as TaskStatus)}
+        </span>
         <span className="num">{formatWhen(task.createdAt)}</span>
       </div>
 
@@ -148,13 +151,15 @@ export const TaskRow = memo(function TaskRow({
               role="progressbar"
               aria-valuemin={0}
               aria-valuemax={100}
-              aria-valuenow={Math.round(pct)}
+              // An unknown total is indeterminate: leave valuenow off rather
+              // than announcing a 0% the transfer has not actually reached.
+              aria-valuenow={task.size > 0 ? Math.round(pct) : undefined}
               aria-label={`${task.name} 进度`}
             >
               <div className="progress__segment" style={{ width: `${pct}%` }} />
             </div>
             <span className="num task__meta-primary">
-              {formatPercent(task.downloaded, task.size)}
+              {formatProgress(task.downloaded, task.size)}
             </span>
           </>
         ) : (

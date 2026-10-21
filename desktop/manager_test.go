@@ -1633,6 +1633,26 @@ func TestStartEmitsProgressImmediately(t *testing.T) {
 	app.mgr.StopAll()
 }
 
+// TestProgressKeepsKnownSizeWhenTotalIsUnknown pins the -1 sentinel handling.
+//
+// The engine reports Total=-1 for a server that gives no Content-Length; the
+// progress callback used to copy it into the view unconditionally, erasing the
+// real size the browser extension had already supplied. The row then showed
+// "0 B" and a frozen percentage for the whole transfer.
+func TestProgressKeepsKnownSizeWhenTotalIsUnknown(t *testing.T) {
+	tk := &task{view: TaskView{Size: 3 << 20}}
+
+	tk.applyReportedSize(-1)
+	if got := tk.view.Size; got != 3<<20 {
+		t.Errorf("size after an unknown total = %d, want the known %d", got, int64(3<<20))
+	}
+
+	tk.applyReportedSize(4096)
+	if got := tk.view.Size; got != 4096 {
+		t.Errorf("size after a reported total = %d, want 4096", got)
+	}
+}
+
 // TestRefreshIntervalMapping pins the UI refresh tiers: fast is today's
 // 250ms behaviour, and unknown values (including pre-upgrade configs that
 // never had the setting) fall back to fast rather than stalling updates.

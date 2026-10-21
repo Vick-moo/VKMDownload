@@ -13,6 +13,7 @@ import {
   ClipboardProbe,
   Config as GetConfig,
   ConsumeUpdateNotice,
+  DefaultDestFor,
   DefaultOrganizeGroups,
   FindUnfinishedByURL,
   ListTasks,
@@ -58,6 +59,10 @@ export const api = {
   applyUpdate: (): Promise<void> => ApplyUpdate(),
   consumeUpdateNotice: (): Promise<string> => ConsumeUpdateNotice(),
   rollbackUpdate: (): Promise<void> => RollBackUpdate(),
+  // The folder the placement dialog pre-fills for a name: the organize group's
+  // folder when sorting is on, the download directory otherwise.
+  defaultDestFor: (filename: string): Promise<string> =>
+    DefaultDestFor(filename),
   defaultOrganizeGroups: (): Promise<OrganizeGroup[]> => DefaultOrganizeGroups(),
   // What the app currently keeps on disk, as counts only — never values — plus
   // the one action that removes it.

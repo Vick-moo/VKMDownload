@@ -9,6 +9,10 @@ import { TaskList } from "./components/TaskList";
 import { UpdateNotesDialog } from "./components/UpdateNotesDialog";
 import { filterLabel } from "./filterLabel";
 import { formatSpeed } from "./format";
+import {
+  partitionResumeTargets,
+  summarizeResume,
+} from "./resumeTargets";
 import type { Config, Filter, SortDir, SortKey, TaskView, UpdateInfo } from "./types";
 import { extFilter, fileExt, filterExt, taskLabel } from "./types";
 import {
@@ -504,25 +508,53 @@ function App(): JSX.Element {
       if (bulkBusyRef.current) return;
       bulkBusyRef.current = true;
       const verbs = { resume: "继续", pause: "暂停", remove: "删除" } as const;
-      let ok = 0;
-      await Promise.all(
-        ids.map(async (id) => {
-          try {
-            if (action === "resume") await api.resumeTask(id);
-            else if (action === "pause") await api.pauseTask(id);
-            else await api.removeTask(id, false);
-            ok++;
-          } catch {
-            // Count what worked; the row keeps its state for a retry.
-          }
-        }),
-      );
-      if (action === "remove") setSelected(new Set());
-      bulkBusyRef.current = false;
-      void reload();
-      flash(ok > 0 ? `已${verbs[action]} ${ok}/${ids.length} 个` : `${verbs[action]}失败`);
+      try {
+        if (action === "resume") {
+          // Filter before calling: Manager.Resume refuses downloading and
+          // completed rows by design, so firing at them only produced a bare
+          // "继续失败". The skipped ones carry a reason into the notice.
+          const plan = partitionResumeTargets(tasks, ids);
+          let started = 0;
+          const failures: string[] = [];
+          await Promise.all(
+            plan.started.map(async (id) => {
+              try {
+                await api.resumeTask(id);
+                started += 1;
+              } catch (e) {
+                // Keep every reason, not just a count: the first one is what
+                // tells the user why the click did less than expected.
+                failures.push(e instanceof Error ? e.message : String(e));
+              }
+            }),
+          );
+          flash(summarizeResume(plan, started, failures));
+        } else {
+          let ok = 0;
+          await Promise.all(
+            ids.map(async (id) => {
+              try {
+                if (action === "pause") await api.pauseTask(id);
+                else await api.removeTask(id, false);
+                ok++;
+              } catch {
+                // Count what worked; the row keeps its state for a retry.
+              }
+            }),
+          );
+          flash(
+            ok > 0
+              ? `已${verbs[action]} ${ok}/${ids.length} 个`
+              : `${verbs[action]}失败`,
+          );
+        }
+        if (action === "remove") setSelected(new Set());
+        void reload();
+      } finally {
+        bulkBusyRef.current = false;
+      }
     },
-    [selected, flash, reload],
+    [selected, tasks, flash, reload],
   );
 
   const onStartAll = useCallback(async () => {
