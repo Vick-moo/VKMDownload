@@ -186,15 +186,16 @@ describe("pairing", () => {
 });
 
 // ------------------------------------------------------------ port discovery
-// Chrome caps concurrent connections per host (six). The old code probed all
-// eleven ports at once, the app's answer queued behind its siblings and hit the
-// 600 ms timeout, so a healthy app looked missing on Chrome 155.
+// Real-machine evidence (Chrome 155): with several loopback probes in flight,
+// the app's own answer arrived after its siblings had queued, so a healthy app
+// looked missing; the same requests run one after another answered in
+// milliseconds. findApp therefore probes strictly serially — do not
+// reintroduce a Promise.all fan-out over the port range.
 
 describe("port discovery", () => {
   /**
    * Routes /ping by port and records the scan probes (the ones without a
-   * challenge) and their concurrency. Proof pings — `?challenge=…` — are the
-   * serial second step and are not counted as discovery.
+   * challenge) plus the highest number of fetches that were ever in flight.
    */
   function stubPorts(handler) {
     const probes = [];
@@ -203,24 +204,20 @@ describe("port discovery", () => {
     globalThis.fetch = async (url) => {
       const u = String(url);
       const port = Number(new URL(u).port);
-      if (u.includes("/ping")) {
-        const scan = !u.includes("challenge=");
-        if (scan) {
-          probes.push(port);
-          inFlight += 1;
-          maxInFlight = Math.max(maxInFlight, inFlight);
+      const scan = u.includes("/ping") && !u.includes("challenge=");
+      if (scan) probes.push(port);
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      try {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        if (u.includes("/ping")) return handler(port, u);
+        if (u.endsWith("/pair")) {
+          return { ok: false, status: 403, headers: { get: () => null }, json: async () => ({ error: "no" }) };
         }
-        try {
-          await new Promise((resolve) => setTimeout(resolve, 10));
-          return handler(port, u);
-        } finally {
-          if (scan) inFlight -= 1;
-        }
+        throw new Error(`unexpected fetch: ${u}`);
+      } finally {
+        inFlight -= 1;
       }
-      if (u.endsWith("/pair")) {
-        return { ok: false, status: 403, headers: { get: () => null }, json: async () => ({ error: "no" }) };
-      }
-      throw new Error(`unexpected fetch: ${u}`);
     };
     return { probes, maxInFlight: () => maxInFlight };
   }
@@ -249,50 +246,44 @@ describe("port discovery", () => {
     assert.equal(new Set(urls.map((u) => new URL(u).port)).size, 1, "only one port may be contacted");
   });
 
-  it("probes the rest in batches of at most four, ten ports total", async () => {
+  it("probes every port in order, one request at a time", async () => {
     const ports = stubPorts((port) => {
       // 18888 is empty; 18889-18898 answer with the right body but cannot prove
-      // the key, and with no stored key /pair is refused.
+      // the key.
       if (port === 18888) {
         return { ok: false, status: 404, headers: { get: () => null }, json: async () => ({}) };
       }
       return impostor();
     });
-    stubChrome({});
+    stubChrome({ storedKey: TEST_KEY });
 
     const base = await ext.findApp();
     assert.equal(base, null, "an unproven port must not be treated as the app");
 
-    assert.equal(ports.probes.length, 11, `one probe for every port, got ${ports.probes.join(",")}`);
-    assert.equal(ports.probes[0], 18888, "18888 is probed first, alone");
     assert.deepEqual(
-      [...ports.probes.slice(1)].sort((a, b) => a - b),
-      [18889, 18890, 18891, 18892, 18893, 18894, 18895, 18896, 18897, 18898],
-      "the other ten ports are all probed exactly once",
+      ports.probes,
+      [18888, 18889, 18890, 18891, 18892, 18893, 18894, 18895, 18896, 18897, 18898],
+      "the whole range must be probed once, in ascending order",
     );
-    assert.ok(
-      ports.maxInFlight() <= 4,
-      `at most four concurrent probes, saw ${ports.maxInFlight()}`,
-    );
-    assert.ok(ports.maxInFlight() > 1, "the batches must still run in parallel");
+    assert.equal(ports.maxInFlight(), 1, "probes must be strictly serial, never overlapping");
   });
 
-  it("a failed probe does not sink the rest of its batch", async () => {
+  it("a failed probe does not stop the ports after it", async () => {
+    const ports = stubPorts((port, u) => {
+      if (port === 18888) throw new Error("ECONNREFUSED");
+      if (port === 18890) throw new Error("timeout");
+      if (port === 18893) return pingWith(u, TEST_KEY);
+      return impostor();
+    });
     stubChrome({ storedKey: TEST_KEY });
-    globalThis.fetch = async (url) => {
-      const u = String(url);
-      const port = Number(new URL(u).port);
-      if (u.includes("/ping")) {
-        if (port === 18888) throw new Error("ECONNREFUSED");
-        if (port === 18890) throw new Error("timeout");
-        if (port === 18893) return pingWith(u, TEST_KEY);
-        return impostor();
-      }
-      throw new Error(`unexpected fetch: ${u}`);
-    };
 
     const base = await ext.findApp();
-    assert.equal(base, "http://127.0.0.1:18893", "the real app must be found despite dead siblings");
+    assert.equal(base, "http://127.0.0.1:18893", "the real app must be found past the dead ports");
+    assert.ok(
+      !ports.probes.includes(18894),
+      `scanning must stop once a port proves itself, probed: ${ports.probes.join(",")}`,
+    );
+    assert.equal(ports.maxInFlight(), 1);
   });
 
   it("returns null when every port fails", async () => {
@@ -302,16 +293,5 @@ describe("port discovery", () => {
     };
 
     assert.equal(await ext.findApp(), null);
-  });
-
-  it("groups the ports as one plus batches of four", () => {
-    const groups = ext.scanGroups();
-    assert.deepEqual(groups[0], [18888], "18888 is its own group");
-    assert.ok(groups.slice(1).every((g) => g.length <= 4), "no batch may exceed four ports");
-    assert.deepEqual(
-      groups.flat(),
-      [18888, 18889, 18890, 18891, 18892, 18893, 18894, 18895, 18896, 18897, 18898],
-      "every port in the range appears exactly once, in order",
-    );
   });
 });

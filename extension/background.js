@@ -293,19 +293,58 @@ async function refreshHandshake() {
  * Asks one candidate port to prove it holds the key.
  *
  * Returns false for anything that does not answer correctly, including a port
- * held by a different program that imitates the ping body.
+ * held by a different program that imitates the ping body. Every refusal leaves
+ * one console.warn with the facts that identify it — status, whether the proof
+ * header arrived, the first 8 characters of the challenge and of the key — so a
+ * real-machine failure can be read off the console instead of guessed. The key
+ * and the proof itself are never printed.
  */
 async function provePort(base, key) {
   const challenge = randomChallenge();
+  const keyTag = String(key).slice(0, 8);
+  const challengeTag = challenge.slice(0, 8);
+  let status = 0;
+  let hasProofHeader = false;
   try {
     const response = await fetch(`${base}/ping?challenge=${challenge}`, {
       cache: "no-store",
-      signal: AbortSignal.timeout(600),
+      signal: AbortSignal.timeout(PING_TIMEOUT_MS),
     });
-    if (!response.ok) return false;
+    status = response.status;
+    if (!response.ok) {
+      console.warn("provePort: bad status", {
+        base,
+        status,
+        proofHeader: false,
+        challenge: challengeTag,
+        key: keyTag,
+        match: false,
+      });
+      return false;
+    }
     const got = response.headers.get(PROOF_HEADER);
-    if (!got) return false;
-    if (!proofMatches(got.toLowerCase(), await hmacHex(key, challenge))) {
+    hasProofHeader = Boolean(got);
+    if (!got) {
+      console.warn("provePort: no proof header", {
+        base,
+        status,
+        proofHeader: false,
+        challenge: challengeTag,
+        key: keyTag,
+        match: false,
+      });
+      return false;
+    }
+    const match = proofMatches(got.toLowerCase(), await hmacHex(key, challenge));
+    if (!match) {
+      console.warn("provePort: proof mismatch", {
+        base,
+        status,
+        proofHeader: true,
+        challenge: challengeTag,
+        key: keyTag,
+        match: false,
+      });
       return false;
     }
     // The proof just established this is the real app, so the handshake in its
@@ -316,7 +355,16 @@ async function provePort(base, key) {
       recordHandshake(base, body);
     }
     return true;
-  } catch {
+  } catch (error) {
+    console.warn("provePort: request failed", {
+      base,
+      status,
+      proofHeader: hasProofHeader,
+      challenge: challengeTag,
+      key: keyTag,
+      match: false,
+      error: String((error && error.message) || error),
+    });
     return false;
   }
 }
@@ -368,45 +416,14 @@ async function pairWith(base) {
 }
 
 /**
- * How long one /ping probe may take.
+ * How long one /ping request may take — both the scan probe and the proof.
  *
  * 800 ms, not 600: on a busy profile the browser can be slow to hand back a
  * loopback response, and a false "app is not running" is expensive (the download
- * falls back to the browser and the popup says the app is missing).
+ * falls back to the browser and the popup says the app is missing). The scan and
+ * provePort share it so the two can never drift apart.
  */
 const PING_TIMEOUT_MS = 800;
-
-/**
- * How many ports are probed concurrently after the first one.
- *
- * Chrome caps concurrent sockets per host (six). Probing all eleven ports at
- * once made the app's own answer queue behind its siblings and hit the timeout,
- * so a healthy app looked missing while a single request to the same port
- * answered 200 in milliseconds. Four per batch stays under the cap with room
- * for the handover's other connection.
- */
-const PING_BATCH_SIZE = 4;
-
-/**
- * The ports to probe, in order: PORT_FIRST alone, then the rest in small
- * batches.
- *
- * The app binds the first free port, so it is almost always 18888 and the batch
- * loop never runs — one request instead of eleven. The separate first probe is
- * also what makes "is the app there?" cheap when a stale process holds another
- * port in the range.
- */
-function scanGroups() {
-  const groups = [[PORT_FIRST]];
-  for (let port = PORT_FIRST + 1; port <= PORT_LAST; port += PING_BATCH_SIZE) {
-    const group = [];
-    for (let p = port; p < port + PING_BATCH_SIZE && p <= PORT_LAST; p += 1) {
-      group.push(p);
-    }
-    groups.push(group);
-  }
-  return groups;
-}
 
 /** Probes one port's /ping and returns its base URL when the body names the app. */
 async function pingPort(port) {
@@ -425,64 +442,53 @@ async function pingPort(port) {
 }
 
 /**
- * Tries the candidates of one batch: returns the first base that proves itself,
- * or null when none does.
+ * Finds the app and proves it is really VKMDownload.
+ *
+ * Strictly serial, one port at a time, in the exact order 18888 → 18898: ping,
+ * then (only when a candidate answered) pair/prove, then the next port. The
+ * previous versions fanned out over the range, and on current Chrome that made a
+ * healthy app look missing — the observed pattern was a burst of concurrent
+ * loopback requests where the app's own answer arrived after its siblings had
+ * queued, while the same requests run by hand, one after another, answered in
+ * milliseconds. Serial is also what a human verifying the extension does, so the
+ * two paths stay comparable.
  *
  * The port is only cached after a proof. A responder that answers the ping body
  * but cannot produce the HMAC is treated as an impostor and skipped, never
  * handed a URL or a cookie.
  */
-async function claimCandidates(candidates) {
-  const key = await loadPairKey();
-  if (!key) {
-    // First pairing only. Asking now is safe *because* nothing is trusted yet,
-    // and the app answers /pair only to a signed browser process.
-    //
-    // Once a key is stored it is never silently replaced. The tempting "if the
-    // old key fails, just ask again" would hand the whole scheme to an attacker:
-    // any program that binds the port first could answer /pair with its own key,
-    // and the extension would happily re-pin to it. A lost key (the app was
-    // reinstalled, or pair.key was deleted) therefore looks exactly like "the app
-    // is not running" until the user presses 重新配对 in the popup.
-    for (const base of candidates) {
+async function findApp() {
+  if (apiBase) return apiBase;
+
+  for (let port = PORT_FIRST; port <= PORT_LAST; port += 1) {
+    const base = await pingPort(port);
+    if (!base) continue;
+
+    const key = await loadPairKey();
+    if (!key) {
+      // First pairing only. Asking now is safe *because* nothing is trusted yet,
+      // and the app answers /pair only to a signed browser process.
+      //
+      // Once a key is stored it is never silently replaced. The tempting "if the
+      // old key fails, just ask again" would hand the whole scheme to an
+      // attacker: any program that binds the port first could answer /pair with
+      // its own key, and the extension would happily re-pin to it. A lost key
+      // (the app was reinstalled, or pair.key was deleted) therefore looks
+      // exactly like "the app is not running" until the user presses 重新配对 in
+      // the popup.
       const got = await pairWith(base);
       if (!got) continue;
       if (await provePort(base, got)) {
         await savePairKey(got);
+        apiBase = base;
         return base;
       }
+      continue;
     }
-    return null;
-  }
 
-  for (const base of candidates) {
-    if (await provePort(base, key)) return base;
-  }
-  return null;
-}
-
-/**
- * Finds the app and proves it is really VKMDownload.
- *
- * Ports are probed in groups (see scanGroups): 18888 first, then batches of at
- * most PING_BATCH_SIZE, and a batch that yields a proven app ends the search.
- * The old "all eleven at once" fan-out is exactly what Chrome's per-host
- * connection cap turned into timeouts — do not go back to it.
- *
- * A batch that answers but cannot prove its key does not stop the search: the
- * real app may be on a later port while an impostor holds an earlier one.
- */
-async function findApp() {
-  if (apiBase) return apiBase;
-
-  for (const group of scanGroups()) {
-    const candidates = (await Promise.all(group.map(pingPort))).filter(Boolean);
-    if (candidates.length === 0) continue;
-
-    const base = await claimCandidates(candidates);
-    if (base) {
+    if (await provePort(base, key)) {
       apiBase = base;
-      return apiBase;
+      return base;
     }
   }
 
@@ -1221,7 +1227,6 @@ if (typeof globalThis !== "undefined") {
       report,
       getPolicy,
       findApp,
-      scanGroups,
       normalizePolicy,
       compareVersions,
       trackOwn,
