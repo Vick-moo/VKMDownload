@@ -368,45 +368,72 @@ async function pairWith(base) {
 }
 
 /**
- * Finds the app and proves it is really VKMDownload.
+ * How long one /ping probe may take.
  *
- * Every candidate port is probed at once rather than one after another: the
- * sequential version spent up to 11 x 600 ms before concluding the app was not
- * running, which the user felt as a pause on every download while the browser
- * carried on fetching.
+ * 800 ms, not 600: on a busy profile the browser can be slow to hand back a
+ * loopback response, and a false "app is not running" is expensive (the download
+ * falls back to the browser and the popup says the app is missing).
+ */
+const PING_TIMEOUT_MS = 800;
+
+/**
+ * How many ports are probed concurrently after the first one.
+ *
+ * Chrome caps concurrent sockets per host (six). Probing all eleven ports at
+ * once made the app's own answer queue behind its siblings and hit the timeout,
+ * so a healthy app looked missing while a single request to the same port
+ * answered 200 in milliseconds. Four per batch stays under the cap with room
+ * for the handover's other connection.
+ */
+const PING_BATCH_SIZE = 4;
+
+/**
+ * The ports to probe, in order: PORT_FIRST alone, then the rest in small
+ * batches.
+ *
+ * The app binds the first free port, so it is almost always 18888 and the batch
+ * loop never runs — one request instead of eleven. The separate first probe is
+ * also what makes "is the app there?" cheap when a stale process holds another
+ * port in the range.
+ */
+function scanGroups() {
+  const groups = [[PORT_FIRST]];
+  for (let port = PORT_FIRST + 1; port <= PORT_LAST; port += PING_BATCH_SIZE) {
+    const group = [];
+    for (let p = port; p < port + PING_BATCH_SIZE && p <= PORT_LAST; p += 1) {
+      group.push(p);
+    }
+    groups.push(group);
+  }
+  return groups;
+}
+
+/** Probes one port's /ping and returns its base URL when the body names the app. */
+async function pingPort(port) {
+  const candidate = `http://127.0.0.1:${port}`;
+  try {
+    const response = await fetch(`${candidate}/ping`, {
+      cache: "no-store",
+      signal: AbortSignal.timeout(PING_TIMEOUT_MS),
+    });
+    if (!response.ok) return null;
+    const body = await response.json().catch(() => ({}));
+    return body && body.app === "VKMDownload" ? candidate : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Tries the candidates of one batch: returns the first base that proves itself,
+ * or null when none does.
  *
  * The port is only cached after a proof. A responder that answers the ping body
  * but cannot produce the HMAC is treated as an impostor and skipped, never
  * handed a URL or a cookie.
  */
-async function findApp() {
-  if (apiBase) return apiBase;
-
-  const ports = [];
-  for (let port = PORT_FIRST; port <= PORT_LAST; port += 1) ports.push(port);
-
-  const candidates = (
-    await Promise.all(
-      ports.map(async (port) => {
-        const candidate = `http://127.0.0.1:${port}`;
-        try {
-          const response = await fetch(`${candidate}/ping`, {
-            cache: "no-store",
-            signal: AbortSignal.timeout(600),
-          });
-          if (!response.ok) return null;
-          const body = await response.json().catch(() => ({}));
-          return body && body.app === "VKMDownload" ? candidate : null;
-        } catch {
-          return null;
-        }
-      }),
-    )
-  ).filter(Boolean);
-
-  if (candidates.length === 0) return null;
-
-  let key = await loadPairKey();
+async function claimCandidates(candidates) {
+  const key = await loadPairKey();
   if (!key) {
     // First pairing only. Asking now is safe *because* nothing is trusted yet,
     // and the app answers /pair only to a signed browser process.
@@ -422,15 +449,38 @@ async function findApp() {
       if (!got) continue;
       if (await provePort(base, got)) {
         await savePairKey(got);
-        apiBase = base;
-        return apiBase;
+        return base;
       }
     }
     return null;
   }
 
   for (const base of candidates) {
-    if (await provePort(base, key)) {
+    if (await provePort(base, key)) return base;
+  }
+  return null;
+}
+
+/**
+ * Finds the app and proves it is really VKMDownload.
+ *
+ * Ports are probed in groups (see scanGroups): 18888 first, then batches of at
+ * most PING_BATCH_SIZE, and a batch that yields a proven app ends the search.
+ * The old "all eleven at once" fan-out is exactly what Chrome's per-host
+ * connection cap turned into timeouts — do not go back to it.
+ *
+ * A batch that answers but cannot prove its key does not stop the search: the
+ * real app may be on a later port while an impostor holds an earlier one.
+ */
+async function findApp() {
+  if (apiBase) return apiBase;
+
+  for (const group of scanGroups()) {
+    const candidates = (await Promise.all(group.map(pingPort))).filter(Boolean);
+    if (candidates.length === 0) continue;
+
+    const base = await claimCandidates(candidates);
+    if (base) {
       apiBase = base;
       return apiBase;
     }
@@ -1170,6 +1220,8 @@ if (typeof globalThis !== "undefined") {
       handOver,
       report,
       getPolicy,
+      findApp,
+      scanGroups,
       normalizePolicy,
       compareVersions,
       trackOwn,
