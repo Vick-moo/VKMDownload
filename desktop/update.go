@@ -210,6 +210,36 @@ type UpdateStatus struct {
 	Downloaded int64  `json:"downloaded"`
 	Total      int64  `json:"total"`
 	Error      string `json:"error"`
+
+	// What was actually verified for the download this status describes. They
+	// stay false until the download reaches "ready"; a failure leaves Verified
+	// false and the reason in Error. Filled from the marker at startup too, so
+	// the settings page can show the result of the last attempt after a
+	// restart instead of just "the updater checks hashes".
+	//
+	// omitempty makes them wire-optional: a caller that builds a status by hand
+	// (the settings page's "found an update" placeholder) does not have to
+	// repeat six fields it has no verdict for, and absent means false.
+	DigestPresent bool `json:"digestPresent,omitempty"`
+	SizeMatched   bool `json:"sizeMatched,omitempty"`
+	Verified      bool `json:"verified,omitempty"`
+
+	// The restore point: a backup of the version the last update replaced.
+	// UpdateBackupInfo is the authoritative answer (it checks the file);
+	// these fields are the same facts carried on the polled status. Optional on
+	// the wire for the same reason as the verification flags.
+	BackupAvailable bool   `json:"backupAvailable,omitempty"`
+	BackupVersion   string `json:"backupVersion,omitempty"`
+	BackupSize      int64  `json:"backupSize,omitempty"`
+}
+
+// UpdateBackup describes the copy of the previous version that the updater
+// keeps so the user can go back to it.
+type UpdateBackup struct {
+	Available bool   `json:"available"`
+	Version   string `json:"version"`
+	Size      int64  `json:"size"`
+	Path      string `json:"path"`
 }
 
 // releaseAsset is what the updater needs from the latest release.
@@ -309,6 +339,15 @@ func (a *App) StartUpdate() (UpdateStatus, error) {
 	a.upd = UpdateStatus{State: "downloading"}
 	// Whatever was verified before belongs to the previous attempt.
 	a.updStagedSHA, a.updStagedSize = "", 0
+	a.updMu.Unlock()
+
+	// Carry the existing restore point into the polled status: the settings page
+	// shows it while the new download runs.
+	bk := a.UpdateBackupInfo()
+	a.updMu.Lock()
+	a.upd.BackupAvailable = bk.Available
+	a.upd.BackupVersion = bk.Version
+	a.upd.BackupSize = bk.Size
 	a.updMu.Unlock()
 
 	failAndClear := func(err error) (UpdateStatus, error) {
@@ -476,7 +515,15 @@ func (a *App) downloadUpdate(rel releaseAsset, staged string) {
 	// compare against, so the local checks below have to carry the weight —
 	// and the gap is written to the log rather than silently accepted.
 	sum := hex.EncodeToString(h.Sum(nil))
-	if rel.digest != "" {
+	// Record what was actually checked before the verdict, so a failed update
+	// can say which check failed instead of only that it failed. SizeMatched
+	// means "a length was known and the bytes matched it"; with no length there
+	// is nothing to match, so it stays false rather than guessing.
+	digestPresent := rel.digest != ""
+	sizeMatched := total > 0 && written == total
+	a.setUpdVerification(digestPresent, sizeMatched, false)
+
+	if digestPresent {
 		want := strings.TrimPrefix(rel.digest, "sha256:")
 		if !strings.EqualFold(sum, want) {
 			discardStaged()
@@ -517,9 +564,23 @@ func (a *App) downloadUpdate(rel releaseAsset, staged string) {
 	a.upd.State = "ready"
 	a.upd.Downloaded = written
 	a.upd.Total = written
+	// Every check above passed; this is the "verified" the UI reports.
+	a.upd.DigestPresent = digestPresent
+	a.upd.SizeMatched = sizeMatched
+	a.upd.Verified = true
 	// Kept for the last pre-swap check, and for telling the next launch which
 	// build is which after an update that was never confirmed.
 	a.updStagedSHA, a.updStagedSize = sum, written
+	a.updMu.Unlock()
+}
+
+// setUpdVerification records what the download checks actually saw, before the
+// verdict is known. Under the status lock because the poller reads these fields.
+func (a *App) setUpdVerification(digestPresent, sizeMatched, verified bool) {
+	a.updMu.Lock()
+	a.upd.DigestPresent = digestPresent
+	a.upd.SizeMatched = sizeMatched
+	a.upd.Verified = verified
 	a.updMu.Unlock()
 }
 
@@ -679,6 +740,7 @@ func (a *App) ApplyUpdate() error {
 	// disables its button, but nothing stops a second binding call.
 	a.upd.State = "applying"
 	wantSize, wantSHA, version := a.updStagedSize, a.updStagedSHA, a.upd.Version
+	digestPresent, sizeMatched, verified := a.upd.DigestPresent, a.upd.SizeMatched, a.upd.Verified
 	a.updMu.Unlock()
 
 	fail := func(err error) error {
@@ -715,6 +777,14 @@ func (a *App) ApplyUpdate() error {
 		unfreeze()
 		return fail(err)
 	}
+	// The backup is the restore point from this moment on; the status carries
+	// it so a poller sees "可以还原到 X" without a second call.
+	bakSize := sys.size(bak)
+	a.updMu.Lock()
+	a.upd.BackupAvailable = true
+	a.upd.BackupVersion = appVersion
+	a.upd.BackupSize = bakSize
+	a.updMu.Unlock()
 
 	args := helperArgs{
 		Mode:   modeApply,
@@ -737,7 +807,17 @@ func (a *App) ApplyUpdate() error {
 		OldSHA:  oldSHA,
 		NewSHA:  newSHA,
 		NewSize: wantSize,
-		Time:    sys.now().Format(time.RFC3339),
+		// What was verified for this download, and what the restore point is.
+		// Written here because this is the first moment a marker exists; the
+		// next launch reads them back instead of only being told that the
+		// updater "does hash checks".
+		DigestPresent:   digestPresent,
+		SizeMatched:     sizeMatched,
+		Verified:        verified,
+		BackupAvailable: true,
+		BackupVersion:   appVersion,
+		BackupSize:      bakSize,
+		Time:            sys.now().Format(time.RFC3339),
 	}
 	if err := updateStateSave(args.State, st); err != nil {
 		unfreeze()
@@ -869,8 +949,9 @@ func (a *App) updateNotice(st *updateState) string {
 		return "上次更新没有生效，程序仍是旧版本，请重新下载更新。"
 
 	case stageConfirmed:
-		// A confirmed update has nothing to report; the marker is only kept so
-		// the next start can clean up after it.
+		// A confirmed update has nothing to report. The marker is kept because
+		// it carries the restore point (the backup and the version it holds)
+		// the settings page offers until the user deletes it.
 		return ""
 
 	default:
@@ -913,6 +994,107 @@ func (a *App) RollBackUpdate() error {
 	return a.handoffToHelper(args, unfreeze)
 }
 
+// UpdateBackupInfo reports whether the previous version can still be restored.
+//
+// It reads the marker and then the file: a record can outlive its backup (the
+// user deleted it, an antivirus removed it), and offering a rollback that cannot
+// work is worse than saying there is nothing to restore.
+func (a *App) UpdateBackupInfo() UpdateBackup {
+	st, err := updateStateLoad(a.updateStatePath())
+	if err != nil {
+		a.debugLog("update backup: unreadable state: %v", err)
+		return UpdateBackup{}
+	}
+	if st == nil || st.Bak == "" {
+		return UpdateBackup{}
+	}
+	sys := a.syscalls()
+	if !sys.exists(st.Bak) {
+		return UpdateBackup{}
+	}
+	size := st.BackupSize
+	if size <= 0 {
+		// A record written before the size was stored: ask the file.
+		size = sys.size(st.Bak)
+	}
+	return UpdateBackup{
+		Available: true,
+		Version:   st.BackupVersion,
+		Size:      size,
+		Path:      st.Bak,
+	}
+}
+
+// DeleteUpdateBackup removes the backup of the previous version and clears the
+// record's reference to it.
+//
+// It is deliberately the only thing that deletes the backup: after a confirmed
+// update the copy is the restore point the settings page offers, so nothing
+// sweeps it away automatically. A missing record (or one that names no backup)
+// is a clear error the UI can show verbatim; a file that is already gone is not,
+// because the end state the user asked for is already true.
+func (a *App) DeleteUpdateBackup() error {
+	path := a.updateStatePath()
+	st, err := updateStateLoad(path)
+	if err != nil {
+		return fmt.Errorf("更新状态文件损坏，无法删除备份")
+	}
+	if st == nil || st.Bak == "" {
+		return fmt.Errorf("没有可删除的旧版本备份")
+	}
+
+	sys := a.syscalls()
+	if sys.exists(st.Bak) {
+		if rerr := sys.remove(st.Bak); rerr != nil {
+			return fmt.Errorf("删除旧版本备份失败: %w", rerr)
+		}
+	}
+
+	// The file is gone; the record must stop claiming otherwise, or the settings
+	// page would keep offering a rollback that cannot work.
+	st.Bak = ""
+	st.BackupAvailable = false
+	st.BackupVersion = ""
+	st.BackupSize = 0
+	if serr := updateStateSave(path, *st); serr != nil {
+		return fmt.Errorf("备份已删除，但更新记录无法写回: %w", serr)
+	}
+
+	a.updMu.Lock()
+	a.upd.BackupAvailable = false
+	a.upd.BackupVersion = ""
+	a.upd.BackupSize = 0
+	a.updMu.Unlock()
+	return nil
+}
+
+// hydrateUpdateStatus fills the read-only fields of the polled status from the
+// last recorded attempt, so the settings page can show what was verified and
+// what backup exists after a restart.
+//
+// State is deliberately left empty: this process has not started an update, and
+// the UI's idle behaviour must not change just because a record exists.
+func (a *App) hydrateUpdateStatus() {
+	bk := a.UpdateBackupInfo()
+	st, err := updateStateLoad(a.updateStatePath())
+	if err != nil {
+		a.debugLog("update status: unreadable marker: %v", err)
+		st = nil
+	}
+
+	a.updMu.Lock()
+	defer a.updMu.Unlock()
+	a.upd.BackupAvailable = bk.Available
+	a.upd.BackupVersion = bk.Version
+	a.upd.BackupSize = bk.Size
+	if st == nil {
+		return
+	}
+	a.upd.DigestPresent = st.DigestPresent
+	a.upd.SizeMatched = st.SizeMatched
+	a.upd.Verified = st.Verified
+}
+
 // writeUpdateHandshake tells the helper this build is up and running.
 //
 // It runs at domReady rather than startup: the window existing is the evidence
@@ -930,14 +1112,17 @@ func (a *App) writeUpdateHandshake() {
 		return
 	}
 	a.debugLog("update handshake written: %s", path)
-	// Confirming the record here is what lets the *next* start clean up the
-	// backup: this process cannot have its own directory entry edited into
-	// place, and the helper it is talking to runs from that backup.
+	// Confirming the record here is what turns the backup into the restore
+	// point: this process cannot have its own directory entry edited into
+	// place, and the helper it is talking to runs from that backup. Once the
+	// stamp is in, older copies are swept — but the backup the record names is
+	// kept for the settings page's "还原旧版本".
 	//
 	// The stamp is evidence, so it is only written by the build the record
 	// names. Without this check any executable that happened to be launched
-	// with the handshake flag confirmed somebody else's update, and the next
-	// start then deleted the backup of a version that was never replaced.
+	// with the handshake flag could confirm somebody else's update and make the
+	// next start treat a backup of a version that was never replaced as a
+	// restore point.
 	sys := a.syscalls()
 	st, err := updateStateLoad(a.updateStatePath())
 	if err != nil || st == nil {
@@ -964,66 +1149,185 @@ func (a *App) writeUpdateHandshake() {
 	st.Time = time.Now().Format(time.RFC3339)
 	if serr := updateStateSave(a.updateStatePath(), *st); serr != nil {
 		a.debugLog("cannot confirm the update record: %v", serr)
+	} else {
+		// The update is confirmed and this build is the one it names, so the
+		// older copies can go now rather than waiting for the next launch. The
+		// backup this record names is kept: it is the restore point.
+		a.cleanupUpdateArtifacts()
 	}
 }
 
-// cleanupStaleUpdate removes what a finished update leaves behind: the backup
-// copy of the previous version and the marker. It only acts when the record
-// says the update was confirmed *and* the running executable is the one that
-// record describes — the backup is the only other copy of a working program, so
-// a wrong deletion here cannot be undone.
+// cleanupStaleUpdate is the startup sweep. Every file decision lives in
+// cleanupUpdateArtifacts; this name is kept because it is what the startup path
+// (and several tests) already call.
 func (a *App) cleanupStaleUpdate() {
-	path := a.updateStatePath()
-	st, err := updateStateLoad(path)
+	a.cleanupUpdateArtifacts()
+}
+
+// updateArtifact is one file an update attempt left next to the executable.
+type updateArtifact struct {
+	path string
+	mod  time.Time
+}
+
+// cleanupUpdateArtifacts is the single sweep for what update attempts leave in
+// the program directory: the backup family (.bak, .bak.*), the failed-build
+// copies (.failed-*), the staged download (.new) and handshake files.
+//
+// It runs at startup and right after an update is confirmed. It never returns an
+// error and never aborts halfway: a leftover file is a nuisance, while a startup
+// that refuses to run (or a sweep that stops at the first locked file) is not.
+//
+// The rules are ordered by what must not go wrong:
+//
+//   - The record's own backup (st.Bak) is never deleted here. It is the restore
+//     point the settings page offers and, while an update is settling, the
+//     helper's own image. Only DeleteUpdateBackup removes it.
+//   - Extra .bak copies go only when the record proves a confirmed update; one
+//     backup stays. An unreadable or unfinished record never licenses deleting
+//     a possible working copy.
+//   - .failed-* copies are rollback evidence: they go when a confirmed newer
+//     build is running (all but the newest), or when they are older than a day.
+//     A corrupt marker keeps them all.
+//   - .new goes when it is older than a day, or when no record names it (an
+//     orphan from an attempt that never wrote a marker). A download this process
+//     is running is never touched.
+//   - Handshake files older than a day go (the existing rule).
+func (a *App) cleanupUpdateArtifacts() {
+	exe, staged, err := a.executablePaths()()
 	if err != nil {
-		a.debugLog("update state unreadable: %v", err)
-	} else if st != nil && st.Stage == stageConfirmed && st.Bak != "" {
-		sys := a.syscalls()
-		// A confirmed record with no hash proves nothing about which build is
-		// running, and the backup may be the only copy of a working version.
-		// The old code treated "no hash" as "matches", deleted the backup on
-		// that basis, and dropped the marker whether or not the delete worked.
-		if st.NewSHA == "" {
-			a.debugLog("keeping the update backup: the record carries no hash to verify it against")
-		} else if sha, herr := sys.sha256File(st.Exe); herr != nil || !strings.EqualFold(sha, st.NewSHA) {
-			a.debugLog("keeping the update backup: the running image is not the one the record names")
-		} else if rerr := sys.remove(st.Bak); rerr != nil {
-			// The marker stays: it is the only thing that still says a backup
-			// exists and is safe to remove later.
-			a.debugLog("cannot remove the update backup %s: %v", st.Bak, rerr)
-		} else {
-			a.debugLog("removed the update backup %s", st.Bak)
-			if merr := sys.remove(path); merr != nil {
-				a.debugLog("cannot remove the update record: %v", merr)
+		a.debugLog("update cleanup: cannot locate the executable: %v", err)
+		return
+	}
+	sys := a.syscalls()
+	dir := filepath.Dir(exe)
+	base := filepath.Base(exe)
+
+	st, serr := updateStateLoad(a.updateStatePath())
+	corrupt := serr != nil
+	if corrupt {
+		// A marker that cannot be parsed says nothing about which copy is the
+		// only working one, so every .bak / .failed-* is left alone. Only files
+		// that are unambiguously junk (a day-old staged download) still go.
+		a.debugLog("update cleanup: state unreadable, keeping every backup: %v", serr)
+		st = nil
+	}
+	confirmed := st != nil && st.Stage == stageConfirmed && confirmedBuildRunning(sys, st)
+
+	var baks, failed []updateArtifact
+	if entries, rerr := os.ReadDir(dir); rerr != nil {
+		a.debugLog("update cleanup: cannot list %s: %v", dir, rerr)
+	} else {
+		for _, e := range entries {
+			if e.IsDir() {
+				continue
+			}
+			name := e.Name()
+			info, ierr := e.Info()
+			if ierr != nil {
+				continue
+			}
+			switch {
+			case name == base+".bak" ||
+				strings.HasPrefix(name, base+".bak.") ||
+				strings.HasPrefix(name, base+".bak-"):
+				baks = append(baks, updateArtifact{filepath.Join(dir, name), info.ModTime()})
+			case strings.HasPrefix(name, base+".failed-"):
+				failed = append(failed, updateArtifact{filepath.Join(dir, name), info.ModTime()})
 			}
 		}
-	} else if st != nil && st.Stage != stageConfirmed {
-		// An update that never reached "confirmed" leaves its staged file
-		// behind. It is another full copy of the program and nothing will ever
-		// use it once the helper is gone, so it is swept after a day — long
-		// enough that a retry in the same session still finds it.
-		a.cleanupStaleStaged()
 	}
+
+	// One backup. The record's own copy always survives; when the record names
+	// none (or it is gone already) the newest copy is kept instead of deleting
+	// every possible way back.
+	if st != nil && st.Stage == stageConfirmed {
+		keep := st.Bak
+		if keep == "" || !sys.exists(keep) {
+			keep = newestArtifact(baks).path
+		}
+		for _, b := range baks {
+			if samePathText(b.path, keep) {
+				continue
+			}
+			a.removeUpdateArtifact(sys, b.path, "old update backup")
+		}
+	}
+
+	// .failed-* copies: rollback evidence, dropped by age or once a confirmed
+	// newer build is running. The newest is the last thing to go.
+	cutoff := time.Now().Add(-24 * time.Hour)
+	newestFailed := newestArtifact(failed).path
+	for _, f := range failed {
+		if corrupt {
+			break
+		}
+		if f.mod.Before(cutoff) || (confirmed && !samePathText(f.path, newestFailed)) {
+			a.removeUpdateArtifact(sys, f.path, "failed-build copy")
+		}
+	}
+
+	// The staged download: an orphan has no record to belong to, and one that
+	// does belong to a record is kept for a retry in the same session, but not
+	// forever.
+	if !a.updateDownloadInFlight() {
+		if info, serr := os.Stat(staged); serr == nil && !info.IsDir() {
+			named := st != nil && st.Staged != "" && samePathText(st.Staged, staged)
+			old := time.Since(info.ModTime()) >= 24*time.Hour
+			if old || (!named && !corrupt) {
+				a.removeUpdateArtifact(sys, staged, "staged update")
+			}
+		}
+	}
+
 	a.cleanupHandshakeFiles()
 }
 
-// cleanupStaleStaged removes a downloaded replacement that no longer belongs to
-// an update in progress. Only files older than a day go: a retry within the same
-// session must still be able to reuse the download.
-func (a *App) cleanupStaleStaged() {
-	_, staged, err := a.executablePaths()()
-	if err != nil {
+// newestArtifact returns the most recently modified artifact, or the zero value
+// for an empty list.
+func newestArtifact(list []updateArtifact) updateArtifact {
+	var best updateArtifact
+	for _, a := range list {
+		if best.path == "" || a.mod.After(best.mod) {
+			best = a
+		}
+	}
+	return best
+}
+
+// removeUpdateArtifact deletes one leftover and logs either outcome. A file an
+// antivirus still holds is retried on the next start; failing the sweep over it
+// would leave every other leftover in place.
+func (a *App) removeUpdateArtifact(sys updateSys, path, what string) {
+	if err := sys.remove(path); err != nil {
+		a.debugLog("update cleanup: cannot remove %s %s: %v", what, path, err)
 		return
 	}
-	info, serr := os.Stat(staged)
-	if serr != nil || time.Since(info.ModTime()) < 24*time.Hour {
-		return
+	a.debugLog("update cleanup: removed %s %s", what, path)
+}
+
+// updateDownloadInFlight reports whether this process is writing or holding the
+// staged file. The cleanup must not delete the file a downloader has open.
+func (a *App) updateDownloadInFlight() bool {
+	a.updMu.Lock()
+	defer a.updMu.Unlock()
+	switch a.upd.State {
+	case "downloading", "ready", "applying":
+		return true
 	}
-	if rerr := os.Remove(staged); rerr != nil {
-		a.debugLog("cannot remove the stale staged update %s: %v", staged, rerr)
-	} else {
-		a.debugLog("removed the stale staged update %s", staged)
+	return false
+}
+
+// confirmedBuildRunning reports whether the record describes a confirmed update
+// and the executable on disk is the one that record names. It is the evidence
+// that lets the sweep drop rollback copies: without it, "an update succeeded"
+// would be a claim nobody checked.
+func confirmedBuildRunning(sys updateSys, st *updateState) bool {
+	if st.Exe == "" || st.NewSHA == "" {
+		return false
 	}
+	sha, err := sys.sha256File(st.Exe)
+	return err == nil && strings.EqualFold(sha, st.NewSHA)
 }
 
 // cleanupHandshakeFiles drops handshake files left by earlier attempts. The one

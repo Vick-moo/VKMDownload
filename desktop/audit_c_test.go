@@ -433,10 +433,12 @@ func TestCleanupKeepsTheBackupWithoutAHash(t *testing.T) {
 	}
 }
 
-// TestCleanupKeepsTheBackupWhenTheDeleteFails pins the other half of P2-6: the
-// marker is only dropped once the backup is really gone, because it is the only
-// thing that still records that a backup exists.
-func TestCleanupKeepsTheBackupWhenTheDeleteFails(t *testing.T) {
+// TestCleanupKeepsTheConfirmedRecordWhenTheBackupPathIsOdd covers a confirmed
+// update whose backup path is not a regular file (here a non-empty directory).
+// Nothing in the sweep deletes the record's own backup — it is the restore point,
+// removed only by DeleteUpdateBackup — so the record must survive, and an odd
+// entry must not make the sweep fail halfway.
+func TestCleanupKeepsTheConfirmedRecordWhenTheBackupPathIsOdd(t *testing.T) {
 	dir := t.TempDir()
 	app := NewAppWithDataDir(dir)
 	app.emit = func(string, ...any) {}
@@ -464,7 +466,7 @@ func TestCleanupKeepsTheBackupWhenTheDeleteFails(t *testing.T) {
 	app.cleanupStaleUpdate()
 
 	if _, err := os.Stat(app.updateStatePath()); err != nil {
-		t.Errorf("the record was dropped although the backup is still there: %v", err)
+		t.Errorf("the record was dropped although the backup entry is still there: %v", err)
 	}
 }
 

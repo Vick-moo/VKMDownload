@@ -798,14 +798,16 @@ func TestConsumeUpdateNoticeIsQuietAfterASuccessfulUpdate(t *testing.T) {
 	if got := a.ConsumeUpdateNotice(); got != "" {
 		t.Errorf("notice = %q, want silence after a confirmed update", got)
 	}
-	// startup sweeps the confirmed leftovers: the backup is no longer needed
-	// and the record has served its purpose.
+	// Startup keeps the confirmed update's backup and record: together they are
+	// the restore point the settings page offers, and only DeleteUpdateBackup
+	// removes them. Dropping the backup here (what this used to assert) made a
+	// later "还原旧版本" impossible.
 	a.cleanupStaleUpdate()
-	if a.syscalls().exists(st.Bak) {
-		t.Error("the backup of a confirmed update was not cleaned up")
+	if !a.syscalls().exists(st.Bak) {
+		t.Error("the backup of a confirmed update was deleted; it is the restore point")
 	}
-	if a.syscalls().exists(a.updateStatePath()) {
-		t.Error("the record of a confirmed update was not cleaned up")
+	if !a.syscalls().exists(a.updateStatePath()) {
+		t.Error("the record of a confirmed update was deleted; the restore point would be lost")
 	}
 }
 
@@ -990,8 +992,8 @@ func TestRollBackUpdateRefusesWithoutSomethingToRestore(t *testing.T) {
 
 // TestWriteUpdateHandshakeIsWhatConfirmsTheUpdate pins the two halves of the
 // handshake: the new process writes it at domReady, and the marker it leaves
-// behind says the update was confirmed, which is what permits the next start to
-// clean the backup up.
+// behind says the update was confirmed, which turns the backup into the restore
+// point the settings page offers.
 func TestWriteUpdateHandshakeIsWhatConfirmsTheUpdate(t *testing.T) {
 	dir := t.TempDir()
 	a := NewAppWithDataDir(dir)
@@ -1037,8 +1039,8 @@ func TestWriteUpdateHandshakeIsWhatConfirmsTheUpdate(t *testing.T) {
 
 // TestHandshakeWillNotConfirmFromAnotherBuild pins the P2-6 rule: the evidence
 // must come from the build the record names. Otherwise any executable launched
-// with the flag stamps somebody else's update as done, and the next start then
-// deletes the backup of a version that was never replaced.
+// with the flag stamps somebody else's update as done, and the settings page is
+// then offered a restore point for a version that was never replaced.
 func TestHandshakeWillNotConfirmFromAnotherBuild(t *testing.T) {
 	cases := map[string]func(*App, string){
 		"different image": func(a *App, exe string) {

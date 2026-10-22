@@ -229,9 +229,14 @@ func (a *App) startup(ctx context.Context) {
 	// that is not a download, so the user's setting wins.
 	go a.checkUpdateOnceIfEnabled()
 
-	// Whatever the previous update left behind (a backup copy of the old
-	// version, an old handshake file) is swept in the background. It never
-	// touches anything unless the record proves the update succeeded.
+	// The updater's last-attempt results (what was verified, which backup can
+	// still be restored) are loaded once: the settings page asks a running app,
+	// and a fresh process has no in-memory attempt of its own.
+	a.hydrateUpdateStatus()
+
+	// Whatever the previous update left behind (older backups, failed-build
+	// copies, a stale staged download, old handshake files) is swept in the
+	// background. The one backup the record names is kept as the restore point.
 	go a.cleanupStaleUpdate()
 
 	// Credentials written by earlier versions are removed before the tasks are

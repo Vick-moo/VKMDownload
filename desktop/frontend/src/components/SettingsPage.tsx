@@ -3,6 +3,7 @@ import type { JSX } from "react";
 import { main } from "../../wailsjs/go/models";
 import { api } from "../api";
 import type { Config, OrganizeGroup, StoredSecretSummary, UpdateStatus } from "../types";
+import { ConfirmDialog } from "./ConfirmDialog";
 import { IconFolder } from "./Icons";
 import { UpdateNotesDialog } from "./UpdateNotesDialog";
 
@@ -120,6 +121,9 @@ export function SettingsPage({
   // flag for the one action that removes it.
   const [stored, setStored] = useState<StoredSecretSummary | null>(null);
   const [clearing, setClearing] = useState(false);
+  // Clearing history is the only irreversible action on this page, so it goes
+  // through the same confirmation dialog as the bulk row deletions.
+  const [confirmClearOpen, setConfirmClearOpen] = useState(false);
 
   async function refreshStored() {
     try {
@@ -141,15 +145,19 @@ export function SettingsPage({
 
   async function clearHistory() {
     setClearing(true);
-    setUpdMsg("");
     try {
       await api.clearDownloadHistory();
       await refreshStored();
-      setUpdMsg("已清除下载记录与日志。已下载的文件仍然保留。");
+      // The footer status line is visible on the privacy tab; updMsg belongs
+      // to the update section and would have hidden this result one tab away.
+      note("已清除下载记录与日志。已下载的文件仍然保留。");
     } catch (e) {
-      setUpdMsg(`清除失败：${e instanceof Error ? e.message : String(e)}`);
+      note(`清除失败：${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setClearing(false);
+      // The dialog stays up, disabled, while the request runs so a second
+      // click cannot start another one; close it when the result is in.
+      setConfirmClearOpen(false);
     }
   }
   // The version whose "what's new" dialog is open; the actual download starts
@@ -1072,7 +1080,7 @@ export function SettingsPage({
               type="button"
               className="btn"
               disabled={clearing}
-              onClick={() => void clearHistory()}
+              onClick={() => setConfirmClearOpen(true)}
             >
               {clearing ? "清除中…" : "清除"}
             </button>
@@ -1168,6 +1176,18 @@ export function SettingsPage({
           anyone reporting a problem is asked for is this number. */}
       {version ? (
         <p className="settings__version">VKMDownload v{version}</p>
+      ) : null}
+
+      {confirmClearOpen ? (
+        <ConfirmDialog
+          title="清除下载记录与日志？"
+          message="会删除任务列表、日志，以及旧版本留下的副本。"
+          detail="已下载的文件、你的设置、配对密钥不会被删。此操作不可撤销。"
+          confirmLabel="清除"
+          busy={clearing}
+          onConfirm={() => void clearHistory()}
+          onCancel={() => setConfirmClearOpen(false)}
+        />
       ) : null}
 
       {notesVer ? (

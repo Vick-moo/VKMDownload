@@ -20,7 +20,6 @@ package main
 
 import (
 	"crypto/rand"
-	"sync/atomic"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -30,6 +29,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -201,10 +201,24 @@ type updateState struct {
 	// verified (a partial antivirus quarantine, a half-written copy) would
 	// otherwise be installed as the program.
 	NewSize int64 `json:"newSize,omitempty"`
-	Failed   string `json:"failedPath,omitempty"`
-	Reason   string `json:"reason,omitempty"`
-	Notified bool   `json:"notified,omitempty"`
-	Time     string `json:"time"`
+	// Verification results for the download this record describes. They are
+	// recorded when the executable is handed over (ApplyUpdate), which is the
+	// first moment a marker exists at all, so the next launch can say what was
+	// actually checked instead of only that checks exist.
+	DigestPresent bool `json:"digestPresent,omitempty"`
+	SizeMatched   bool `json:"sizeMatched,omitempty"`
+	Verified      bool `json:"verified,omitempty"`
+	// The restore point: the backup copy of the version this update replaced.
+	// BackupAvailable is recorded here but re-derived from the filesystem when
+	// the UI asks, because a record that outlives its file must not offer a
+	// rollback that cannot work.
+	BackupAvailable bool   `json:"backupAvailable,omitempty"`
+	BackupVersion   string `json:"backupVersion,omitempty"`
+	BackupSize      int64  `json:"backupSize,omitempty"`
+	Failed          string `json:"failedPath,omitempty"`
+	Reason          string `json:"reason,omitempty"`
+	Notified        bool   `json:"notified,omitempty"`
+	Time            string `json:"time"`
 }
 
 // The stage ladder. prepared -> backed-up -> replaced -> launched -> confirmed,
@@ -742,7 +756,6 @@ func runHelper(args helperArgs, sys updateSys) int {
 		}
 	}
 
-
 	// Nothing may be touched while the old process still holds its image: the
 	// one thing this order guarantees is that a stuck exit costs nothing.
 	if err := waitForExit(sys, args.Parent, helperParentTimeout); err != nil {
@@ -798,9 +811,10 @@ func runHelper(args helperArgs, sys updateSys) int {
 	switch awaitHandshake(sys, args.okPath(), pid, handshakeTimeout) {
 	case hsConfirmed:
 		markStage(sys, args.State, stageConfirmed, "")
-		// The backup is deliberately kept: this process *is* the backup, so it
-		// cannot delete its own image. The new version removes it once it has
-		// cleaned up a handshake it confirmed itself.
+		// The backup is deliberately kept. This process *is* the backup, so it
+		// cannot delete its own image, and it is also the restore point the
+		// settings page offers until the user deletes it explicitly. The new
+		// build's cleanup only drops *older* copies, never this one.
 		return 0
 	case hsUnconfirmed:
 		// Running but unconfirmed. Rolling back here would replace a working

@@ -3,6 +3,15 @@
 > 每次改完代码都在这里记一笔：日期、改了什么、为什么改。
 > 发版 / push 前看这份文件写 release notes。
 
+### 60. 波 B：更新器可读性与备份策略 + P3 二次确认（UNRELEASED，2026-10-22）
+- `UpdateStatus` / `updateState` 新增 6 个字段：`digestPresent`、`sizeMatched`、`verified`、`backupAvailable`、`backupVersion`、`backupSize`。JSON 带 `omitempty`（前端按 `?? false` 渲染）；`ApplyUpdate` 落盘，启动 `hydrateUpdateStatus` 读回。校验强度与阈值未改。
+- 新 binding：`DeleteUpdateBackup()`、`UpdateBackupInfo() UpdateBackup{available,version,size,path}`。
+- **语义变化**：确认成功的更新不再自动删除 `.bak` 与记录——它们就是"还原旧版本"的还原点，只有用户点删除才删。代价是备份长期占约 13MB/份。
+- 清理统一到 `cleanupUpdateArtifacts()`（启动与确认成功后都调用）：`.bak` 只在 `stage==confirmed` 时清理且保留记录里的 Bak（否则最新一份）；`.failed-*` 在超过 24h 或"confirmed 且运行映像哈希匹配"时删（后者保留最新一份）；孤儿 `.new` 删、记录点名的保留到 24h；handshake 沿用 24h。删除失败只记日志，不阻塞启动。
+- P3：`清除下载记录与日志` 现在先弹 `ConfirmDialog`（写清删什么/不删什么/不可撤销），执行中按钮禁用，成功/失败都显示在设置页底部状态行。
+- 验收：desktop `go vet` / `go test`（37.4s）、`GOOS=linux go vet`、前端 `tsc` + vitest 67/67、`git diff --check` 干净。
+- 注意：校验结果只在 `ApplyUpdate` 时落盘（"下载完但没应用"不记录，避免被误判为"上次更新没开始"）；前端波 E 要接 `DeleteUpdateBackup`/`UpdateBackupInfo` 才有入口。
+
 ### 59. 波 A：配置项与前端交互（UNRELEASED，2026-10-22）
 - 新增 4 个设置字段：`historyRetentionDays`（默认 90，**0=永久**，负数回 90）、`loggingEnabled`（默认开）、`launchAtLogin`（默认**开**）、`shutdownDelaySeconds`（默认 60，**0=立即**，负数回 60）。
 - 开机自启：写 `HKCU\...\Run` 值 `VKMDownload`；值不变不写、关闭时立即删（不等下次启动）、读失败不盲写。测试用注入 fake + `TestMain`，整个套件不碰真实注册表；真后端只有一个只读映射测试。
