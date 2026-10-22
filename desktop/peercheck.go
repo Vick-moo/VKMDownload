@@ -115,6 +115,10 @@ const (
 	// apiGuard records its refusals here too, so one list explains every "the
 	// app will not talk to my extension" report.
 	peerReasonOriginLocked = "origin_locked"
+	// peerReasonOriginMissing is the locked-down case where the request carried
+	// no Origin at all. Current Chrome omits Origin on an extension's own fetch,
+	// so a locked app cannot match the request to any extension and refuses it.
+	peerReasonOriginMissing = "origin_missing"
 )
 
 // recordPeerRejection appends a refusal to the in-memory ring, newest first.

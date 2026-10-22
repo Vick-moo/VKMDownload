@@ -123,6 +123,65 @@ func isExtensionOrigin(origin string) bool {
 		strings.HasPrefix(origin, "moz-extension://")
 }
 
+// Fetch-metadata headers the browser adds to every request it makes. They
+// identify where a request came from when no Origin header is sent.
+const (
+	secFetchSite = "Sec-Fetch-Site"
+	secFetchDest = "Sec-Fetch-Dest"
+)
+
+// isExtensionRequest reports whether a request can only be a browser extension's
+// own fetch.
+//
+// Chrome used to send `Origin: chrome-extension://<id>` on those fetches. Chrome
+// 155 (verified against the real extension) omits Origin entirely and identifies
+// them with `Sec-Fetch-Site: none`, `Sec-Fetch-Mode: cors`,
+// `Sec-Fetch-Dest: empty` instead, so an Origin-only rule turned every /pair and
+// /add into a 403.
+//
+// Three shapes are accepted:
+//
+//  1. Origin present: it must be an extension origin. A browser always attaches
+//     the page's origin to a cross-origin request from that page, so websites
+//     stay out here — this branch is unchanged.
+//  2. Origin absent, but a destination header: document, iframe, image, script
+//     and the other navigation/subresource destinations are address-bar loads,
+//     iframes and <img>/<script> tags. Not extensions.
+//  3. Origin absent and the destination is empty/absent: this is an extension
+//     fetch (no initiating page, `Sec-Fetch-Site: none`). Clients that send no
+//     Sec-Fetch-* at all — an old Chrome, an old extension build, curl — land
+//     here too and are left to the layers that actually authenticate: the HMAC
+//     proof on POST /add and the signed-browser peer check on /pair.
+//
+// This does not weaken the gate. Page script cannot set Sec-Fetch-* (forbidden
+// headers) and cannot suppress Origin on a cross-origin request, so a website is
+// still refused by branch 1 or 2. A local process can omit Origin and forge the
+// headers, but it has neither the pairing key (so /add fails the HMAC) nor a
+// signed browser process (so /pair fails the peer check unless the user has
+// turned that check off).
+func isExtensionRequest(r *http.Request) bool {
+	origin := r.Header.Get("Origin")
+	if origin != "" {
+		return isExtensionOrigin(origin)
+	}
+
+	switch strings.ToLower(strings.TrimSpace(r.Header.Get(secFetchDest))) {
+	case "", "empty":
+		// An extension's own fetch, or a client too old to send the header.
+	default:
+		// document / iframe / image / script / style / font / audio / video / …
+		return false
+	}
+
+	// An extension fetch has no initiating page, so "none" is the expected site.
+	// A page-issued request reports same-origin/same-site/cross-site; an absent
+	// header means an old client and is left to the HMAC/peer checks.
+	if site := strings.ToLower(strings.TrimSpace(r.Header.Get(secFetchSite))); site != "" && site != "none" {
+		return false
+	}
+	return true
+}
+
 // compareVersions compares two dotted numeric versions, returning -1, 0 or 1.
 //
 // Missing components are zero, so "1.0" < "1.0.3". A component is read up to its
@@ -259,11 +318,15 @@ func (a *App) startLocalAPI(ctx context.Context) {
 // apiGuard rejects callers that are not browser extensions and answers the
 // preflight requests that follow from that.
 //
+// The first gate is the request's shape (isExtensionRequest): an extension
+// Origin, or the fetch metadata Chrome sends when it omits Origin for an
+// extension's own fetch. A page is refused there.
+//
 // When the loopback peer check is enforced (VerifyPeerProcess), every
 // non-preflight request must come from a genuine signed browser process.
-// The Origin header alone is self-reported and costs an attacker nothing to
-// forge; without the peer check, anything else on the machine that can speak
-// HTTP could drive the endpoint once past it.
+// The shape check is self-reported and costs an attacker nothing to forge;
+// without the peer check, anything else on the machine that can speak HTTP
+// could drive the endpoint once past it.
 //
 // Two optional/diagnostic layers sit on top:
 //
@@ -275,42 +338,53 @@ func (a *App) startLocalAPI(ctx context.Context) {
 func (a *App) apiGuard(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
-		extOrigin := isExtensionOrigin(origin)
+		dest := r.Header.Get(secFetchDest)
+		site := r.Header.Get(secFetchSite)
+		extCaller := isExtensionRequest(r)
 		// The counters describe the two verbs the extension uses to do work.
 		// Preflights and reads are not attempts and are not counted.
 		counted := r.Method != http.MethodOptions &&
 			(r.URL.Path == "/add" || r.URL.Path == "/pair")
 
-		// reject answers and records. A refused /add or /pair from an extension
-		// is exactly the rejection the settings page should be able to show; the
-		// verdict itself is unchanged.
-		reject := func(body map[string]string) {
-			if extOrigin && counted {
+		// reject answers, records and logs. Every refusal names the caller's
+		// shape in the debug log — method, path, Origin (or <none>) and the
+		// fetch metadata — so the next "why is my extension refused" report can
+		// be answered from the log instead of guesswork. The verdict itself is
+		// unchanged: a refused /add or /pair from an extension is exactly the
+		// rejection the settings page shows.
+		reject := func(reason string, body map[string]string) {
+			originText := logHeader(origin)
+			if originText == "" {
+				originText = "<none>"
+			}
+			a.debugLog("local api rejected %s %s: %s (origin=%s dest=%q site=%q)",
+				r.Method, r.URL.Path, reason, originText, logHeader(dest), logHeader(site))
+			if extCaller && counted {
 				a.noteExtensionResult(origin, false)
 			}
 			writeJSON(w, http.StatusForbidden, body)
 		}
 
-		// Mutations require a browser-extension Origin. An empty Origin (curl,
-		// a local test) may still use the read-only endpoints, but must not
-		// enqueue downloads: without this, any process on the machine could
-		// push arbitrary tasks into the queue with no credential at all.
+		// Mutations require a browser-extension caller. The shape is decided by
+		// isExtensionRequest: an extension Origin, or the fetch metadata an
+		// extension's own fetch carries when Chrome omits Origin. A website is
+		// refused here; a caller with no credentials at all is refused below by
+		// the HMAC and peer checks.
 		//
 		// /pair is held to the same rule even though it is a GET: it hands out
-		// the pairing key, which is a credential, so a caller without a browser
-		// Origin must never reach it.
+		// the pairing key, which is a credential.
 		if r.Method != http.MethodOptions && (r.URL.Path == "/add" || r.URL.Path == "/pair" || r.Method == http.MethodPost) {
-			if !extOrigin {
+			if !extCaller {
 				// JSON, not plain text: the extension parses the reply body
 				// and shows the error verbatim, and a plain-text 403 made it
 				// fall back to "HTTP 403" every time.
-				reject(map[string]string{
+				reject("not a browser-extension request", map[string]string{
 					"error": "this endpoint only accepts requests from the browser extension",
 				})
 				return
 			}
-		} else if origin != "" && !extOrigin {
-			reject(map[string]string{
+		} else if origin != "" && !extCaller {
+			reject("web page origin", map[string]string{
 				"error": "this endpoint only accepts requests from the browser extension",
 			})
 			return
@@ -321,10 +395,22 @@ func (a *App) apiGuard(next http.Handler) http.Handler {
 		// trailing slash and case matters to the extension ID. A refusal is a
 		// peer diagnostic, so the settings page can explain "my other extension
 		// cannot talk to the app".
-		if extOrigin {
-			if lock := a.Config().ExtensionOriginLock; lock != "" && origin != lock {
+		//
+		// A request with no Origin cannot name an extension at all, so a locked
+		// app refuses it instead of guessing: silently admitting it would defeat
+		// the lock. That includes the current Chrome's extension fetch, which is
+		// why the lock is opt-in and documented as such.
+		if lock := a.Config().ExtensionOriginLock; lock != "" {
+			if origin == "" {
+				a.recordPeerRejection(peerReasonOriginMissing, "")
+				reject("origin lock: request has no Origin header", map[string]string{
+					"error": "this app is locked to one extension origin, and this request sent no Origin header, so the lock cannot be matched",
+				})
+				return
+			}
+			if origin != lock {
 				a.recordPeerRejection(peerReasonOriginLocked, "")
-				reject(map[string]string{
+				reject("origin lock: origin does not match", map[string]string{
 					"error": "this extension is not the one this app is locked to",
 				})
 				return
@@ -338,7 +424,7 @@ func (a *App) apiGuard(next http.Handler) http.Handler {
 		// Origin check rejects its Origin, but a Host check is the layer that
 		// makes the whole class impossible rather than merely blocked.
 		if !loopbackHost(r.Host) {
-			reject(map[string]string{
+			reject("unexpected Host header", map[string]string{
 				"error": "unexpected Host header",
 			})
 			return
@@ -347,7 +433,9 @@ func (a *App) apiGuard(next http.Handler) http.Handler {
 		// Echo the caller's origin instead of "*". Only an extension origin gets
 		// this far, so * was not exploitable — but a wildcard would let a future
 		// regression that admits some page read the reply, and it is exactly the
-		// kind of header nobody re-checks.
+		// kind of header nobody re-checks. With no Origin there is nothing to
+		// echo: an extension fetch does not need CORS for a host-permission
+		// request, and a page is refused long before this line.
 		if origin != "" {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Set("Vary", "Origin")
@@ -363,14 +451,15 @@ func (a *App) apiGuard(next http.Handler) http.Handler {
 			return
 		}
 
-		// Mutations must prove they hold the pairing key. The Origin check says
-		// "some browser extension" and the peer check says "a real browser", but
-		// neither says "our extension": any installed extension passes both, and
-		// /add enqueues a download with caller-supplied cookies and URL. The proof
-		// makes the endpoint useless to anything that merely looks like a browser.
+		// Mutations must prove they hold the pairing key. The request-shape check
+		// says "some browser extension" and the peer check says "a real browser",
+		// but neither says "our extension": any installed extension passes both,
+		// and /add enqueues a download with caller-supplied cookies and URL. The
+		// proof makes the endpoint useless to anything that merely looks like a
+		// browser.
 		if r.Method == http.MethodPost || r.URL.Path == "/add" {
 			if !a.requestAuthentic(r) {
-				reject(map[string]string{
+				reject("missing or wrong pairing proof", map[string]string{
 					"error": "request is not authenticated by the VKMDownload extension",
 				})
 				return
@@ -383,7 +472,7 @@ func (a *App) apiGuard(next http.Handler) http.Handler {
 				// JSON so the extension can show which process was refused
 				// verbatim; a plain-text body made every refusal read as a
 				// bare "HTTP 403" in the notification.
-				reject(map[string]string{
+				reject("peer process refused"+exeSuffix(exe), map[string]string{
 					"error": "caller is not a recognized browser" + exeSuffix(exe),
 				})
 				return
@@ -400,17 +489,29 @@ func (a *App) apiGuard(next http.Handler) http.Handler {
 		// settings page.
 		if !counted {
 			next.ServeHTTP(w, r)
-			if extOrigin {
+			if extCaller {
 				a.noteExtensionSeen(origin)
 			}
 			return
 		}
 		rec := &statusRecorder{ResponseWriter: w}
 		next.ServeHTTP(rec, r)
-		if extOrigin {
+		if extCaller {
 			a.noteExtensionResult(origin, rec.Status() < http.StatusBadRequest)
 		}
 	})
+}
+
+// logHeader bounds an attacker-controlled header value before it reaches the
+// debug log: the value is only there to identify a caller, and headers may be up
+// to the server's 1 MiB limit, which would otherwise make one log line huge.
+func logHeader(value string) string {
+	const limit = 64
+	runes := []rune(value)
+	if len(runes) <= limit {
+		return value
+	}
+	return string(runes[:limit]) + "…"
 }
 
 // loopbackHost reports whether a Host header names this machine.
