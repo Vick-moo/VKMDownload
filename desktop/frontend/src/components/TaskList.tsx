@@ -20,11 +20,15 @@ interface Props {
   onSort: (key: SortKey) => void;
   selected: Set<string>;
   onSelect: (id: string, additive: boolean) => void;
+  /** Adds a row to the selection for a right-click. */
+  onContextSelect: (id: string) => void;
   /** Grouping is only meaningful in the unfiltered view. */
   groupByType: boolean;
   onChanged: () => void;
   /** Reports a failed row action to the toolbar notice line. */
   onError: (message: string) => void;
+  /** Reports a successful row action (copying a link). */
+  onNotice: (message: string) => void;
 }
 
 interface Column {
@@ -186,9 +190,11 @@ export function TaskList({
   onSort,
   selected,
   onSelect,
+  onContextSelect,
   groupByType,
   onChanged,
   onError,
+  onNotice,
 }: Props): JSX.Element {
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
   // Preferred widths, in the same order as COLUMNS plus the action track.
@@ -506,8 +512,10 @@ export function TaskList({
         task={t}
         selected={selected.has(t.id)}
         onSelect={onSelect}
+        onContextSelect={onContextSelect}
         onChanged={onChanged}
         onError={onError}
+        onNotice={onNotice}
       />
     );
   }

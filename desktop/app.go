@@ -120,6 +120,15 @@ type App struct {
 	// beforeClose and the process lingers in the background with no window
 	// and no tray icon.
 	quitFlag atomic.Bool
+
+	// logEnabled mirrors cfg.LoggingEnabled for debugLog.
+	//
+	// It is an atomic from day one because debugLog is called from loadConfig
+	// while the config lock is held: taking that lock again there would
+	// deadlock startup. NewApp starts it true so the settings-load diagnostics
+	// are written before the user's choice is known; startup replaces it with
+	// the loaded value, and SetConfig keeps the two in step.
+	logEnabled atomic.Bool
 }
 
 // NewApp creates the application object and its task manager.
@@ -130,6 +139,9 @@ type App struct {
 // nil check below.
 func NewApp() *App {
 	a := &App{cfg: DefaultConfig()}
+	// Mirrors DefaultConfig().LoggingEnabled. Set before anything can log, so
+	// the corrupt-config warning loadConfig may emit is not swallowed.
+	a.logEnabled.Store(true)
 	a.emit = func(name string, data ...any) {
 		if a.ctx == nil {
 			return
@@ -177,6 +189,20 @@ func (a *App) startup(ctx context.Context) {
 		if err := saveConfig(a.configPath(), a.cfg); err != nil {
 			runtime.LogErrorf(ctx, "保存设置失败: %v", err)
 		}
+	}
+
+	// Apply the log switch for the rest of the run. It is stored after the
+	// settings load, so a corrupt-config warning is written under the default
+	// (on) that a corrupt file falls back to anyway; a readable file with
+	// logging off has nothing to warn about at this point.
+	cfg := a.Config()
+	a.logEnabled.Store(cfg.LoggingEnabled)
+
+	// Keep the per-user Run key in step with the setting. SetLaunchAtLogin
+	// reads before it writes, so an ordinary launch touches nothing; a refusal
+	// (group policy, locked-down registry) is logged and never blocks startup.
+	if err := SetLaunchAtLogin(cfg.LaunchAtLogin); err != nil {
+		a.debugLog("autostart: %v", err)
 	}
 
 	// Everything that does not read the task table starts first: the tray
@@ -363,6 +389,7 @@ func (a *App) SetConfig(cfg Config) error {
 	a.mu.Lock()
 	old := a.cfg
 	oldMax := a.cfg.MaxConcurrent
+	oldLogging := a.cfg.LoggingEnabled
 	a.cfg = cfg
 	a.mu.Unlock()
 
@@ -370,7 +397,24 @@ func (a *App) SetConfig(cfg Config) error {
 		a.mu.Lock()
 		a.cfg = old
 		a.mu.Unlock()
+		a.logEnabled.Store(oldLogging)
 		return err
+	}
+	a.logEnabled.Store(cfg.LoggingEnabled)
+	// The launch-at-login switch has to take effect now, not at the next start:
+	// a user who turns it off expects the Run entry to be gone before the
+	// machine is next rebooted, otherwise it auto-starts exactly once more and
+	// the switch looks broken. Only a real change writes — SetLaunchAtLogin
+	// itself also skips an unchanged value, but this guard keeps a settings save
+	// that touched something else entirely away from the registry.
+	//
+	// A failure is logged rather than returned: the settings are already saved,
+	// and failing the save would show the user the old value while the file on
+	// disk holds the new one. The next start retries the sync.
+	if old.LaunchAtLogin != cfg.LaunchAtLogin {
+		if err := SetLaunchAtLogin(cfg.LaunchAtLogin); err != nil {
+			a.debugLog("autostart: %v", err)
+		}
 	}
 	a.RestartClipboardWatch()
 	// Live-apply without restarting transfers: the shared limiter retunes in

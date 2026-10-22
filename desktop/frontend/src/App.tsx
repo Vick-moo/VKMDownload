@@ -7,6 +7,15 @@ import { SettingsPage } from "./components/SettingsPage";
 import { Sidebar } from "./components/Sidebar";
 import { TaskList } from "./components/TaskList";
 import { UpdateNotesDialog } from "./components/UpdateNotesDialog";
+import {
+  parseStoredFilter,
+  parseStoredSidebarCollapsed,
+  parseStoredSort,
+  readStored,
+  selectForContextMenu,
+  STORAGE_KEYS,
+  writeStored,
+} from "./contextMenu";
 import { filterLabel } from "./filterLabel";
 import { formatSpeed } from "./format";
 import {
@@ -33,10 +42,16 @@ function App(): JSX.Element {
   const configRef = useRef<Config | null>(null);
   configRef.current = config;
 
-  const [filter, setFilter] = useState<Filter>("all");
+  const [filter, setFilter] = useState<Filter>(() =>
+    parseStoredFilter(readStored(STORAGE_KEYS.filter)),
+  );
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [sortKey, setSortKey] = useState<SortKey>("added");
-  const [sortDir, setSortDir] = useState<SortDir>("desc");
+  const [sortKey, setSortKey] = useState<SortKey>(
+    () => parseStoredSort(readStored(STORAGE_KEYS.sort)).key,
+  );
+  const [sortDir, setSortDir] = useState<SortDir>(
+    () => parseStoredSort(readStored(STORAGE_KEYS.sort)).dir,
+  );
   const [selected, setSelected] = useState<Set<string>>(new Set());
 
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -73,7 +88,9 @@ function App(): JSX.Element {
   // Guards runSelected against double submission (double-click, key repeat).
   const bulkBusyRef = useRef(false);
   const [pendingURL, setPendingURL] = useState("");
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() =>
+    parseStoredSidebarCollapsed(readStored(STORAGE_KEYS.sidebarCollapsed)),
+  );
   /** Where the sidebar width is remembered between sessions. */
   const SIDEBAR_W_KEY = "vkmdownload.sidebar-width";
   function loadSidebarWidth(): number {
@@ -105,6 +122,27 @@ function App(): JSX.Element {
     }, 300);
     return () => window.clearTimeout(id);
   }, [sidebarWidth, SIDEBAR_W_KEY]);
+
+  // View state survives a restart. Each write is best-effort: the app must run
+  // even when storage is unavailable, and the initializers above validate
+  // whatever an older build may have left behind.
+  useEffect(() => {
+    writeStored(
+      STORAGE_KEYS.sort,
+      JSON.stringify({ key: sortKey, dir: sortDir }),
+    );
+  }, [sortKey, sortDir]);
+
+  useEffect(() => {
+    writeStored(STORAGE_KEYS.filter, filter);
+  }, [filter]);
+
+  useEffect(() => {
+    writeStored(
+      STORAGE_KEYS.sidebarCollapsed,
+      sidebarCollapsed ? "true" : "false",
+    );
+  }, [sidebarCollapsed]);
 
   /** The extension the sidebar is filtering by, or "" for a status view. */
   const extActive = filterExt(filter);
@@ -455,6 +493,11 @@ function App(): JSX.Element {
       else next.add(id);
       return next;
     });
+  }, []);
+
+  /** Right-click selection: add the row, never toggle an existing one off. */
+  const onContextSelect = useCallback((id: string) => {
+    setSelected((prev) => selectForContextMenu(prev, id));
   }, []);
 
   const onNewTask = useCallback(() => {
@@ -1004,9 +1047,11 @@ function App(): JSX.Element {
                 onSort={onSort}
                 selected={selected}
                 onSelect={onSelect}
+                onContextSelect={onContextSelect}
                 groupByType={filter === "all"}
                 onChanged={handleChanged}
                 onError={flash}
+                onNotice={flash}
               />
             )}
           </>

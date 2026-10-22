@@ -3,6 +3,18 @@
 > 每次改完代码都在这里记一笔：日期、改了什么、为什么改。
 > 发版 / push 前看这份文件写 release notes。
 
+### 59. 波 A：配置项与前端交互（UNRELEASED，2026-10-22）
+- 新增 4 个设置字段：`historyRetentionDays`（默认 90，**0=永久**，负数回 90）、`loggingEnabled`（默认开）、`launchAtLogin`（默认**开**）、`shutdownDelaySeconds`（默认 60，**0=立即**，负数回 60）。
+- 开机自启：写 `HKCU\...\Run` 值 `VKMDownload`；值不变不写、关闭时立即删（不等下次启动）、读失败不盲写。测试用注入 fake + `TestMain`，整个套件不碰真实注册表；真后端只有一个只读映射测试。
+- 日志开关：`debugLog` 开头用原子量闸门（不用 `Config()`，避免 `loadConfig` 持锁时死锁）；关闭后不建目录、不建文件。**更新助手进程的日志不受此开关控制**（遗留，待下一批）。
+- 历史保留：`privacy.go` 的 90 天硬编码改为配置；0 直接返回不裁剪。
+- 计划关机延迟：`shutdownMachine` 接收秒数，`shutdownArgs` 纯函数负责 `/t` 与取消提示；0 文案为"立即关机"。
+- 完成后动作互斥：`normalize()` 里两者都 true 时保留 `OpenDirWhenDone`、清 `OpenFileWhenDone`（与运行时优先级一致）。
+- 前端：右键任务行 = 按勾选框语义选中该行 + 菜单（开始/继续、暂停、打开目录、复制链接、删除；不可用项置灰，菜单贴边自动收）；排序、筛选、侧栏折叠存 localStorage，非法值回默认。
+- 验收：desktop `go vet` / `go test`（35.2s）、`GOOS=linux go vet`、前端 `tsc --noEmit` + vitest 67/67、`git diff --check` 干净。
+- 注意：`wailsjs/go/models.ts` 是生成物，波 E 改设置页前必须先 `wails generate module`，否则前端看不到新字段。
+- 未 push、未发版；本批无真机验证（注册表写入只验证了 fake，实际开机自启需真机试一次）。
+
 ### 58. 显示与文案修正：5 个小问题（UNRELEASED，2026-10-22）
 - 隐私页说明里的 `**` 以前会原样显示成星号（界面不认 markdown），改成真正的 `<strong>`。
 - 剪贴板检测间隔 <200 以前被静默改回默认 800（用户想更快反而慢 8 倍），现在钳到 200；输入框提示写清 200–10000，清空或 0 按默认 800。

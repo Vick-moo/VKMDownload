@@ -1,6 +1,15 @@
-import { memo, useState } from "react";
-import type { JSX } from "react";
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
+import type { CSSProperties, JSX } from "react";
+import { ClipboardSetText } from "../../wailsjs/runtime/runtime";
 import { api } from "../api";
+import { clampMenuPosition, contextActions } from "../contextMenu";
 import {
   formatBytes,
   formatEta,
@@ -27,13 +36,169 @@ interface Props {
   task: TaskView;
   selected: boolean;
   onSelect: (id: string, additive: boolean) => void;
+  /** Adds the row to the selection for a right-click, never toggling it off. */
+  onContextSelect: (id: string) => void;
   onChanged: () => void;
   /** Reports a failed row action to the toolbar notice line. */
   onError: (message: string) => void;
+  /** Reports a successful row action (today, copying the link). */
+  onNotice: (message: string) => void;
 }
 
 /** Statuses that carry a progress bar worth showing. */
 const PROGRESSED: TaskStatus[] = ["downloading", "paused", "completed", "failed"];
+
+interface MenuItem {
+  label: string;
+  disabled?: boolean;
+  danger?: boolean;
+  onSelect: () => void;
+}
+
+const MENU_STYLE: CSSProperties = {
+  position: "fixed",
+  zIndex: 40,
+  minWidth: 176,
+  padding: 4,
+  background: "var(--bg-raised)",
+  border: "1px solid var(--border-strong)",
+  borderRadius: "var(--radius-md)",
+  boxShadow: "var(--shadow-modal)",
+  userSelect: "none",
+};
+
+const MENU_ITEM_STYLE: CSSProperties = {
+  display: "block",
+  width: "100%",
+  padding: "7px 12px",
+  border: 0,
+  borderRadius: "var(--radius-sm)",
+  background: "transparent",
+  fontFamily: "inherit",
+  fontSize: 13,
+  lineHeight: "18px",
+  textAlign: "left",
+};
+
+/** One row of the context menu, including its hover/disabled styling. */
+function MenuButton({
+  item,
+  onDone,
+}: {
+  item: MenuItem;
+  onDone: () => void;
+}): JSX.Element {
+  const [hover, setHover] = useState(false);
+  const disabled = item.disabled === true;
+  return (
+    <button
+      type="button"
+      role="menuitem"
+      disabled={disabled}
+      aria-disabled={disabled}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      onClick={() => {
+        onDone();
+        item.onSelect();
+      }}
+      style={{
+        ...MENU_ITEM_STYLE,
+        background: hover && !disabled ? "var(--bg-hover)" : "transparent",
+        color: disabled
+          ? "var(--text-muted)"
+          : item.danger
+            ? "var(--danger)"
+            : "var(--text-primary)",
+        cursor: disabled ? "default" : "pointer",
+      }}
+    >
+      {item.label}
+    </button>
+  );
+}
+
+/**
+ * The right-click menu for one row.
+ *
+ * It measures itself before paint and clamps to the viewport, so a menu opened
+ * at the bottom-right corner still fits on screen. Outside click, Escape, a
+ * window resize/blur, or a right-click on another row all dismiss it.
+ */
+function RowContextMenu({
+  x,
+  y,
+  items,
+  onClose,
+}: {
+  x: number;
+  y: number;
+  items: MenuItem[];
+  onClose: () => void;
+}): JSX.Element {
+  const ref = useRef<HTMLDivElement>(null);
+  const [pos, setPos] = useState({ left: x, top: y });
+
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    setPos(
+      clampMenuPosition(
+        x,
+        y,
+        rect.width,
+        rect.height,
+        window.innerWidth,
+        window.innerHeight,
+      ),
+    );
+  }, [x, y]);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    const onOutside = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) onClose();
+    };
+    const onViewport = () => onClose();
+    document.addEventListener("keydown", onKey);
+    // Capture phase: the menu closes before the row's own click/contextmenu
+    // handler runs, so clicking another row does not leave two menus open.
+    document.addEventListener("mousedown", onOutside, true);
+    document.addEventListener("contextmenu", onOutside, true);
+    document.addEventListener("scroll", onViewport, true);
+    window.addEventListener("blur", onViewport);
+    window.addEventListener("resize", onViewport);
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      document.removeEventListener("mousedown", onOutside, true);
+      document.removeEventListener("contextmenu", onOutside, true);
+      document.removeEventListener("scroll", onViewport, true);
+      window.removeEventListener("blur", onViewport);
+      window.removeEventListener("resize", onViewport);
+    };
+  }, [onClose]);
+
+  return (
+    <div
+      ref={ref}
+      role="menu"
+      aria-label="任务操作"
+      style={{ ...MENU_STYLE, left: pos.left, top: pos.top }}
+      onClick={(e) => e.stopPropagation()}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+      }}
+    >
+      {items.map((item) => (
+        <MenuButton key={item.label} item={item} onDone={onClose} />
+      ))}
+    </div>
+  );
+}
 
 /**
  * TaskRow renders one download.
@@ -51,10 +216,14 @@ export const TaskRow = memo(function TaskRow({
   task,
   selected,
   onSelect,
+  onContextSelect,
   onChanged,
   onError,
+  onNotice,
 }: Props): JSX.Element {
   const [confirmRemove, setConfirmRemove] = useState(false);
+  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+  const closeMenu = useCallback(() => setMenu(null), []);
   const completed = task.status === "completed";
   const pct = completed
     ? 100
@@ -86,12 +255,58 @@ export const TaskRow = memo(function TaskRow({
     onChanged();
   }
 
+  /** Copies the original URL, credentials and all, exactly as stored. */
+  async function copyLink() {
+    try {
+      const ok = await ClipboardSetText(task.url);
+      if (ok) onNotice("已复制下载链接");
+      else onError("复制链接失败");
+    } catch (e) {
+      onError(`复制链接失败：${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  const context = contextActions(task.status);
+  const menuItems: MenuItem[] = [
+    {
+      label: context.resumeLabel,
+      disabled: !context.canResume,
+      onSelect: () => void run(() => api.resumeTask(task.id)),
+    },
+    {
+      label: "暂停",
+      disabled: !context.canPause,
+      onSelect: () => void run(() => api.pauseTask(task.id)),
+    },
+    {
+      label: "打开所在目录",
+      onSelect: () => void run(() => api.revealInExplorer(task.id)),
+    },
+    {
+      label: "复制链接",
+      onSelect: () => void copyLink(),
+    },
+    {
+      label: "删除",
+      danger: true,
+      onSelect: () => setConfirmRemove(true),
+    },
+  ];
+
   return (
     <div
       className={`task${selected ? " task--selected" : ""}${
         task.status === "failed" ? " task--failed" : ""
       }`}
       onClick={(e) => onSelect(task.id, e.ctrlKey || e.metaKey)}
+      onContextMenu={(e) => {
+        // The browser menu would cover ours, and the click must also select
+        // the row exactly like the checkbox does (without clearing the rest
+        // of a multi-selection).
+        e.preventDefault();
+        onContextSelect(task.id);
+        setMenu({ x: e.clientX, y: e.clientY });
+      }}
     >
       <div className="task__cell task__cell--name">
         {/* The name is unknown until the server answers, and stays unknown if
@@ -258,6 +473,7 @@ export const TaskRow = memo(function TaskRow({
         <span
           style={{ display: "contents" }}
           onClick={(e) => e.stopPropagation()}
+          onContextMenu={(e) => e.stopPropagation()}
         >
           <ConfirmDialog
             title="移除这条记录？"
@@ -271,6 +487,15 @@ export const TaskRow = memo(function TaskRow({
             onCancel={() => setConfirmRemove(false)}
           />
         </span>
+      ) : null}
+
+      {menu ? (
+        <RowContextMenu
+          x={menu.x}
+          y={menu.y}
+          items={menuItems}
+          onClose={closeMenu}
+        />
       ) : null}
     </div>
   );

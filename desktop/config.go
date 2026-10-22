@@ -63,7 +63,18 @@ type Config struct {
 	PlanSound bool `json:"planSound"`
 	// PlanShutdown powers the machine off.
 	PlanShutdown bool `json:"planShutdown"`
+	// ShutdownDelaySeconds is the cancel window before that shutdown, in
+	// seconds (0..600, default 60). 0 means shut down immediately, with no
+	// window to run "shutdown /a". A negative value is a typo and is reset to
+	// the default by normalize: an accidental instant power-off is the one
+	// failure mode this setting must not have.
+	ShutdownDelaySeconds int `json:"shutdownDelaySeconds"`
 
+	// OpenFileWhenDone opens the finished file; OpenDirWhenDone reveals it in
+	// Explorer. They are mutually exclusive: normalize keeps OpenDirWhenDone
+	// and clears OpenFileWhenDone when both are set, matching the runtime
+	// priority in afterTaskFinished (the folder wins and the file is not also
+	// opened).
 	OpenFileWhenDone bool `json:"openFileWhenDone"`
 	OpenDirWhenDone  bool `json:"openDirWhenDone"`
 
@@ -91,6 +102,12 @@ type Config struct {
 	// MinimizeToTray hides the window instead of exiting, so downloads continue.
 	MinimizeToTray bool `json:"minimizeToTray"`
 
+	// LaunchAtLogin registers the app in the current user's Run key so it
+	// starts with Windows. On by default: a download manager that is not
+	// running cannot take over anything. The key is synced once at startup
+	// and only rewritten when the stored value differs.
+	LaunchAtLogin bool `json:"launchAtLogin"`
+
 	// CheckUpdatesOnStart asks GitHub for a newer release once per launch. It is
 	// on by default — an update nobody is told about is not much of a feature —
 	// but it is the only request this program makes that is not a download, so
@@ -101,6 +118,21 @@ type Config struct {
 	// written into the file on first run, which is simpler and visible to anyone
 	// who reads config.json.
 	CheckUpdatesOnStart bool `json:"checkUpdatesOnStart"`
+
+	// HistoryRetentionDays is how long a finished task record is kept, in days
+	// (0..3650, default 90). 0 means keep it forever. Only completed, canceled
+	// and failed records are ever dropped, and only at startup; unfinished work
+	// is never trimmed. A negative value is a typo and resets to the default —
+	// "keep forever" must never be the result of an accident.
+	HistoryRetentionDays int `json:"historyRetentionDays"`
+
+	// LoggingEnabled writes the diagnostic log file (vkmdownload.log). On by
+	// default. With it off, debugLog writes nothing at all — the file is not
+	// even created — while errors that must surface go through the runtime's
+	// own logger (stderr in development builds). The one-time credential
+	// scrubbing of an existing log still runs, since that removes data rather
+	// than adding it.
+	LoggingEnabled bool `json:"loggingEnabled"`
 
 	// ClipboardWatch polls the clipboard for URLs.
 	ClipboardWatch bool `json:"clipboardWatch"`
@@ -162,31 +194,35 @@ type OrganizeGroup struct {
 // without an explicit action until the user asks for it.
 func DefaultConfig() Config {
 	return Config{
-		AutoStart:           true,
-		AskLocation:         true,
-		DownloadDir:         defaultDownloadDir(),
-		Connections:         8,
-		MinSegmentSize:      1 << 20,
-		Proxy:               "",
-		MaxConcurrent:       2,
-		SpeedLimitKB:        0,
-		PlanSound:           false,
-		PlanShutdown:        false,
-		OpenFileWhenDone:    false,
-		OpenDirWhenDone:     false,
-		MinimizeToTray:      true,
-		CheckUpdatesOnStart: true,
-		ClipboardWatch:      false,
-		ClipboardAutoStart:  false,
-		ClipboardConfirm:    true,
-		ClipboardIntervalMs: 800,
-		RefreshRate:         "fast",
-		ResumeFlushKB:       1024,
-		ResumeFlushMs:       250,
-		ResumeFlushPct:      0,
-		ResumeFlushBySize:   true,
-		ResumeFlushByTime:   true,
-		ResumeFlushByPct:    false,
+		AutoStart:            true,
+		AskLocation:          true,
+		DownloadDir:          defaultDownloadDir(),
+		Connections:          8,
+		MinSegmentSize:       1 << 20,
+		Proxy:                "",
+		MaxConcurrent:        2,
+		SpeedLimitKB:         0,
+		PlanSound:            false,
+		PlanShutdown:         false,
+		ShutdownDelaySeconds: 60,
+		OpenFileWhenDone:     false,
+		OpenDirWhenDone:      false,
+		MinimizeToTray:       true,
+		LaunchAtLogin:        true,
+		CheckUpdatesOnStart:  true,
+		HistoryRetentionDays: 90,
+		LoggingEnabled:       true,
+		ClipboardWatch:       false,
+		ClipboardAutoStart:   false,
+		ClipboardConfirm:     true,
+		ClipboardIntervalMs:  800,
+		RefreshRate:          "fast",
+		ResumeFlushKB:        1024,
+		ResumeFlushMs:        250,
+		ResumeFlushPct:       0,
+		ResumeFlushBySize:    true,
+		ResumeFlushByTime:    true,
+		ResumeFlushByPct:     false,
 
 		// On by default, but only for downloads big enough to be worth a
 		// separate program. Taking over everything — including the browser's own
@@ -262,6 +298,23 @@ func (c *Config) normalize() {
 	if c.ExtensionMinSizeKB > 1024*1024 {
 		c.ExtensionMinSizeKB = 1024 * 1024
 	}
+	// History retention: 0 is a valid "keep forever". Only a negative (a typo)
+	// is corrected, and it resets to the default rather than to 0, so a stray
+	// minus cannot silently turn a 90-day policy into forever.
+	if c.HistoryRetentionDays < 0 {
+		c.HistoryRetentionDays = d.HistoryRetentionDays
+	}
+	if c.HistoryRetentionDays > 3650 {
+		c.HistoryRetentionDays = 3650
+	}
+	// Same rule for the shutdown window: 0 is an explicit "shut down now",
+	// while a negative would mean "now" by accident.
+	if c.ShutdownDelaySeconds < 0 {
+		c.ShutdownDelaySeconds = d.ShutdownDelaySeconds
+	}
+	if c.ShutdownDelaySeconds > 600 {
+		c.ShutdownDelaySeconds = 600
+	}
 	// Clamp to the floor rather than to the 800ms default: typing 100 to poll
 	// faster used to make the app eight times slower, with no explanation. The
 	// floor is the smallest period the poller is allowed to run at.
@@ -318,6 +371,13 @@ func (c *Config) normalize() {
 		if c.ResumeFlushMs < 100 {
 			c.ResumeFlushMs = 250
 		}
+	}
+	// One completion action at a time. Both true would open the folder and the
+	// file on top of each other; afterTaskFinished already gives the folder
+	// priority, so normalize stores that same rule rather than leaving a pair
+	// the settings UI would show as two selected options.
+	if c.OpenFileWhenDone && c.OpenDirWhenDone {
+		c.OpenFileWhenDone = false
 	}
 }
 

@@ -302,20 +302,27 @@ func (a *App) ClearDownloadHistory() error {
 // ---------------------------------------------------------------------------
 // retention
 
-// historyRetention is how long a finished task record is kept before the oldest
-// ones are dropped. Without it the history grows forever, which is both a
-// privacy liability and the reason the file on this machine had 329 entries.
-const historyRetention = 90 * 24 * time.Hour
-
-// trimHistory drops finished records older than historyRetention. Unfinished
-// tasks are never dropped: they are still work the user asked for.
+// trimHistory drops finished records older than the configured retention.
+//
+// The window comes from the settings (HistoryRetentionDays, default 90). 0
+// means "keep everything", so nothing is dropped; otherwise an unbounded
+// history is both a privacy liability and the reason the file on this machine
+// had 329 entries.
+//
+// Two boundaries stay as they were: only completed, canceled and failed records
+// are ever dropped (an unfinished task is still work the user asked for), and
+// the walk runs once at startup rather than on every save.
 func (a *App) trimHistory() {
+	days := a.Config().HistoryRetentionDays
+	if days <= 0 {
+		return
+	}
 	m := a.mgr
 	m.mu.Lock()
 	ids := append([]string(nil), m.order...)
 	m.mu.Unlock()
 
-	cutoff := time.Now().Add(-historyRetention).Format(time.RFC3339Nano)
+	cutoff := time.Now().Add(-time.Duration(days) * 24 * time.Hour).Format(time.RFC3339Nano)
 	var stale []string
 	for _, id := range ids {
 		v, ok := m.view(id)
@@ -335,5 +342,5 @@ func (a *App) trimHistory() {
 		return
 	}
 	n := m.RemoveTasks(stale)
-	a.debugLog("privacy: trimmed %d finished tasks older than %s", n, historyRetention)
+	a.debugLog("privacy: trimmed %d finished tasks older than %d days", n, days)
 }

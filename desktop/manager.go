@@ -40,6 +40,12 @@ const debugLogMaxBytes = 2 << 20
 var debugLogMu sync.Mutex
 
 func (a *App) debugLog(format string, args ...any) {
+	// Read through the atomic mirror of cfg.LoggingEnabled, not Config():
+	// debugLog is called from loadConfig itself while the config lock is held,
+	// so taking that lock again here would deadlock the startup path.
+	if !a.logEnabled.Load() {
+		return
+	}
 	debugLogMu.Lock()
 	defer debugLogMu.Unlock()
 	dir := a.dataDir()
@@ -1962,7 +1968,7 @@ func (m *Manager) finishPlanEnd(intervened bool) {
 		playAlert()
 	}
 	if cfg.PlanShutdown {
-		shutdownMachine()
+		launchShutdown(cfg.ShutdownDelaySeconds)
 	}
 }
 
@@ -1976,15 +1982,39 @@ func playAlert() {
 	beepAlert()
 }
 
-// shutdownMachine powers the machine off, with enough delay to change one's
-// mind: "shutdown /a" cancels it.
-func shutdownMachine() {
+// launchShutdown powers the machine off after the configured delay.
+//
+// A variable, not a plain function: the end-of-plan path is the one place the
+// setting reaches the OS, and a test has to be able to see the delay it chose
+// without actually powering the machine off.
+var launchShutdown = func(seconds int) {
 	go func() {
 		// shutdown.exe is a console application; without CREATE_NO_WINDOW it
 		// pops a black window over whatever the user is doing.
-		_ = hiddenCmd("shutdown", "/s", "/t", "60",
-			"/c", "VKMDownload 计划已完成，60 秒后关机（运行 shutdown /a 取消）").Run()
+		_ = hiddenCmd("shutdown", shutdownArgs(seconds)...).Run()
 	}()
+}
+
+// shutdownArgs builds the shutdown.exe arguments for a plan-completion
+// shutdown.
+//
+// seconds is the cancel window: /t gives the user time to run "shutdown /a",
+// and the comment says so. 0 is an explicit "now" — the machine powers off
+// immediately and there is nothing to cancel, so the comment must not promise
+// a countdown that does not exist. Values outside 0..600 are clamped here as
+// well as in normalize, because this is the last stop before the OS.
+func shutdownArgs(seconds int) []string {
+	if seconds < 0 {
+		seconds = 0
+	}
+	if seconds > 600 {
+		seconds = 600
+	}
+	notice := fmt.Sprintf("VKMDownload 计划已完成，%d 秒后关机（运行 shutdown /a 取消）", seconds)
+	if seconds == 0 {
+		notice = "VKMDownload 计划已完成，立即关机"
+	}
+	return []string{"/s", "/t", strconv.Itoa(seconds), "/c", notice}
 }
 
 // sessionRetryDelays is how long the manager waits before replaying a whole
