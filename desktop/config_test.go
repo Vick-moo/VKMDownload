@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -202,6 +203,40 @@ func TestNormalizeCompletionActionsAreExclusive(t *testing.T) {
 			t.Errorf("%s: file=%v dir=%v, want file=%v dir=%v",
 				c.name, cfg.OpenFileWhenDone, cfg.OpenDirWhenDone, c.wantFile, c.wantDir)
 		}
+	}
+}
+
+// TestNormalizeTrimsTheExtensionOriginLock covers the only normalisation the
+// lock gets: surrounding whitespace. The comparison itself is exact, so adding
+// or stripping a slash here would silently change which extension matches.
+func TestNormalizeTrimsTheExtensionOriginLock(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.ExtensionOriginLock = "  chrome-extension://abc  "
+	cfg.normalize()
+	if got, want := cfg.ExtensionOriginLock, "chrome-extension://abc"; got != want {
+		t.Errorf("ExtensionOriginLock = %q, want %q", got, want)
+	}
+
+	cfg = DefaultConfig()
+	cfg.ExtensionOriginLock = "chrome-extension://abc/"
+	cfg.normalize()
+	if got, want := cfg.ExtensionOriginLock, "chrome-extension://abc/"; got != want {
+		t.Errorf("a trailing slash was rewritten: got %q, want it kept exactly", got)
+	}
+}
+
+// TestConfigJSONCarriesTheOriginLock pins the wire shape the settings page
+// round-trips: Config() is serialised to JSON, the page's draft copies every key
+// (Object.assign), and the save sends them back. A key that the encoder dropped
+// would be silently reset to "" on the next save, unlocking an app the user
+// locked.
+func TestConfigJSONCarriesTheOriginLock(t *testing.T) {
+	b, err := json.Marshal(DefaultConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"extensionOriginLock"`) {
+		t.Errorf("Config JSON has no extensionOriginLock key: %s", b)
 	}
 }
 

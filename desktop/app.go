@@ -129,6 +129,18 @@ type App struct {
 	// are written before the user's choice is known; startup replaces it with
 	// the loaded value, and SetConfig keeps the two in step.
 	logEnabled atomic.Bool
+
+	// peerMu guards peerRejects, the in-memory ring of refused peer checks the
+	// settings page shows. Process memory only: never persisted, because the
+	// entries name executables the user installed.
+	peerMu      sync.Mutex
+	peerRejects []PeerRejection
+
+	// extMu guards extInfo, the last extension request's origin/version and the
+	// accept/reject counters. Same lifetime and same reason: diagnostics for the
+	// current run, not history.
+	extMu   sync.Mutex
+	extInfo ExtensionInfo
 }
 
 // NewApp creates the application object and its task manager.

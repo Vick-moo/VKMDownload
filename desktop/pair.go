@@ -29,6 +29,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -139,8 +140,10 @@ func (a *App) pairKeyForThisInstall() (string, error) {
 // caller our extension?": any extension in the same browser passes the peer
 // check, and the Origin header only says "some extension". Since /add enqueues a
 // download with attacker-chosen cookies and URL — an SSRF primitive against the
-// user's intranet — and /settings can switch interception off, both mutations now
-// require proof that the caller holds the per-install key.
+// user's intranet — every mutation requires proof that the caller holds the
+// per-install key. (The extension may no longer write the settings at all: POST
+// /settings answers 405; the proof rule stays for the endpoints that really
+// mutate, and for the contract a future extension build will still need.)
 //
 // The proof is HMAC(key, method + "\n" + path + "\n" + unix) with a two-minute
 // window. A timestamp rather than a server-issued nonce keeps the endpoint
@@ -252,4 +255,78 @@ func (a *App) answerChallenge(challenge string) string {
 		return ""
 	}
 	return proofFor(key, challenge)
+}
+
+// ---------------------------------------------------------------------------
+// status and reset, for the settings page
+
+// PairingStatus describes the app<->extension pairing without revealing the key.
+//
+// The key is per install, not per browser: one key covers every browser and
+// every extension instance that pairs with this app. There is therefore no
+// "disconnect just this browser" — ResetPairing is all-or-nothing, and every
+// extension re-pairs on its next handover.
+type PairingStatus struct {
+	// Paired reports that pair.key exists and holds a key this code recognises.
+	Paired bool `json:"paired"`
+	// Fingerprint is the first 8 bytes of sha256(key) in hex (16 characters).
+	// It is stable for a key and cannot be turned back into the key; the
+	// settings page shows it so two installations can be told apart.
+	Fingerprint string `json:"fingerprint"`
+	// Port is the loopback port the extension should find the app on, 0 when
+	// the endpoint is not running.
+	Port int `json:"port"`
+	// KeyPath is where pair.key lives. It is for "open the folder", never for
+	// showing the file's contents.
+	KeyPath string `json:"keyPath"`
+}
+
+// keyFingerprint is a stable, non-secret identifier for a pairing key.
+//
+// 8 bytes of SHA-256: short enough to read out over the phone, long enough that
+// two randomly generated keys will not collide in practice. The hash is of the
+// key itself, so it changes exactly when the key does.
+func keyFingerprint(key string) string {
+	sum := sha256.Sum256([]byte(key))
+	return hex.EncodeToString(sum[:8])
+}
+
+// PairingInfo reports the pairing state for the settings page.
+//
+// It reads the key file rather than the cache: "paired" means the key is on
+// disk and readable, which is what survives a restart. A key that exists only
+// in memory (the write failed) is not paired, because the next start cannot use
+// it either.
+func (a *App) PairingInfo() PairingStatus {
+	path := filepath.Join(a.dataDir(), pairKeyFile)
+	out := PairingStatus{Port: a.apiPort(), KeyPath: path}
+
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return out
+	}
+	key := strings.TrimSpace(string(b))
+	if !validPairKey(key) {
+		return out
+	}
+	out.Paired = true
+	out.Fingerprint = keyFingerprint(key)
+	return out
+}
+
+// ResetPairing deletes the pairing key so every extension has to pair again.
+//
+// It is all-or-nothing by design: the key is per install, not per browser, so
+// "disconnect this browser only" cannot be expressed. A missing file counts as
+// success — the requested end state (no key) already holds — which also makes
+// the call safe to retry. The in-memory cache is dropped so the next request
+// generates a genuinely new key instead of serving the deleted one.
+func (a *App) ResetPairing() error {
+	dir := a.dataDir()
+	path := filepath.Join(dir, pairKeyFile)
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("无法删除配对密钥：%w", err)
+	}
+	forgetPairKey(dir)
+	return nil
 }

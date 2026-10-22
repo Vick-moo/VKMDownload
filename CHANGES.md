@@ -3,6 +3,19 @@
 > 每次改完代码都在这里记一笔：日期、改了什么、为什么改。
 > 发版 / push 前看这份文件写 release notes。
 
+### 61. 波 C + E：安全面板与设置页接线（UNRELEASED，2026-10-22）
+- **S1 配对面板**：新增 `PairingInfo()`（`paired/fingerprint/port/keyPath`）与 `ResetPairing()`（幂等）；指纹是 `sha256(key)` 前 8 字节，**绝不返回 key**。key 是全局一份，不能只断开某一个浏览器。
+- **S3 被拒诊断**：`PeerDiagnostics()` 返回内存 ring（20 条，最新在前）：时间、exe basename、原因（`bad_addr/not_loopback/bad_port/no_owner/no_image/not_allowlisted/not_in_install_root/bad_signature/origin_locked`）。不落盘、不改变判定。
+- **S5 禁扩展改设置**：`POST /settings` 改为 405（"设置只能由应用自身修改"），GET 不变。
+- **S2 Origin 锁定（折中）**：新字段 `extensionOriginLock`（默认空）。空 = 保持原行为（接受任意扩展 Origin）并记录最近一次 Origin；非空 = 精确匹配，其它扩展 403 + `origin_locked` 诊断。
+- **X6 版本握手**：`/ping` 增加 `protocol` 与 `minExtensionVersion`；`/add` 读取可选的 `X-VKMDownload-Ext-Version` 头；版本过旧只标记 `VersionMismatch` 并提示，**不拒绝**（向后兼容）。
+- **X8 扩展状态**：`ExtensionStatus()` 返回最近连接时间、Origin、扩展版本、版本是否匹配、接受/拒绝计数（只统计 `/add`、`/pair`）。
+- 修复：`statusRecorder` 原来包住所有通过校验的请求，会吞掉 `http.Flusher` 等可选接口；现在只包 `/add`、`/pair`。
+- 设置页（浏览器扩展 tab）：配对状态/指纹/端口、重置配对（二次确认）、Origin 锁定/解除、扩展状态行、被拒诊断列表（中文原因映射）。
+- 设置页（其余 tab）：保留期 7/30/90/永久、日志开关、开机自启、关机延迟 0–600、完成后三选一；更新页面板显示哈希/大小/校验结果、常驻「还原旧版本」与「删除旧版本备份」。
+- 验收：desktop `go vet` / `go test`（35.8s）、`GOOS=linux go vet`、前端 `tsc` + vitest **73/73**、扩展 35/35、`git diff --check` 干净。
+- 待办（下一波）：扩展 `popup.js` 的开关仍会 POST `/settings`，现在会收到 405 并显示误导性文案；波 D 要把它改成只读。
+
 ### 60. 波 B：更新器可读性与备份策略 + P3 二次确认（UNRELEASED，2026-10-22）
 - `UpdateStatus` / `updateState` 新增 6 个字段：`digestPresent`、`sizeMatched`、`verified`、`backupAvailable`、`backupVersion`、`backupSize`。JSON 带 `omitempty`（前端按 `?? false` 渲染）；`ApplyUpdate` 落盘，启动 `hydrateUpdateStatus` 读回。校验强度与阈值未改。
 - 新 binding：`DeleteUpdateBackup()`、`UpdateBackupInfo() UpdateBackup{available,version,size,path}`。

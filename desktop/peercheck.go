@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 // VerifyPeerProcess, when true, makes the loopback endpoint confirm that the
@@ -76,6 +77,73 @@ func (a *App) peerCheckRequired() bool {
 	return a.cfg.VerifyPeerProcess
 }
 
+// Peer check diagnostics.
+//
+// A refused caller is otherwise invisible: the extension shows "not a recognized
+// browser" and the user has no way to tell which process was refused or why. The
+// settings page reads this ring instead. It is process memory only and never
+// written to disk — a peer path names a file the user installed, and that is
+// exactly the kind of detail a support log should not accumulate.
+
+// PeerRejection is one refused caller.
+type PeerRejection struct {
+	Time time.Time `json:"time"`
+	// Exe is the basename of the caller's image when one could be read
+	// ("brave.exe"), empty when the check failed before that. The full path is
+	// deliberately not kept: it names the user's install and account.
+	Exe string `json:"exe"`
+	// Reason is a stable machine-readable value the settings page can translate:
+	// bad_addr, not_loopback, bad_port, no_owner, no_image, not_allowlisted,
+	// not_in_install_root, bad_signature, origin_locked.
+	Reason string `json:"reason"`
+}
+
+// peerRejectionKeep bounds the ring: enough to see a pattern, small enough that
+// it is obviously a diagnostic and not a log.
+const peerRejectionKeep = 20
+
+const (
+	peerReasonBadAddr          = "bad_addr"
+	peerReasonNotLoopback      = "not_loopback"
+	peerReasonBadPort          = "bad_port"
+	peerReasonNoOwner          = "no_owner"
+	peerReasonNoImage          = "no_image"
+	peerReasonNotAllowlisted   = "not_allowlisted"
+	peerReasonNotInInstallRoot = "not_in_install_root"
+	peerReasonBadSignature     = "bad_signature"
+	// peerReasonOriginLocked is not a peer check result: the Origin lock in
+	// apiGuard records its refusals here too, so one list explains every "the
+	// app will not talk to my extension" report.
+	peerReasonOriginLocked = "origin_locked"
+)
+
+// recordPeerRejection appends a refusal to the in-memory ring, newest first.
+//
+// It records a reason and, at most, an executable's basename. Nothing here
+// changes the verdict: the caller has already been refused.
+func (a *App) recordPeerRejection(reason, exe string) {
+	name := ""
+	if exe != "" {
+		name = filepath.Base(exe)
+	}
+	a.peerMu.Lock()
+	defer a.peerMu.Unlock()
+	a.peerRejects = append([]PeerRejection{{Time: time.Now(), Exe: name, Reason: reason}},
+		a.peerRejects...)
+	if len(a.peerRejects) > peerRejectionKeep {
+		a.peerRejects = a.peerRejects[:peerRejectionKeep]
+	}
+}
+
+// PeerDiagnostics returns the most recent refusals, newest first.
+func (a *App) PeerDiagnostics() []PeerRejection {
+	a.peerMu.Lock()
+	defer a.peerMu.Unlock()
+	out := make([]PeerRejection, len(a.peerRejects))
+	copy(out, a.peerRejects)
+	return out
+}
+
 // checkPeerProcess confirms the loopback peer is a genuine signed browser.
 //
 // Every path that cannot establish who the caller is fails CLOSED: an
@@ -91,6 +159,7 @@ func (a *App) checkPeerProcess(r *http.Request) (bool, string) {
 	host, portStr, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		a.debugLog("peer check: bad remote addr %q: %v", r.RemoteAddr, err)
+		a.recordPeerRejection(peerReasonBadAddr, "")
 		return false, ""
 	}
 	// The peer must be on loopback. A request arriving from anywhere else means
@@ -98,11 +167,13 @@ func (a *App) checkPeerProcess(r *http.Request) (bool, string) {
 	// would be exactly backwards.
 	if ip := net.ParseIP(host); ip == nil || !ip.IsLoopback() {
 		a.debugLog("peer check: peer %q is not loopback", host)
+		a.recordPeerRejection(peerReasonNotLoopback, "")
 		return false, ""
 	}
 	port, err := strconv.Atoi(portStr)
 	if err != nil || port <= 0 || port > 65535 {
 		a.debugLog("peer check: bad remote port %q", r.RemoteAddr)
+		a.recordPeerRejection(peerReasonBadPort, "")
 		return false, ""
 	}
 	// The server port comes from the listener rather than the request, so a
@@ -116,6 +187,7 @@ func (a *App) checkPeerProcess(r *http.Request) (bool, string) {
 		// waved through. A caller we cannot identify is a caller we do not trust;
 		// the peer check is a security control, not a convenience.
 		a.debugLog("peer check: cannot identify %s: %v", r.RemoteAddr, err)
+		a.recordPeerRejection(peerReasonNoOwner, "")
 		return false, ""
 	}
 	exe, err := processImageOf(pid)
@@ -123,11 +195,13 @@ func (a *App) checkPeerProcess(r *http.Request) (bool, string) {
 		// Fail closed for the same reason as the lookup above: an image we
 		// cannot name is not a browser we can vouch for.
 		a.debugLog("peer check: pid %d has no readable image: %v", pid, err)
+		a.recordPeerRejection(peerReasonNoImage, "")
 		return false, ""
 	}
 	base := strings.ToLower(filepath.Base(exe))
 	if !allowedBrowserExes[base] {
 		a.debugLog("peer check: rejected non-browser caller %s (pid %d)", exe, pid)
+		a.recordPeerRejection(peerReasonNotAllowlisted, exe)
 		return false, exe
 	}
 	// A name is not an identity. Copying any validly signed Microsoft binary
@@ -138,6 +212,7 @@ func (a *App) checkPeerProcess(r *http.Request) (bool, string) {
 	// root is what makes that copy fail: writing there needs administrator.
 	if !browserRootCheck(exe) {
 		a.debugLog("peer check: rejected %s: not inside a browser install directory", exe)
+		a.recordPeerRejection(peerReasonNotInInstallRoot, exe)
 		return false, exe
 	}
 	// One Stat shared by the cache lookup and the store below: if the file
@@ -147,6 +222,7 @@ func (a *App) checkPeerProcess(r *http.Request) (bool, string) {
 	if hit, found := peerTrust.getAt(exe, mtime, size, stated); found {
 		if !hit {
 			a.debugLog("peer check: rejected untrusted image %s", exe)
+			a.recordPeerRejection(peerReasonBadSignature, exe)
 			return false, exe
 		}
 		return true, ""
@@ -155,6 +231,7 @@ func (a *App) checkPeerProcess(r *http.Request) (bool, string) {
 	peerTrust.putAt(exe, mtime, size, stated, ok)
 	if !ok {
 		a.debugLog("peer check: rejected bad signature %s", exe)
+		a.recordPeerRejection(peerReasonBadSignature, exe)
 		return false, exe
 	}
 	return true, ""

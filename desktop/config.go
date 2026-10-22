@@ -98,6 +98,14 @@ type Config struct {
 	// ExtensionSkipHosts lists hosts the extension leaves alone, one per line.
 	// A user who has one site that must download normally can exclude just that.
 	ExtensionSkipHosts string `json:"extensionSkipHosts"`
+	// ExtensionOriginLock pins the loopback endpoint to one extension origin,
+	// e.g. "chrome-extension://<id>". Empty (the default) keeps the historical
+	// behaviour: any chrome-extension:// or moz-extension:// origin is admitted,
+	// and mutations still need the pairing key. Setting it is opt-in hardening
+	// for a user who does not want any other installed extension talking to the
+	// app. Compared exactly — a browser Origin has no trailing slash, so the
+	// stored value has to be the origin as the browser sends it.
+	ExtensionOriginLock string `json:"extensionOriginLock"`
 
 	// MinimizeToTray hides the window instead of exiting, so downloads continue.
 	MinimizeToTray bool `json:"minimizeToTray"`
@@ -231,7 +239,10 @@ func DefaultConfig() Config {
 		ExtensionEnabled:   true,
 		ExtensionMinSizeKB: 1024,
 		ExtensionSkipHosts: "",
-		VerifyPeerProcess:  true,
+		// Empty: any browser extension may talk to the app (mutations still need
+		// the pairing key). The lock is opt-in hardening.
+		ExtensionOriginLock: "",
+		VerifyPeerProcess:   true,
 
 		// Off by default: sorting is a surprise until the user asks for it.
 		OrganizeEnabled: false,
@@ -298,6 +309,11 @@ func (c *Config) normalize() {
 	if c.ExtensionMinSizeKB > 1024*1024 {
 		c.ExtensionMinSizeKB = 1024 * 1024
 	}
+	// The origin lock is compared exactly, so only surrounding whitespace is
+	// removed. Adding or stripping a slash here would quietly turn a value that
+	// does not match into one that does (or the reverse); the settings page can
+	// show the stored text as it is.
+	c.ExtensionOriginLock = strings.TrimSpace(c.ExtensionOriginLock)
 	// History retention: 0 is a valid "keep forever". Only a negative (a typo)
 	// is corrected, and it resets to the default rather than to 0, so a stray
 	// minus cannot silently turn a 90-day policy into forever.

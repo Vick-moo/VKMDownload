@@ -520,10 +520,15 @@ func TestDefaultDestFor(t *testing.T) {
 	}
 }
 
-// TestLocalAPISettingsRoundTrip covers the switch living in the app: the
-// extension's popup reads it and writes it back, so both directions have to work
-// or the popup and the settings page would disagree.
-func TestLocalAPISettingsRoundTrip(t *testing.T) {
+// TestLocalAPISettingsAreReadOnlyForTheExtension covers the access change: the
+// extension may read the interception policy, but only the app itself may change
+// it.
+//
+// The endpoint used to accept enabled/minSizeKb from the extension's popup. Any
+// installed extension that cleared the origin and peer checks could therefore
+// switch interception off — or change the size filter, which changes what gets
+// collected — from a surface the user never opened.
+func TestLocalAPISettingsAreReadOnlyForTheExtension(t *testing.T) {
 	app := newTestApp(t)
 	base := startAPI(t, app)
 
@@ -547,8 +552,8 @@ func TestLocalAPISettingsRoundTrip(t *testing.T) {
 		return p
 	}
 
-	// A fresh install takes over downloads, but only ones worth a separate
-	// program.
+	// The read side is unchanged: a fresh install takes over downloads, but only
+	// ones worth a separate program.
 	got := read()
 	if !got.Enabled {
 		t.Error("interception should default to on")
@@ -557,25 +562,32 @@ func TestLocalAPISettingsRoundTrip(t *testing.T) {
 		t.Errorf("minSizeKb = %d, want 1024", got.MinSizeKB)
 	}
 
-	// Turning it off must persist, and must not disturb the size limit.
+	// Writing is refused, with a reason the popup can show verbatim.
 	resp := postJSON(t, base+"/settings", "chrome-extension://abc", `{"enabled":false}`)
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("POST status = %d, want 200", resp.StatusCode)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Fatalf("POST status = %d, want 405", resp.StatusCode)
+	}
+	var body struct {
+		Error string `json:"error"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !strings.Contains(body.Error, "设置只能由应用自身修改") {
+		t.Errorf("error = %q, want the read-only explanation", body.Error)
 	}
 
+	// And the policy really is untouched, in memory and on disk.
 	got = read()
-	if got.Enabled {
-		t.Error("enabled is still true after being switched off")
+	if !got.Enabled {
+		t.Error("enabled flipped although the write was refused")
 	}
 	if got.MinSizeKB != 1024 {
 		t.Errorf("minSizeKb = %d, want it left alone at 1024", got.MinSizeKB)
 	}
-
-	// And the change survives a reload from disk, which is what makes it a
-	// setting rather than a session flag.
-	if loadConfig(app.configPath(), nil).ExtensionEnabled {
-		t.Error("the switch did not survive a reload")
+	if !loadConfig(app.configPath(), nil).ExtensionEnabled {
+		t.Error("the refused write still reached config.json")
 	}
 }
 

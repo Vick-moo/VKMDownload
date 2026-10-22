@@ -28,10 +28,174 @@ const (
 	apiPortLast  = 18898
 )
 
+// Extension protocol handshake.
+//
+// /ping advertises both values; /add carries the extension's own version so the
+// app can flag "your extension is older than this build expects" on the settings
+// page. The check is advisory only: an older extension is never refused a
+// download, because refusing would break users who cannot update instantly.
+const (
+	extensionProtocol   = 1
+	minExtensionVersion = "1.0.3"
+	// extVersionHeader carries the extension's version on /add. A header rather
+	// than a query parameter: /add already posts a JSON body, and a query string
+	// would be one more thing the pairing proof has to cover.
+	extVersionHeader = "X-VKMDownload-Ext-Version"
+)
+
 // apiState holds what the endpoint needs to know about itself.
 type apiState struct {
 	mu   sync.Mutex
 	port int
+}
+
+// ExtensionInfo is what the settings page shows about the extension that last
+// talked to the app. It lives in process memory only: it is a diagnostic for
+// this run, not history.
+type ExtensionInfo struct {
+	// LastSeen is when an extension-origin request last passed the guard.
+	LastSeen time.Time `json:"lastSeen"`
+	// LastOrigin is the last accepted extension origin, i.e. "the extension ID
+	// currently talking to the app".
+	LastOrigin string `json:"lastOrigin"`
+	// ExtVersion is the version the last /add reported, empty when it did not
+	// say (an older extension build).
+	ExtVersion string `json:"extVersion"`
+	// VersionMismatch reports that ExtVersion is older than minExtensionVersion.
+	// It never changes whether /add is accepted.
+	VersionMismatch bool `json:"versionMismatch"`
+	// Accepted/Rejected count /add and /pair outcomes since the app started.
+	Accepted int64 `json:"accepted"`
+	Rejected int64 `json:"rejected"`
+}
+
+// noteExtensionSeen records that an extension-origin request passed the guard.
+func (a *App) noteExtensionSeen(origin string) {
+	a.extMu.Lock()
+	defer a.extMu.Unlock()
+	if origin != "" {
+		a.extInfo.LastOrigin = origin
+	}
+	a.extInfo.LastSeen = time.Now()
+}
+
+// noteExtensionResult counts an /add or /pair request that reached its handler.
+func (a *App) noteExtensionResult(origin string, accepted bool) {
+	a.extMu.Lock()
+	defer a.extMu.Unlock()
+	if origin != "" {
+		a.extInfo.LastOrigin = origin
+	}
+	a.extInfo.LastSeen = time.Now()
+	if accepted {
+		a.extInfo.Accepted++
+	} else {
+		a.extInfo.Rejected++
+	}
+}
+
+// noteExtensionVersion records the version an /add carried, and whether it is
+// older than this build expects.
+func (a *App) noteExtensionVersion(v string) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		// An older build does not send the header: nothing to compare, and the
+		// previous verdict (if any) is left alone rather than cleared.
+		return
+	}
+	a.extMu.Lock()
+	defer a.extMu.Unlock()
+	a.extInfo.ExtVersion = v
+	a.extInfo.VersionMismatch = compareVersions(v, minExtensionVersion) < 0
+}
+
+// ExtensionStatus reports the last extension request and the counters.
+func (a *App) ExtensionStatus() ExtensionInfo {
+	a.extMu.Lock()
+	defer a.extMu.Unlock()
+	return a.extInfo
+}
+
+// isExtensionOrigin reports whether an Origin header has the shape a browser
+// extension sends. This is the old guard rule, unchanged.
+func isExtensionOrigin(origin string) bool {
+	return strings.HasPrefix(origin, "chrome-extension://") ||
+		strings.HasPrefix(origin, "moz-extension://")
+}
+
+// compareVersions compares two dotted numeric versions, returning -1, 0 or 1.
+//
+// Missing components are zero, so "1.0" < "1.0.3". A component is read up to its
+// first non-digit, so "1.0.3-beta" compares as "1.0.3". This is a compatibility
+// gate, not a package manager: it only has to order ordinary extension versions
+// correctly.
+func compareVersions(a, b string) int {
+	as, bs := strings.Split(a, "."), strings.Split(b, ".")
+	n := len(as)
+	if len(bs) > n {
+		n = len(bs)
+	}
+	for i := 0; i < n; i++ {
+		av, bv := 0, 0
+		if i < len(as) {
+			av = leadingNumber(as[i])
+		}
+		if i < len(bs) {
+			bv = leadingNumber(bs[i])
+		}
+		if av != bv {
+			if av < bv {
+				return -1
+			}
+			return 1
+		}
+	}
+	return 0
+}
+
+// leadingNumber reads the digits a version component starts with, clamped so an
+// absurd input cannot overflow the comparison.
+func leadingNumber(s string) int {
+	n := 0
+	for _, r := range strings.TrimSpace(s) {
+		if r < '0' || r > '9' {
+			break
+		}
+		n = n*10 + int(r-'0')
+		if n > 1<<24 {
+			return 1 << 24
+		}
+	}
+	return n
+}
+
+// statusRecorder remembers the status a handler wrote, so the guard can count
+// accepted/rejected /add and /pair requests without every handler reporting back.
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (s *statusRecorder) WriteHeader(code int) {
+	if s.status == 0 {
+		s.status = code
+	}
+	s.ResponseWriter.WriteHeader(code)
+}
+
+func (s *statusRecorder) Write(b []byte) (int, error) {
+	if s.status == 0 {
+		s.status = http.StatusOK
+	}
+	return s.ResponseWriter.Write(b)
+}
+
+// Status returns the status the handler wrote (200 when it wrote only a body).
+func (s *statusRecorder) Status() int {
+	if s.status == 0 {
+		return http.StatusOK
+	}
+	return s.status
 }
 
 // Port reports the port the API is listening on, or 0 when it is not running.
@@ -100,9 +264,32 @@ func (a *App) startLocalAPI(ctx context.Context) {
 // The Origin header alone is self-reported and costs an attacker nothing to
 // forge; without the peer check, anything else on the machine that can speak
 // HTTP could drive the endpoint once past it.
+//
+// Two optional/diagnostic layers sit on top:
+//
+//   - ExtensionOriginLock, when set, admits exactly one extension origin and
+//     refuses every other extension (still a 403). Empty keeps the historical
+//     "any extension" rule.
+//   - Accepted/rejected counters and the last origin are recorded in memory for
+//     the settings page. They never affect a verdict.
 func (a *App) apiGuard(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
+		extOrigin := isExtensionOrigin(origin)
+		// The counters describe the two verbs the extension uses to do work.
+		// Preflights and reads are not attempts and are not counted.
+		counted := r.Method != http.MethodOptions &&
+			(r.URL.Path == "/add" || r.URL.Path == "/pair")
+
+		// reject answers and records. A refused /add or /pair from an extension
+		// is exactly the rejection the settings page should be able to show; the
+		// verdict itself is unchanged.
+		reject := func(body map[string]string) {
+			if extOrigin && counted {
+				a.noteExtensionResult(origin, false)
+			}
+			writeJSON(w, http.StatusForbidden, body)
+		}
 
 		// Mutations require a browser-extension Origin. An empty Origin (curl,
 		// a local test) may still use the read-only endpoints, but must not
@@ -113,23 +300,35 @@ func (a *App) apiGuard(next http.Handler) http.Handler {
 		// the pairing key, which is a credential, so a caller without a browser
 		// Origin must never reach it.
 		if r.Method != http.MethodOptions && (r.URL.Path == "/add" || r.URL.Path == "/pair" || r.Method == http.MethodPost) {
-			if !strings.HasPrefix(origin, "chrome-extension://") &&
-				!strings.HasPrefix(origin, "moz-extension://") {
+			if !extOrigin {
 				// JSON, not plain text: the extension parses the reply body
 				// and shows the error verbatim, and a plain-text 403 made it
 				// fall back to "HTTP 403" every time.
-				writeJSON(w, http.StatusForbidden, map[string]string{
+				reject(map[string]string{
 					"error": "this endpoint only accepts requests from the browser extension",
 				})
 				return
 			}
-		} else if origin != "" &&
-			!strings.HasPrefix(origin, "chrome-extension://") &&
-			!strings.HasPrefix(origin, "moz-extension://") {
-			writeJSON(w, http.StatusForbidden, map[string]string{
+		} else if origin != "" && !extOrigin {
+			reject(map[string]string{
 				"error": "this endpoint only accepts requests from the browser extension",
 			})
 			return
+		}
+
+		// Origin lock (opt-in). With a stored origin only that exact extension is
+		// admitted; the comparison is exact because a browser Origin carries no
+		// trailing slash and case matters to the extension ID. A refusal is a
+		// peer diagnostic, so the settings page can explain "my other extension
+		// cannot talk to the app".
+		if extOrigin {
+			if lock := a.Config().ExtensionOriginLock; lock != "" && origin != lock {
+				a.recordPeerRejection(peerReasonOriginLocked, "")
+				reject(map[string]string{
+					"error": "this extension is not the one this app is locked to",
+				})
+				return
+			}
 		}
 
 		// The Host header has to name this machine. Binding to 127.0.0.1 stops
@@ -139,14 +338,14 @@ func (a *App) apiGuard(next http.Handler) http.Handler {
 		// Origin check rejects its Origin, but a Host check is the layer that
 		// makes the whole class impossible rather than merely blocked.
 		if !loopbackHost(r.Host) {
-			writeJSON(w, http.StatusForbidden, map[string]string{
+			reject(map[string]string{
 				"error": "unexpected Host header",
 			})
 			return
 		}
 
 		// Echo the caller's origin instead of "*". Only an extension origin gets
-		// this far, so * was not exploitable â€” but a wildcard would let a future
+		// this far, so * was not exploitable — but a wildcard would let a future
 		// regression that admits some page read the reply, and it is exactly the
 		// kind of header nobody re-checks.
 		if origin != "" {
@@ -154,7 +353,10 @@ func (a *App) apiGuard(next http.Handler) http.Handler {
 			w.Header().Set("Vary", "Origin")
 		}
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		// The extension sends its version and its pairing proof as headers; both
+		// have to be named here for a preflighted request to carry them.
+		w.Header().Set("Access-Control-Allow-Headers",
+			"Content-Type, "+authHeader+", "+extVersionHeader)
 
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
@@ -168,7 +370,7 @@ func (a *App) apiGuard(next http.Handler) http.Handler {
 		// makes the endpoint useless to anything that merely looks like a browser.
 		if r.Method == http.MethodPost || r.URL.Path == "/add" {
 			if !a.requestAuthentic(r) {
-				writeJSON(w, http.StatusForbidden, map[string]string{
+				reject(map[string]string{
 					"error": "request is not authenticated by the VKMDownload extension",
 				})
 				return
@@ -181,13 +383,33 @@ func (a *App) apiGuard(next http.Handler) http.Handler {
 				// JSON so the extension can show which process was refused
 				// verbatim; a plain-text body made every refusal read as a
 				// bare "HTTP 403" in the notification.
-				writeJSON(w, http.StatusForbidden, map[string]string{
+				reject(map[string]string{
 					"error": "caller is not a recognized browser" + exeSuffix(exe),
 				})
 				return
 			}
 		}
-		next.ServeHTTP(w, r)
+
+		// The guard accepted the request.
+		//
+		// Only /add and /pair go through a status recorder: their many 400/403
+		// returns are counted from the handler's status without threading a
+		// counter through every path. Every other request is passed to the
+		// handler untouched — wrapping is only worth its (small) risk where the
+		// status is actually needed — and then the origin is remembered for the
+		// settings page.
+		if !counted {
+			next.ServeHTTP(w, r)
+			if extOrigin {
+				a.noteExtensionSeen(origin)
+			}
+			return
+		}
+		rec := &statusRecorder{ResponseWriter: w}
+		next.ServeHTTP(rec, r)
+		if extOrigin {
+			a.noteExtensionResult(origin, rec.Status() < http.StatusBadRequest)
+		}
 	})
 }
 
@@ -241,53 +463,34 @@ func (a *App) apiPing(w http.ResponseWriter, r *http.Request) {
 		"app":     "VKMDownload",
 		"version": appVersion,
 		"port":    a.apiPort(),
+		// The handshake: which contract this app speaks, and the oldest
+		// extension it expects. An older extension can still work; this is how
+		// it learns that it is old.
+		"protocol":            extensionProtocol,
+		"minExtensionVersion": minExtensionVersion,
 	})
 }
 
 // apiSettings is the interception policy: read by the extension before every
-// interception, and written by its popup when the user flips the switch there.
+// interception. It is read-only for the extension now.
 //
-// It lives in the app rather than in the extension on purpose — one place to
-// change it, and a change applies to the next download with no reinstall.
+// The policy lives in the app rather than in the extension so there is one place
+// to change it, and a change applies to the next download with no reinstall.
+// Writing it, however, is the app's own business: the endpoint used to accept
+// enabled/minSizeKb from the extension's popup, which meant any installed
+// extension that cleared the origin/peer checks could switch interception off
+// (or change what gets collected) from a surface the user never opened.
 func (a *App) apiSettings(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodPost {
-		a.apiSettingsUpdate(w, r)
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{
+			"error": "设置只能由应用自身修改",
+		})
 		return
 	}
 	if r.Method != http.MethodGet {
-		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "use GET or POST"})
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "use GET"})
 		return
 	}
-	writeJSON(w, http.StatusOK, a.policyView())
-}
-
-// apiSettingsUpdate applies a partial change from the extension's popup.
-//
-// Pointers so an omitted field is left alone: the popup toggles the switch
-// without knowing anything about the size limit, and sending a zero for it
-// would silently mean "take everything".
-func (a *App) apiSettingsUpdate(w http.ResponseWriter, r *http.Request) {
-	var patch struct {
-		Enabled   *bool `json:"enabled"`
-		MinSizeKB *int  `json:"minSizeKb"`
-	}
-	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&patch); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "malformed request"})
-		return
-	}
-
-	cfg := a.Config()
-	if patch.Enabled != nil {
-		cfg.ExtensionEnabled = *patch.Enabled
-	}
-	if patch.MinSizeKB != nil {
-		cfg.ExtensionMinSizeKB = *patch.MinSizeKB
-	}
-	if err := a.SetConfig(cfg); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		return
-	}
-
 	writeJSON(w, http.StatusOK, a.policyView())
 }
 
@@ -340,6 +543,11 @@ func (a *App) apiAdd(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "use POST"})
 		return
 	}
+
+	// The optional version handshake. An older extension does not send this
+	// header and is still served: the value is recorded for the settings page,
+	// never used to refuse a download.
+	a.noteExtensionVersion(r.Header.Get(extVersionHeader))
 
 	var req apiAddRequest
 	// A limit rather than trusting the caller: this is reachable by anything on

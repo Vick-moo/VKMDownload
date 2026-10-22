@@ -1,10 +1,20 @@
 import { useEffect, useRef, useState } from "react";
 import type { JSX } from "react";
 import { main } from "../../wailsjs/go/models";
+import {
+  DeleteUpdateBackup,
+  ExtensionStatus,
+  PairingInfo,
+  PeerDiagnostics,
+  ResetPairing,
+  UpdateBackupInfo,
+} from "../../wailsjs/go/main/App";
 import { api } from "../api";
+import { formatBytes } from "../format";
 import type { Config, OrganizeGroup, StoredSecretSummary, UpdateStatus } from "../types";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { IconFolder } from "./Icons";
+import { formatLastSeen, PeerDiagnosticsList } from "./PeerDiagnosticsList";
 import { UpdateNotesDialog } from "./UpdateNotesDialog";
 
 interface Props {
@@ -84,6 +94,63 @@ function Switch({
 }
 
 /**
+ * A small custom radio presented as one option in a compact choice row.
+ *
+ * The global input styling is aimed at text fields, so this draws the dot with
+ * inline styles instead of inheriting that box. The input stays a real radio,
+ * so keyboard and screen-reader semantics are unchanged.
+ */
+function RadioOption({
+  name,
+  label,
+  checked,
+  onChange,
+}: {
+  name: string;
+  label: string;
+  checked: boolean;
+  onChange: () => void;
+}): JSX.Element {
+  return (
+    <label
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 6,
+        cursor: "pointer",
+        fontSize: 13,
+        whiteSpace: "nowrap",
+      }}
+    >
+      <input
+        type="radio"
+        name={name}
+        checked={checked}
+        onChange={onChange}
+        style={{
+          appearance: "none",
+          width: 14,
+          height: 14,
+          padding: 0,
+          margin: 0,
+          flex: "0 0 auto",
+          borderRadius: "50%",
+          border: `1px solid ${checked ? "var(--accent)" : "var(--border-strong)"}`,
+          background: checked ? "var(--accent)" : "transparent",
+          // A background-coloured inner ring leaves the accent dot in the
+          // middle, so the choice reads as a radio rather than a tiny button.
+          boxShadow: checked
+            ? "inset 0 0 0 3px var(--bg-surface)"
+            : "none",
+          cursor: "pointer",
+        }}
+      />
+      {label}
+    </label>
+  );
+}
+
+/**
  * SettingsPage edits every option.
  *
  * Each behaviour has its own switch rather than being bundled with a related
@@ -117,6 +184,15 @@ export function SettingsPage({
   const [upd, setUpd] = useState<UpdateStatus | null>(null);
   const [updMsg, setUpdMsg] = useState("");
   const [updBusy, setUpdBusy] = useState(false);
+  // The restore point checked against the file on disk, not just the polled
+  // status: it can be deleted or replaced without a status change.
+  const [backup, setBackup] = useState<main.UpdateBackup | null>(null);
+  // Pairing, extension state and peer refusals are process state, not Config.
+  const [pairing, setPairing] = useState<main.PairingStatus | null>(null);
+  const [extStatus, setExtStatus] = useState<main.ExtensionInfo | null>(null);
+  const [diagnostics, setDiagnostics] = useState<main.PeerRejection[]>([]);
+  const [resetting, setResetting] = useState(false);
+  const [confirmResetOpen, setConfirmResetOpen] = useState(false);
   // What the app keeps on disk, read when the 隐私 tab is opened, and the busy
   // flag for the one action that removes it.
   const [stored, setStored] = useState<StoredSecretSummary | null>(null);
@@ -131,6 +207,40 @@ export function SettingsPage({
     } catch {
       // Leaving the previous numbers is better than showing a fabricated zero.
     }
+  }
+
+  /** Re-reads the on-disk backup record; UpdateBackupInfo checks the file. */
+  async function refreshBackup() {
+    try {
+      setBackup(await UpdateBackupInfo());
+    } catch {
+      // Distinguish "could not read" from the loading placeholder so the row
+      // does not spin forever; the buttons stay disabled either way.
+      setBackup({ available: false, version: "", size: 0, path: "" });
+    }
+  }
+
+  /** Refreshes pairing, extension status and refusals independently. */
+  async function refreshSecurity() {
+    // One panel failing must not blank the other two; the Refresh button and
+    // the tab-open effect both retry.
+    await Promise.all([
+      PairingInfo()
+        .then(setPairing)
+        .catch(() => {}),
+      ExtensionStatus()
+        .then(setExtStatus)
+        .catch(() => {}),
+      PeerDiagnostics()
+        .then(setDiagnostics)
+        .catch(() => {}),
+    ]);
+  }
+
+  /** The data directory behind PairingStatus.KeyPath (<dir>\pair.key). */
+  function dataDirOf(keyPath: string): string {
+    const cut = Math.max(keyPath.lastIndexOf("\\"), keyPath.lastIndexOf("/"));
+    return cut > 0 ? keyPath.slice(0, cut) : keyPath;
   }
 
   /** One sentence describing what is on disk, in counts only. */
@@ -200,6 +310,33 @@ export function SettingsPage({
     [],
   );
 
+  // The backup record lives on disk, not in the polled status, so read it when
+  // the update tab opens and again whenever the update state moves (a failed
+  // apply, a finished download, a post-restart hydration).
+  useEffect(() => {
+    if (tab !== "软件更新") return;
+    let cancelled = false;
+    void UpdateBackupInfo()
+      .then((b) => {
+        if (!cancelled) setBackup(b);
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setBackup({ available: false, version: "", size: 0, path: "" });
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [tab, upd?.state, upd?.version]);
+
+  // Pairing and diagnostics are process state, not Config: read them whenever
+  // the extension tab is opened (including returning to it).
+  useEffect(() => {
+    if (tab !== "浏览器扩展") return;
+    void refreshSecurity();
+  }, [tab]);
+
   function pollUpdate() {
     if (pollTimer.current !== null) window.clearTimeout(pollTimer.current);
     pollTimer.current = window.setTimeout(async () => {
@@ -224,13 +361,21 @@ export function SettingsPage({
           : "已是最新版本。",
       );
       if (info.available) {
-        setUpd({
+        setUpd((prev) => ({
           state: "idle",
           version: info.version,
           downloaded: 0,
           total: 0,
           error: "",
-        });
+          // Finding a new release does not erase what the previous staging
+          // attempt verified; the panel keeps showing the last verdict.
+          digestPresent: prev?.digestPresent,
+          sizeMatched: prev?.sizeMatched,
+          verified: prev?.verified,
+          backupAvailable: prev?.backupAvailable,
+          backupVersion: prev?.backupVersion,
+          backupSize: prev?.backupSize,
+        }));
       }
     } catch (e) {
       setUpdMsg(`检查失败：${e instanceof Error ? e.message : String(e)}`);
@@ -263,6 +408,9 @@ export function SettingsPage({
       setUpdMsg(`更新失败：${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setUpdBusy(false);
+      // If the swap actually started the process is gone; if it did not, the
+      // backup may have been created or consumed and the row must reflect it.
+      void refreshBackup();
     }
   }
 
@@ -278,8 +426,44 @@ export function SettingsPage({
       setUpdMsg("还原未开始：程序没有退出。");
     } catch (e) {
       setUpdMsg(`还原失败：${e instanceof Error ? e.message : String(e)}`);
+      // A stale backup record is the usual reason this fails; re-read it so
+      // the row stops offering a restore that cannot work.
+      await refreshBackup();
     } finally {
       setUpdBusy(false);
+    }
+  }
+
+  /** Removes the restore point, then re-reads the record so the row settles. */
+  async function deleteBackup() {
+    setUpdBusy(true);
+    setUpdMsg("");
+    try {
+      await DeleteUpdateBackup();
+      await refreshBackup();
+      setUpdMsg("已删除旧版本备份。");
+    } catch (e) {
+      setUpdMsg(
+        `删除旧版本备份失败：${e instanceof Error ? e.message : String(e)}`,
+      );
+      await refreshBackup();
+    } finally {
+      setUpdBusy(false);
+    }
+  }
+
+  /** Deletes the global pairing key and re-reads the security panels. */
+  async function resetPairing() {
+    setResetting(true);
+    try {
+      await ResetPairing();
+      await refreshSecurity();
+      note("已重置配对，所有浏览器都需要重新配对。");
+    } catch (e) {
+      note(`重置配对失败：${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setResetting(false);
+      setConfirmResetOpen(false);
     }
   }
 
@@ -324,6 +508,21 @@ export function SettingsPage({
     if (upd.state === "current") return `已是最新版本（${upd.version}）。`;
     if (upd.state === "failed" && upd.error) return `更新失败：${upd.error}`;
     return "自动检查新版本，有更新时顶部会出现横幅。";
+  }
+
+  /** What the last staged update actually verified; absent means false. */
+  function verifyLine(): string {
+    const digest = upd?.digestPresent ?? false;
+    const size = upd?.sizeMatched ?? false;
+    const verified = upd?.verified ?? false;
+    return `哈希校验：${digest ? "有" : "无"}；大小一致：${size ? "是" : "否"}；校验通过：${verified ? "是" : "否"}`;
+  }
+
+  /** The backup as the on-disk check sees it, not just the polled hint. */
+  function backupLine(): string {
+    if (!backup) return "正在读取旧版本备份…";
+    if (!backup.available) return "没有可还原的旧版本备份。";
+    return `旧版本 ${backup.version || "未知"}（${formatBytes(backup.size)}）`;
   }
 
   if (!draft) {
@@ -908,6 +1107,142 @@ export function SettingsPage({
           />
         </label>
 
+        <h4 className="settings-subsection__title">配对</h4>
+
+        <div className="setting">
+          <span className="setting__text">
+            <span className="setting__title">
+              配对状态：
+              {pairing ? (pairing.paired ? "已配对" : "未配对") : "正在读取…"}
+            </span>
+            <span className="setting__hint">
+              指纹：
+              <code style={{ fontFamily: "var(--font-mono)" }}>
+                {pairing?.fingerprint || "—"}
+              </code>
+              {" · "}端口：{pairing?.port ?? "—"}
+            </span>
+            <span className="setting__hint" style={{ wordBreak: "break-all" }}>
+              数据目录：
+              <code style={{ fontFamily: "var(--font-mono)" }}>
+                {pairing ? dataDirOf(pairing.keyPath) : "—"}
+              </code>
+            </span>
+          </span>
+          <button
+            type="button"
+            className="btn"
+            disabled={resetting}
+            onClick={() => setConfirmResetOpen(true)}
+          >
+            重置配对
+          </button>
+        </div>
+
+        <p className="settings-section__note">
+          钥匙是全局一份，不能只断开某一个浏览器。
+        </p>
+
+        <h4 className="settings-subsection__title">Origin 锁定</h4>
+
+        <div className="setting setting--stacked">
+          <span className="setting__text">
+            <span className="setting__title">当前扩展 Origin</span>
+            <span className="setting__hint">
+              <code
+                style={{
+                  fontFamily: "var(--font-mono)",
+                  wordBreak: "break-all",
+                }}
+              >
+                {extStatus?.lastOrigin || "尚未检测到扩展连接"}
+              </code>
+            </span>
+          </span>
+          <span className="field__row" style={{ flexWrap: "wrap" }}>
+            <input
+              type="text"
+              readOnly
+              value={draft.extensionOriginLock}
+              placeholder="未锁定（任何已装扩展都能请求）"
+              aria-label="已锁定的扩展 Origin"
+              style={{ minWidth: 320, fontFamily: "var(--font-mono)" }}
+            />
+            <button
+              type="button"
+              className="btn"
+              disabled={
+                !extStatus?.lastOrigin ||
+                extStatus.lastOrigin === draft.extensionOriginLock
+              }
+              onClick={() => {
+                if (!extStatus?.lastOrigin) return;
+                patch({ extensionOriginLock: extStatus.lastOrigin });
+                note("已填入当前扩展 Origin；点右下角「保存设置」后生效。");
+              }}
+            >
+              锁定当前扩展
+            </button>
+            <button
+              type="button"
+              className="btn"
+              disabled={!draft.extensionOriginLock}
+              onClick={() => {
+                patch({ extensionOriginLock: "" });
+                note("已清空 Origin 锁定；保存后任何已装扩展都能请求。");
+              }}
+            >
+              解除锁定
+            </button>
+          </span>
+          <span className="setting__hint">
+            锁定后只有这个扩展能连；清空则任何已装扩展都能请求（当前默认）。不要加尾斜杠，必须与浏览器发送的 Origin 完全一致。
+          </span>
+        </div>
+
+        <h4 className="settings-subsection__title">扩展状态</h4>
+
+        <div className="setting">
+          <span className="setting__text">
+            <span className="setting__title">最近连接</span>
+            {extStatus ? (
+              <>
+                <span className="setting__hint">
+                  {formatLastSeen(extStatus.lastSeen)}
+                  {" · "}扩展版本：{extStatus.extVersion || "未知"}
+                  {"（"}
+                  {extStatus.extVersion
+                    ? extStatus.versionMismatch
+                      ? "版本不匹配"
+                      : "版本匹配"
+                    : "无版本信息"}
+                  {"） · "}接受 {extStatus.accepted} / 拒绝{" "}
+                  {extStatus.rejected}
+                </span>
+                {extStatus.versionMismatch ? (
+                  <span
+                    className="setting__hint"
+                    style={{ color: "var(--warning)" }}
+                  >
+                    扩展版本过旧，请去 chrome://extensions 重新加载/更新
+                  </span>
+                ) : null}
+              </>
+            ) : (
+              <span className="setting__hint">正在读取扩展状态…</span>
+            )}
+          </span>
+          <button
+            type="button"
+            className="btn"
+            onClick={() => void refreshSecurity()}
+          >
+            刷新
+          </button>
+        </div>
+
+        <h4 className="settings-subsection__title">被拒绝的连接</h4>
+        <PeerDiagnosticsList items={diagnostics} />
 
       </section>
 
@@ -928,10 +1263,46 @@ export function SettingsPage({
 
         <Switch
           title="完成后自动关机"
-          hint="有 60 秒缓冲，期间运行 shutdown /a 可以取消。"
+          hint="计划完成后自动关机；关机前会等下面的延迟，期间运行 shutdown /a 可以取消。"
           checked={draft.planShutdown}
           onChange={(v) => patch({ planShutdown: v })}
         />
+
+        <label className="setting">
+          <span className="setting__text">
+            <span className="setting__title">关机延迟</span>
+            <span className="setting__hint">
+              0 = 计划完成后立即关机；默认 60 秒，最长 600 秒。
+            </span>
+          </span>
+          <span className="field__row" style={{ flex: "0 0 auto" }}>
+            <input
+              type="number"
+              min={0}
+              max={600}
+              step={10}
+              style={{ width: 96 }}
+              value={draft.shutdownDelaySeconds}
+              disabled={!draft.planShutdown}
+              onChange={(e) => {
+                const raw = e.target.value;
+                if (raw === "") {
+                  // 0 is a meaningful value here (shut down immediately), so
+                  // clearing the box must not silently mean that.
+                  patch({ shutdownDelaySeconds: 60 });
+                  return;
+                }
+                const n = Number(raw);
+                patch({
+                  shutdownDelaySeconds: Number.isFinite(n)
+                    ? Math.min(600, Math.max(0, Math.round(n)))
+                    : 60,
+                });
+              }}
+            />
+            <span className="field__suffix">秒</span>
+          </span>
+        </label>
       </section>
 
 
@@ -939,22 +1310,54 @@ export function SettingsPage({
       <section className="settings-section" hidden={tab !== "完成后"}>
         <h3 className="settings-section__title">完成后</h3>
 
-        <Switch
-          title="下载完成后打开文件"
-          hint="用系统默认程序打开刚下好的文件。"
-          checked={draft.openFileWhenDone}
-          onChange={(v) => patch({ openFileWhenDone: v })}
-        />
-        <Switch
-          title="下载完成后打开所在目录"
-          hint="在文件资源管理器中定位到该文件。"
-          checked={draft.openDirWhenDone}
-          onChange={(v) => patch({ openDirWhenDone: v })}
-        />
+        <div className="setting">
+          <span className="setting__text">
+            <span className="setting__title">下载完成后</span>
+            <span className="setting__hint">
+              三选一；后端保证「打开文件」和「打开目录」互斥，同时为真时保留目录。
+            </span>
+          </span>
+          <span
+            className="field__row"
+            style={{ flex: "0 0 auto", flexWrap: "wrap", justifyContent: "flex-end" }}
+          >
+            <RadioOption
+              name="completionAction"
+              label="打开文件"
+              checked={draft.openFileWhenDone && !draft.openDirWhenDone}
+              onChange={() =>
+                patch({ openFileWhenDone: true, openDirWhenDone: false })
+              }
+            />
+            <RadioOption
+              name="completionAction"
+              label="打开目录"
+              checked={draft.openDirWhenDone}
+              onChange={() =>
+                patch({ openFileWhenDone: false, openDirWhenDone: true })
+              }
+            />
+            <RadioOption
+              name="completionAction"
+              label="都不做"
+              checked={!draft.openFileWhenDone && !draft.openDirWhenDone}
+              onChange={() =>
+                patch({ openFileWhenDone: false, openDirWhenDone: false })
+              }
+            />
+          </span>
+        </div>
       </section>
 
       <section className="settings-section" hidden={tab !== "窗口"}>
         <h3 className="settings-section__title">窗口</h3>
+
+        <Switch
+          title="开机自启"
+          hint="电脑启动时自动打开；移动程序位置后需要重新勾选。"
+          checked={draft.launchAtLogin}
+          onChange={(v) => patch({ launchAtLogin: v })}
+        />
 
         <Switch
           title="关闭窗口时最小化到托盘"
@@ -1061,6 +1464,39 @@ export function SettingsPage({
       <section className="settings-section" hidden={tab !== "隐私"}>
         <h3 className="settings-section__title">本机数据</h3>
 
+        <label className="setting">
+          <span className="setting__text">
+            <span className="setting__title">历史保留</span>
+            <span className="setting__hint">
+              已完成、已取消和失败的记录保留多久；永久保留会让记录一直留在本机。
+            </span>
+          </span>
+          <select
+            style={{ width: 150 }}
+            value={draft.historyRetentionDays}
+            onChange={(e) =>
+              patch({ historyRetentionDays: Number(e.target.value) })
+            }
+          >
+            {![0, 7, 30, 90].includes(draft.historyRetentionDays) ? (
+              <option value={draft.historyRetentionDays}>
+                {draft.historyRetentionDays} 天
+              </option>
+            ) : null}
+            <option value={7}>7 天</option>
+            <option value={30}>30 天</option>
+            <option value={90}>90 天</option>
+            <option value={0}>永久（0）</option>
+          </select>
+        </label>
+
+        <Switch
+          title="写诊断日志"
+          hint="关闭后不再写日志（更新程序本身的日志除外）。"
+          checked={draft.loggingEnabled}
+          onChange={(v) => patch({ loggingEnabled: v })}
+        />
+
         <div className="setting">
           <span className="setting__text">
             <span className="setting__title">程序在这台电脑上保留了什么</span>
@@ -1130,17 +1566,43 @@ export function SettingsPage({
                 重启生效
               </button>
             ) : null}
-            {updateNotice && updateNotice.includes("可在设置中手动还原") ? (
-              <button
-                type="button"
-                className="btn"
-                disabled={updBusy}
-                title={updateNotice}
-                onClick={() => void restoreOldVersion()}
-              >
-                还原旧版本
-              </button>
-            ) : null}
+          </span>
+        </div>
+
+        <div className="setting">
+          <span className="setting__text">
+            <span className="setting__title">上次更新校验</span>
+            <span className="setting__hint">{verifyLine()}</span>
+          </span>
+        </div>
+
+        <div className="setting">
+          <span className="setting__text">
+            <span className="setting__title">旧版本备份</span>
+            <span className="setting__hint">{backupLine()}</span>
+          </span>
+          <span className="field__row" style={{ flex: "0 0 auto" }}>
+            <button
+              type="button"
+              className="btn"
+              disabled={updBusy || !backup?.available}
+              title={
+                backup?.available
+                  ? `旧版本 ${backup.version || "未知"}`
+                  : updateNotice || "没有可还原的旧版本备份"
+              }
+              onClick={() => void restoreOldVersion()}
+            >
+              还原旧版本
+            </button>
+            <button
+              type="button"
+              className="btn"
+              disabled={updBusy || !backup?.available}
+              onClick={() => void deleteBackup()}
+            >
+              删除旧版本备份
+            </button>
           </span>
         </div>
 
@@ -1176,6 +1638,18 @@ export function SettingsPage({
           anyone reporting a problem is asked for is this number. */}
       {version ? (
         <p className="settings__version">VKMDownload v{version}</p>
+      ) : null}
+
+      {confirmResetOpen ? (
+        <ConfirmDialog
+          title="重置配对？"
+          message="重置后所有浏览器都需要重新配对。"
+          detail="钥匙是全局一份，不能只断开某一个浏览器。"
+          confirmLabel="重置配对"
+          busy={resetting}
+          onConfirm={() => void resetPairing()}
+          onCancel={() => setConfirmResetOpen(false)}
+        />
       ) : null}
 
       {confirmClearOpen ? (
