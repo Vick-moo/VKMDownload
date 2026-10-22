@@ -207,6 +207,89 @@ function proofMatches(got, want) {
 }
 
 /**
+ * The handshake /ping last reported: the protocol the app speaks and the oldest
+ * extension version it accepts.
+ *
+ * Recorded only from a response that proved the pairing key — a program that
+ * grabbed the port could otherwise tell the popup a bogus minimum version. The
+ * base is remembered so a different port re-reads it.
+ */
+let appHandshake = { protocol: 0, minExtensionVersion: "" };
+let handshakeBase = "";
+
+/** Records the handshake from a /ping body that has already proved itself. */
+function recordHandshake(base, body) {
+  if (!body || typeof body !== "object") return;
+  const protocol = Number(body.protocol);
+  appHandshake = {
+    protocol: Number.isFinite(protocol) && protocol > 0 ? protocol : 0,
+    minExtensionVersion:
+      typeof body.minExtensionVersion === "string"
+        ? body.minExtensionVersion.trim()
+        : "",
+  };
+  handshakeBase = base;
+}
+
+/**
+ * Compares two dotted version strings, returning -1, 0 or 1.
+ *
+ * Same rule as the app's comparator: missing parts are zero ("1.0" < "1.0.3"),
+ * and a part is read up to its first non-digit ("1.0.3-beta" == "1.0.3"). It is
+ * a compatibility nudge, not a package manager.
+ */
+function compareVersions(a, b) {
+  const as = String(a || "").split(".");
+  const bs = String(b || "").split(".");
+  const n = Math.max(as.length, bs.length);
+  for (let i = 0; i < n; i += 1) {
+    const av = leadingNumber(as[i]);
+    const bv = leadingNumber(bs[i]);
+    if (av !== bv) return av < bv ? -1 : 1;
+  }
+  return 0;
+}
+
+/** The leading digits of one version component, 0 when there are none. */
+function leadingNumber(part) {
+  const m = /^\s*(\d+)/.exec(part == null ? "" : String(part));
+  return m ? Number(m[1]) : 0;
+}
+
+/** The extension's own version, or "" outside a real extension context. */
+function extensionVersion() {
+  try {
+    return String(chrome.runtime.getManifest().version || "");
+  } catch {
+    return "";
+  }
+}
+
+/** True when this extension is older than the app's minimum. */
+function versionMismatch() {
+  const min = appHandshake.minExtensionVersion;
+  const mine = extensionVersion();
+  return Boolean(min && mine) && compareVersions(mine, min) < 0;
+}
+
+/**
+ * Reads the app's protocol handshake once per proven base.
+ *
+ * The popup needs the app's minimum extension version, and this worker may have
+ * started after the last handover. Cached per base: the app does not change
+ * under a running worker, and a stale value only affects a hint line. It needs
+ * the pairing key — without one there is no proven responder to trust.
+ */
+async function refreshHandshake() {
+  const base = await findApp();
+  if (!base) return;
+  if (handshakeBase === base && appHandshake.minExtensionVersion) return;
+  const key = await loadPairKey();
+  if (!key) return;
+  await provePort(base, key);
+}
+
+/**
  * Asks one candidate port to prove it holds the key.
  *
  * Returns false for anything that does not answer correctly, including a port
@@ -222,7 +305,17 @@ async function provePort(base, key) {
     if (!response.ok) return false;
     const got = response.headers.get(PROOF_HEADER);
     if (!got) return false;
-    return proofMatches(got.toLowerCase(), await hmacHex(key, challenge));
+    if (!proofMatches(got.toLowerCase(), await hmacHex(key, challenge))) {
+      return false;
+    }
+    // The proof just established this is the real app, so the handshake in its
+    // body can be trusted. Best-effort: an older app — or a test double — may
+    // not answer with JSON, and a missing handshake only affects a hint line.
+    if (typeof response.json === "function") {
+      const body = await response.json().catch(() => ({}));
+      recordHandshake(base, body);
+    }
+    return true;
   } catch {
     return false;
   }
@@ -682,6 +775,28 @@ function nameFromUrl(raw) {
 const POLICY_TTL_MS = 3000;
 let policyCache = { at: 0, value: null };
 
+/**
+ * Fills in the switches an older app does not send.
+ *
+ * This is a compatibility rule, not a default: an app from before
+ * extensionSendCookies / extensionIncognito has neither key, and reading them
+ * naively would make `undefined` mean "do not send cookies" — silently breaking
+ * every login-gated download for anyone who has not updated the app yet. The
+ * historical behaviour is cookies on and incognito off, so that is what a
+ * missing key gets. An explicit false/true always wins.
+ */
+function normalizePolicy(raw) {
+  const p = raw && typeof raw === "object" ? raw : {};
+  return {
+    ...p,
+    enabled: Boolean(p.enabled),
+    minSizeKb: Number(p.minSizeKb) || 0,
+    skipHosts: Array.isArray(p.skipHosts) ? p.skipHosts : [],
+    sendCookies: p.sendCookies !== false,
+    incognito: p.incognito === true,
+  };
+}
+
 async function getPolicy(fresh) {
   const now = Date.now();
   if (!fresh && policyCache.value && now - policyCache.at < POLICY_TTL_MS) {
@@ -699,7 +814,7 @@ async function getPolicy(fresh) {
       cache: "no-store",
       signal: AbortSignal.timeout(1200),
     });
-    const value = await response.json();
+    const value = normalizePolicy(await response.json());
     policyCache = { at: now, value };
     return value;
   } catch {
@@ -794,10 +909,6 @@ if (hasExtensionApis()) {
     // The worker may have just restarted; reload the self-started ids first
     // so a fallback download is not mistaken for a new user download.
     await loadOwn();
-    // An incognito download must not be handed over: the app keeps a task record,
-    // a log line and a notification, and none of them belong to a session the
-    // user asked to leave no trace of.
-    if (item.incognito) return;
     if (!shouldTake(item)) return;
 
     // Ask the app what it wants. When it is not running this returns null, and
@@ -805,6 +916,12 @@ if (hasExtensionApis()) {
     // lose it entirely, which is far worse than not interfering.
     const policy = await getPolicy();
     if (!policy || !policy.enabled) return;
+
+    // An incognito download is handed over only when the user explicitly allowed
+    // it: the app keeps a task record, a log line and a notification, and none of
+    // them belong to a session the user asked to leave no trace of. The default
+    // (incognito=false) is exactly the historical behaviour.
+    if (item.incognito && !policy.incognito) return;
 
     const url = item.finalUrl || item.url;
 
@@ -876,7 +993,10 @@ if (hasExtensionApis()) {
       filename,
       size,
       referer: refererFor(item.referrer),
-      cookie: await cookiesFor(url),
+      // Login cookies only when the app's policy allows them. When it does not,
+      // they are not even read: the point of the switch is that nothing leaves
+      // the browser, not that the app ignores it.
+      cookie: policy.sendCookies ? await cookiesFor(url) : "",
       userAgent: navigator.userAgent || "",
     });
 
@@ -936,7 +1056,12 @@ if (
 ) {
   chrome.contextMenus.onClicked.addListener(async (info, tab) => {
     if (info.menuItemId !== "vkm-add") return;
-    if (tab && tab.incognito) return;
+
+    // The same policy gate as interception: with incognito handover off (the
+    // default) a click in a private window does nothing, because the app would
+    // keep a record of a session the user asked to leave no trace of.
+    const policy = await getPolicy();
+    if (tab && tab.incognito && !(policy && policy.incognito)) return;
 
     const url = pickUrl(info.linkUrl || info.srcUrl || info.selectionText || "");
     if (!/^https?:/i.test(url)) {
@@ -955,7 +1080,7 @@ if (
       url,
       filename: nameFromUrl(url),
       referer: refererFor(tab && tab.url ? tab.url : ""),
-      cookie: await cookiesFor(url),
+      cookie: policy && policy.sendCookies ? await cookiesFor(url) : "",
       userAgent: navigator.userAgent || "",
     });
     report(result, nameFromUrl(url));
@@ -965,12 +1090,14 @@ if (
 // ------------------------------------------------------------ messages ----
 
 /**
- * The popup asks for the policy and flips the switch.
+ * The popup asks for the policy and the version handshake. It cannot change the
+ * policy.
  *
- * Both come from the app, not from extension storage: the switches live in the
- * app's settings so there is one place to change them, and the popup is a
- * shortcut to the same thing rather than a second source of truth that could
- * disagree with it.
+ * The switches live in the app's settings, and only the app writes them: the
+ * popup used to flip the interception switch through POST /settings, which was
+ * a second way into a setting that is meant to be the app's own (and the app now
+ * answers 405 there). The popup is a status display plus a pairing repair, not
+ * a control surface.
  *
  * Answering asynchronously matters: returning true keeps the message channel
  * open until sendResponse is called, and without it the popup would always be
@@ -984,13 +1111,19 @@ if (
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (message === "status") {
       (async () => {
-        // Fresh read, bypassing the 3s policy cache, so the popup never
-        // paints a stale switch right after the app's settings changed it.
+        // Fresh read, bypassing the 3s policy cache, so the popup never paints
+        // a stale switch right after the app's settings changed it.
         const policy = await getPolicy(true);
+        // The version warning needs the app's minimum version, which /ping
+        // carries. Cached per proven base; a no-op once known.
+        if (policy) await refreshHandshake();
         sendResponse({
           running: Boolean(policy),
           enabled: policy ? Boolean(policy.enabled) : false,
           minSizeKb: policy ? policy.minSizeKb : 0,
+          extVersion: extensionVersion(),
+          minExtensionVersion: appHandshake.minExtensionVersion,
+          versionMismatch: versionMismatch(),
         });
       })();
       return true;
@@ -1016,50 +1149,6 @@ if (
       return true;
     }
 
-    if (message === "toggle") {
-      (async () => {
-        const base = await findApp();
-        if (!base) {
-          sendResponse(null);
-          return;
-        }
-
-        const current = await getPolicy(true);
-        const enabled = !(current && current.enabled);
-
-        const auth = await signRequest("POST", "/settings");
-        if (!auth) {
-          sendResponse({ refused: true, error: "扩展还没有和 VKMDownload 配对" });
-          return;
-        }
-
-        try {
-          const response = await fetch(`${base}/settings`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json", [AUTH_HEADER]: auth },
-            body: JSON.stringify({ enabled }),
-          });
-          if (response.status === 403) {
-            const body = await response.json().catch(() => ({}));
-            sendResponse({ refused: true, error: body.error || "HTTP 403" });
-            return;
-          }
-          if (!response.ok) {
-            sendResponse(null);
-            return;
-          }
-          // The cache still holds the old value and would answer the next
-          // download from it, so drop it rather than wait out its lifetime.
-          policyCache = { at: 0, value: null };
-          sendResponse({ enabled });
-        } catch {
-          apiBase = null;
-          sendResponse(null);
-        }
-      })();
-      return true;
-    }
-
     return false;
   });
 }
@@ -1081,11 +1170,15 @@ if (typeof globalThis !== "undefined") {
       handOver,
       report,
       getPolicy,
+      normalizePolicy,
+      compareVersions,
       trackOwn,
       ownDownloads,
       resetForTest() {
         apiBase = null;
         policyCache = { at: 0, value: null };
+        appHandshake = { protocol: 0, minExtensionVersion: "" };
+        handshakeBase = "";
         ownDownloads.clear();
         ownLoaded = true;
         // The pairing key is module state too. Leaving it behind made one test's

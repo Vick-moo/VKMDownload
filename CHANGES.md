@@ -3,6 +3,15 @@
 > 每次改完代码都在这里记一笔：日期、改了什么、为什么改。
 > 发版 / push 前看这份文件写 release notes。
 
+### 62. 波 D/F：扩展开关、弹窗只读、版本提示、托盘菜单（UNRELEASED，2026-10-22）
+- 新字段 `extensionSendCookies`（默认 **true**）与 `extensionIncognito`（默认 **false**）；`GET /settings` 的 policy 即使 false 也下发，扩展侧可区分"关掉了"和"旧应用没这个字段"。
+- 扩展：`sendCookies=false` 时**不读也不发** Cookie（不调用 `chrome.cookies`），交接照常；`incognito=true` 才接管无痕窗口，默认与旧行为一致。旧应用缺字段时按 true/false 回退。
+- popup 只读化：删除开关与 `toggle` 消息，改为"接管已开启/已暂停" + "在 VKMDownload → 设置 → 浏览器扩展 中修改"；不再 POST `/settings`（修掉 405 的误导文案）。popup 显示扩展版本与应用要求的最低版本，不匹配时黄字提示。
+- 应用端兜底：`extensionSendCookies=false` 时 `/add` 在入队前丢弃 `req.Cookie`——旧扩展（1.0.2）不读新开关也拦得住；32 KiB 上限仍在丢弃之前校验。
+- 托盘：显示窗口 / 暂停全部 / 继续全部 / 限速（不限速、1、5、10 MB/s，当前值打勾）/ 退出。状态由纯函数 `buildTrayMenuModel` 计算，动作后立即重画、每 2s 兜底刷新；点击动作在独立 goroutine，不阻塞菜单消息循环。
+- 验收：desktop `go vet` / `go test`（36.9s）、`GOOS=linux go vet`、扩展 `node --test` **45/45**、前端 `tsc --noEmit`；`git diff --check` 干净。
+- 已知边界：旧 popup（未重载扩展）点开关仍会收到 405；无痕接管还要求浏览器允许扩展在无痕模式运行；托盘只有纯函数测试，真机未点。
+
 ### 61. 波 C + E：安全面板与设置页接线（UNRELEASED，2026-10-22）
 - **S1 配对面板**：新增 `PairingInfo()`（`paired/fingerprint/port/keyPath`）与 `ResetPairing()`（幂等）；指纹是 `sha256(key)` 前 8 字节，**绝不返回 key**。key 是全局一份，不能只断开某一个浏览器。
 - **S3 被拒诊断**：`PeerDiagnostics()` 返回内存 ring（20 条，最新在前）：时间、exe basename、原因（`bad_addr/not_loopback/bad_port/no_owner/no_image/not_allowlisted/not_in_install_root/bad_signature/origin_locked`）。不落盘、不改变判定。

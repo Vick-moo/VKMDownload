@@ -288,6 +288,87 @@ func TestLocalAPIAddForwardsBrowserCookies(t *testing.T) {
 	})
 }
 
+// TestLocalAPIAddDropsBrowserCookiesWhenTheSwitchIsOff covers the app-side half
+// of extensionSendCookies.
+//
+// The extension honours the switch too, but one installed before the switch
+// existed does not — it keeps sending the browser's cookies. Dropping them here
+// is what makes "do not hand over my login" true for every extension version.
+// The download must still be created: it simply arrives without a login session,
+// exactly as if the user were not signed in.
+func TestLocalAPIAddDropsBrowserCookiesWhenTheSwitchIsOff(t *testing.T) {
+	cases := []struct {
+		name string
+		send bool
+		want string
+	}{
+		{"switch off drops the cookie", false, ""},
+		{"switch on keeps the cookie", true, "session=s3cret"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			app := newTestApp(t)
+			// Ask-location would park the request instead of creating a task.
+			disableAskLocation(t, app)
+			cfg := app.Config()
+			cfg.ExtensionSendCookies = c.send
+			// No transfer: the task only has to exist so its stored cookie can
+			// be inspected.
+			cfg.AutoStart = false
+			if err := app.SetConfig(cfg); err != nil {
+				t.Fatalf("SetConfig: %v", err)
+			}
+			base := startAPI(t, app)
+
+			resp := postJSON(t, base+"/add", "chrome-extension://abc",
+				`{"url":"http://127.0.0.1:1/private.bin","filename":"private.bin","cookie":"session=s3cret"}`)
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("status = %d, want 200 (the handover must not fail)", resp.StatusCode)
+			}
+			var body struct {
+				ID string `json:"id"`
+			}
+			if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+
+			tk := app.mgr.get(body.ID)
+			if tk == nil {
+				t.Fatalf("task %q was not created", body.ID)
+			}
+			tk.mu.Lock()
+			got := tk.cookie
+			tk.mu.Unlock()
+			if got != c.want {
+				t.Errorf("stored cookie = %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
+// TestLocalAPIAddStillCapsTheCookie pins the existing guard: dropping the value
+// when the switch is off must not turn /add into a place to post an arbitrarily
+// large body.
+func TestLocalAPIAddStillCapsTheCookie(t *testing.T) {
+	app := newTestApp(t)
+	disableAskLocation(t, app)
+	cfg := app.Config()
+	cfg.ExtensionSendCookies = false
+	if err := app.SetConfig(cfg); err != nil {
+		t.Fatalf("SetConfig: %v", err)
+	}
+	base := startAPI(t, app)
+
+	big := strings.Repeat("a", (32<<10)+1)
+	resp := postJSON(t, base+"/add", "chrome-extension://abc",
+		`{"url":"http://127.0.0.1:1/x.bin","cookie":"`+big+`"}`)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400 for an oversized cookie", resp.StatusCode)
+	}
+}
+
 // TestLocalAPIRejectsAPage is the security boundary. A cross-origin POST from a
 // web page is delivered even though the page cannot read the reply, so without
 // this check any site the user visits could fill their download queue.
@@ -618,6 +699,37 @@ func TestPolicyViewSplitsSkipHosts(t *testing.T) {
 		if !want[host] {
 			t.Errorf("unexpected host %q", host)
 		}
+	}
+}
+
+// TestPolicyViewCarriesExtensionSwitches covers the two behavioural switches the
+// extension reads. Both are sent even when false, so the extension can tell
+// "switched off" from "an app too old to have the field" — the two have
+// different defaults on the extension side.
+func TestPolicyViewCarriesExtensionSwitches(t *testing.T) {
+	app := newTestApp(t)
+
+	view := app.policyView()
+	if got, ok := view["sendCookies"].(bool); !ok || !got {
+		t.Errorf("sendCookies = %v (present=%v), want the default true", view["sendCookies"], ok)
+	}
+	if got, ok := view["incognito"].(bool); !ok || got {
+		t.Errorf("incognito = %v (present=%v), want the default false", view["incognito"], ok)
+	}
+
+	cfg := app.Config()
+	cfg.ExtensionSendCookies = false
+	cfg.ExtensionIncognito = true
+	if err := app.SetConfig(cfg); err != nil {
+		t.Fatalf("SetConfig: %v", err)
+	}
+
+	view = app.policyView()
+	if got, ok := view["sendCookies"].(bool); !ok || got {
+		t.Errorf("sendCookies = %v (present=%v), want false", view["sendCookies"], ok)
+	}
+	if got, ok := view["incognito"].(bool); !ok || !got {
+		t.Errorf("incognito = %v (present=%v), want true", view["incognito"], ok)
 	}
 }
 

@@ -17,13 +17,23 @@
     .head strong { font-size: 14px; }
     .state {
       display: flex; align-items: center; gap: 7px;
-      padding: 9px 11px; margin-bottom: 12px;
+      padding: 9px 11px; margin-bottom: 8px;
       border-radius: 8px; background: #14171f;
       border: 1px solid #262c3a; font-size: 12px;
     }
     .dot { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 8px; }
     .dot--on { background: #3ecf8e; box-shadow: 0 0 6px #3ecf8e; }
     .dot--off { background: #d9534f; }
+    /* Read-only mode display: the switches are changed in the app, so this
+       deliberately looks like a status line rather than a button. */
+    .mode {
+      display: flex; flex-direction: column; gap: 2px;
+      padding: 9px 11px;
+      border-radius: 8px; background: #14171f;
+      border: 1px solid #262c3a; font-size: 12px;
+    }
+    .mode strong { font-weight: 600; color: #cfd6e4; }
+    .mode-note { font-size: 11px; color: #6b7689; }
     button {
       width: 100%; padding: 9px; border-radius: 8px; cursor: pointer;
       border: 1px solid #4c8dff; background: transparent;
@@ -46,6 +56,14 @@
       overflow-wrap: anywhere;
       word-break: break-word;
     }
+    /* An out-of-date extension keeps working, but the user should know before
+       filing a bug about a switch it cannot read yet. */
+    .warnver {
+      margin: 10px 0 0;
+      font-size: 11px;
+      color: #e6b84c;
+      white-space: normal;
+    }
     .ver { margin: 12px 0 0; font-size: 11px; color: #525b70; text-align: center; }
   </style>
 </head>
@@ -60,11 +78,16 @@
     <span id="state">正在检查…</span>
   </div>
 
-  <button id="toggle" type="button">…</button>
+  <div class="mode">
+    <strong id="mode">接管状态读取中…</strong>
+    <span class="mode-note">在 VKMDownload → 设置 → 浏览器扩展 中修改</span>
+  </div>
 
   <button id="repair" type="button" hidden>重新配对</button>
 
   <p class="hint" id="hint"></p>
+
+  <p class="warnver" id="verwarn" hidden>扩展版本过旧，请重新加载/更新</p>
 
   <p class="ver" id="ver"></p>
 

@@ -515,6 +515,12 @@ func (a *App) policyView() map[string]any {
 		"enabled":   cfg.ExtensionEnabled,
 		"minSizeKb": cfg.ExtensionMinSizeKB,
 		"skipHosts": skip,
+		// The two behavioural switches the extension reads. They are sent even
+		// when false, so a switched-off feature is distinguishable from an app
+		// old enough not to have the field — the extension fills the historical
+		// defaults only when the key is absent.
+		"sendCookies": cfg.ExtensionSendCookies,
+		"incognito":   cfg.ExtensionIncognito,
 	}
 }
 
@@ -598,6 +604,16 @@ func (a *App) apiAdd(w http.ResponseWriter, r *http.Request) {
 	}
 
 	cfg := a.Config()
+	// Drop the browser's cookies when the user has turned cookie forwarding off.
+	//
+	// The switch is also enforced in the extension, but an extension installed
+	// before it existed does not read it and keeps sending cookies. Dropping them
+	// here is what makes the setting true for every extension version. The
+	// download itself is unaffected: it simply arrives without a login session,
+	// exactly as if the user were not signed in.
+	if !cfg.ExtensionSendCookies {
+		req.Cookie = ""
+	}
 	if cfg.AskLocation {
 		// Ask first, create later: the front-end opens the new-task dialog
 		// prefilled with these values, and closing it abandons the download.

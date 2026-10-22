@@ -98,6 +98,17 @@ type Config struct {
 	// ExtensionSkipHosts lists hosts the extension leaves alone, one per line.
 	// A user who has one site that must download normally can exclude just that.
 	ExtensionSkipHosts string `json:"extensionSkipHosts"`
+	// ExtensionSendCookies lets the extension hand the browser's cookies for the
+	// download to the app. On by default: without them the app is a stranger to
+	// any host that requires a login (Google Classroom / Drive private files
+	// redirect it to the sign-in page). Off means every handover arrives without
+	// a login session; the URL and Referer are still sent.
+	ExtensionSendCookies bool `json:"extensionSendCookies"`
+	// ExtensionIncognito takes over downloads started in an incognito/private
+	// window. Off by default, which is the historical behaviour: the app keeps a
+	// task record, a log line and a notification, and none of them belong to a
+	// session the user asked to leave no trace of.
+	ExtensionIncognito bool `json:"extensionIncognito"`
 	// ExtensionOriginLock pins the loopback endpoint to one extension origin,
 	// e.g. "chrome-extension://<id>". Empty (the default) keeps the historical
 	// behaviour: any chrome-extension:// or moz-extension:// origin is admitted,
@@ -236,9 +247,11 @@ func DefaultConfig() Config {
 		// separate program. Taking over everything — including the browser's own
 		// updates and every favicon a page requests — is the fastest way to make
 		// someone uninstall the extension.
-		ExtensionEnabled:   true,
-		ExtensionMinSizeKB: 1024,
-		ExtensionSkipHosts: "",
+		ExtensionEnabled:     true,
+		ExtensionMinSizeKB:   1024,
+		ExtensionSkipHosts:   "",
+		ExtensionSendCookies: true,
+		ExtensionIncognito:   false,
 		// Empty: any browser extension may talk to the app (mutations still need
 		// the pairing key). The lock is opt-in hardening.
 		ExtensionOriginLock: "",
@@ -314,6 +327,11 @@ func (c *Config) normalize() {
 	// does not match into one that does (or the reverse); the settings page can
 	// show the stored text as it is.
 	c.ExtensionOriginLock = strings.TrimSpace(c.ExtensionOriginLock)
+	// ExtensionSendCookies and ExtensionIncognito are booleans with a meaningful
+	// default (true/false), so there is nothing to clamp. Their "absent" case is
+	// handled by loadConfig starting from DefaultConfig: a settings file written
+	// before these fields existed keeps sendCookies=true and incognito=false, not
+	// Go's zero values.
 	// History retention: 0 is a valid "keep forever". Only a negative (a typo)
 	// is corrected, and it resets to the default rather than to 0, so a stray
 	// minus cannot silently turn a 90-day policy into forever.

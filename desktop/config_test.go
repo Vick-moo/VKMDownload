@@ -146,6 +146,70 @@ func TestLoadConfigKeepsTheNewDefaultsForAnOldFile(t *testing.T) {
 	}
 }
 
+// TestExtensionSwitchDefaults pins the two switches the extension reads. Both
+// defaults are behavioural promises: cookies on (or login-gated downloads stop
+// working) and incognito off (or a private session starts leaving records).
+func TestExtensionSwitchDefaults(t *testing.T) {
+	cfg := DefaultConfig()
+	if !cfg.ExtensionSendCookies {
+		t.Error("ExtensionSendCookies default = false, want true")
+	}
+	if cfg.ExtensionIncognito {
+		t.Error("ExtensionIncognito default = true, want false")
+	}
+}
+
+// TestLoadConfigKeepsExtensionSwitchesForAnOldFile covers the upgrade path for
+// these two: a file written before the keys existed must keep the defaults
+// rather than Go's zero values, which would silently stop sending cookies and
+// start taking over private windows.
+func TestLoadConfigKeepsExtensionSwitchesForAnOldFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"connections":8}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := loadConfig(path, nil)
+	if !cfg.ExtensionSendCookies {
+		t.Error("an old config turned cookie forwarding off; absent must mean the default (on)")
+	}
+	if cfg.ExtensionIncognito {
+		t.Error("an old config turned incognito on; absent must mean the default (off)")
+	}
+}
+
+// TestExtensionSwitchRoundTrip covers write -> read: the settings page writes the
+// switches through SetConfig, and the extension only sees them if they survive
+// the file.
+func TestExtensionSwitchRoundTrip(t *testing.T) {
+	app := newTestApp(t)
+	cfg := app.Config()
+	cfg.ExtensionSendCookies = false
+	cfg.ExtensionIncognito = true
+	if err := app.SetConfig(cfg); err != nil {
+		t.Fatalf("SetConfig: %v", err)
+	}
+
+	reloaded := loadConfig(app.configPath(), nil)
+	if reloaded.ExtensionSendCookies {
+		t.Error("ExtensionSendCookies did not survive the round trip (want false)")
+	}
+	if !reloaded.ExtensionIncognito {
+		t.Error("ExtensionIncognito did not survive the round trip (want true)")
+	}
+
+	// And the wire format the front-end round-trips has both keys.
+	raw, err := json.Marshal(app.Config())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{`"extensionSendCookies"`, `"extensionIncognito"`} {
+		if !strings.Contains(string(raw), key) {
+			t.Errorf("Config JSON is missing %s: %s", key, raw)
+		}
+	}
+}
+
 // TestNormalizeNewSettingRanges pins the bounds, including what 0 means for
 // each: "keep forever" for the retention and "shut down now" for the delay.
 func TestNormalizeNewSettingRanges(t *testing.T) {

@@ -39,8 +39,11 @@ function stubChrome({ searchImpl } = {}) {
 
 const TEST_KEY = "0123456789abcdef".repeat(4);
 
-/** Answer a /ping the way the real app does: HMAC of the challenge. */
-async function proofResponse(url) {
+/** Answer a /ping the way the real app does: HMAC of the challenge.
+ *
+ *  `extra` adds the protocol handshake fields, so a status test can describe an
+ *  app that expects a newer extension than this one. */
+async function proofResponse(url, extra = {}) {
   const challenge = new URL(url).searchParams.get("challenge") || "";
   const keyBytes = new Uint8Array(TEST_KEY.match(/../g).map((h) => parseInt(h, 16)));
   const key = await crypto.subtle.importKey(
@@ -56,7 +59,7 @@ async function proofResponse(url) {
     ok: true,
     status: 200,
     headers: { get: (name) => (name === "X-VKMDownload-Proof" ? hex : null) },
-    json: async () => ({ app: "VKMDownload" }),
+    json: async () => ({ app: "VKMDownload", ...extra }),
   };
 }
 
@@ -317,16 +320,29 @@ describe("intercept fallback order", () => {
 // download onwards the placement dialog opened with a blank filename field.
 // The handover must retry briefly, then fall back to the URL's last segment.
 
-/** Full chrome stub plus a fetch that answers /settings and records /add. */
-function stubIntercept({ searchImpl, onAdd }) {
+/** Full chrome stub plus a fetch that answers /settings and records /add.
+ *
+ *  `policy` is the /settings body: an app from before the sendCookies /
+ *  incognito switches simply omits them, which is what the default here does.
+ *  `pingBody` adds the /ping protocol handshake for the status tests. */
+function stubIntercept({ searchImpl, onAdd, policy, pingBody } = {}) {
   const state = stubFullChrome();
-  globalThis.chrome.downloads.search = searchImpl;
+  // A download that already has a filename, so the retry loop stops on its
+  // first read and these tests do not wait the full 300ms.
+  globalThis.chrome.downloads.search =
+    searchImpl ||
+    (async () => [{ state: "in_progress", filename: "C:\\dl\\file.bin", totalBytes: 4096 }]);
   globalThis.chrome.storage.local.get = async () => ({ vkmPairKey: TEST_KEY });
+  let cookieReads = 0;
+  globalThis.chrome.cookies.getAll = async () => {
+    cookieReads += 1;
+    return [{ name: "session", value: "s3cret" }];
+  };
   const calls = [];
   globalThis.fetch = async (url, opts) => {
     const u = String(url);
     calls.push({ url: u, body: opts && opts.body });
-    if (u.includes("/ping")) return proofResponse(u);
+    if (u.includes("/ping")) return proofResponse(u, pingBody);
     if (u.endsWith("/pair")) {
       return { ok: true, status: 200, headers: { get: () => null }, json: async () => ({ key: TEST_KEY }) };
     }
@@ -335,7 +351,7 @@ function stubIntercept({ searchImpl, onAdd }) {
         ok: true,
         status: 200,
         headers: { get: () => null },
-        json: async () => ({ enabled: true, minSizeKb: 0, skipHosts: [] }),
+        json: async () => policy || { enabled: true, minSizeKb: 0, skipHosts: [] },
       };
     }
     if (u.endsWith("/add")) {
@@ -349,7 +365,7 @@ function stubIntercept({ searchImpl, onAdd }) {
     }
     throw new Error(`unexpected fetch: ${u}`);
   };
-  return { state, calls };
+  return { state, calls, cookieReads: () => cookieReads };
 }
 
 describe("intercept filename", () => {
@@ -416,10 +432,9 @@ describe("intercept filename", () => {
   });
 });
 
-// ------------------------------------------------- coverage: report/toggle/policy/own
+// ------------------------------------------------- coverage: report/policy/own
 // These pin the paths the earlier suites never asserted: the three report
-// branches, the toggle round trip (including the peer-check 403), the policy
-// cache TTL, and the own-download bookkeeping.
+// branches, the policy cache TTL, and the own-download bookkeeping.
 
 /** Full chrome stub: enough surface for background.js to register every
  *  listener, with the handlers captured for direct invocation. */
@@ -444,6 +459,9 @@ function stubFullChrome() {
     runtime: {
       onMessage: { addListener: (fn) => { state.msg = fn; } },
       onInstalled: { addListener: () => {} },
+      // The status message reports the extension's own version; the popup
+      // compares it with the app's minimum.
+      getManifest: () => ({ version: "1.0.3" }),
     },
   };
   return state;
@@ -480,53 +498,171 @@ describe("report", () => {
   });
 });
 
-describe("toggle", () => {
-  it("reports a peer-check 403 with the app's reason", async () => {
-    const state = stubFullChrome();
+// ------------------------------------------------- extension policy switches
+// The app owns the policy. These cover the two behavioural switches it sends,
+// including what an app from before them (no keys at all) must mean.
+
+describe("policy switches", () => {
+  it("fills the historical defaults for an app that does not send them", async () => {
+    stubChrome();
     globalThis.chrome.storage.local.get = async () => ({ vkmPairKey: TEST_KEY });
-    globalThis.fetch = async (url, opts) => {
+    globalThis.fetch = async (url) => {
       const u = String(url);
-      if (u.includes("/ping")) {
-        return proofResponse(u);
-      }
+      if (u.includes("/ping")) return proofResponse(u);
       if (u.endsWith("/pair")) {
         return { ok: true, status: 200, headers: { get: () => null }, json: async () => ({ key: TEST_KEY }) };
       }
-      if (u.endsWith("/settings") && opts && opts.method === "POST") {
-        return { ok: false, status: 403, headers: { get: () => null }, json: async () => ({ error: "已拒绝：非浏览器进程" }) };
-      }
       if (u.endsWith("/settings")) {
-        return { ok: true, status: 200, headers: { get: () => null }, json: async () => ({ enabled: true, minSizeKb: 0, skipHosts: [] }) };
+        return {
+          ok: true,
+          status: 200,
+          headers: { get: () => null },
+          json: async () => ({ enabled: true, minSizeKb: 1024, skipHosts: ["example.com"] }),
+        };
       }
       throw new Error(`unexpected fetch: ${u}`);
     };
-    rerequire();
-    assert.equal(typeof state.msg, "function", "onMessage listener must be registered");
 
-    const resp = await new Promise((resolve) => state.msg("toggle", {}, resolve));
-    assert.deepEqual(resp, { refused: true, error: "已拒绝：非浏览器进程" });
+    const policy = await ext.getPolicy(true);
+    assert.equal(policy.sendCookies, true, "an absent key must mean cookies on");
+    assert.equal(policy.incognito, false, "an absent key must mean incognito off");
+    assert.equal(policy.enabled, true);
+    assert.equal(policy.minSizeKb, 1024);
+    assert.deepEqual(policy.skipHosts, ["example.com"]);
   });
 
-  it("flips the live value and answers with the new one", async () => {
-    const state = stubFullChrome();
-    globalThis.chrome.storage.local.get = async () => ({ vkmPairKey: TEST_KEY });
-    globalThis.fetch = async (url, opts) => {
-      const u = String(url);
-      if (u.includes("/ping")) {
-        return proofResponse(u);
-      }
-      if (u.endsWith("/pair")) {
-        return { ok: true, status: 200, headers: { get: () => null }, json: async () => ({ key: TEST_KEY }) };
-      }
-      if (u.endsWith("/settings") && opts && opts.method === "POST") {
-        return { ok: true, status: 200, headers: { get: () => null }, json: async () => ({}) };
-      }
-      return { ok: true, status: 200, headers: { get: () => null }, json: async () => ({ enabled: true, minSizeKb: 0, skipHosts: [] }) };
-    };
+  it("keeps an explicit false/true and still defaults the others", () => {
+    const explicit = ext.normalizePolicy({ enabled: true, sendCookies: false, incognito: true });
+    assert.equal(explicit.sendCookies, false);
+    assert.equal(explicit.incognito, true);
+
+    const missing = ext.normalizePolicy({ enabled: true });
+    assert.equal(missing.sendCookies, true);
+    assert.equal(missing.incognito, false);
+    assert.equal(missing.minSizeKb, 0);
+    assert.deepEqual(missing.skipHosts, []);
+  });
+});
+
+describe("cookie handover policy", () => {
+  it("does not read or send cookies when the app turned them off", async () => {
+    const { state, calls, cookieReads } = stubIntercept({
+      policy: { enabled: true, minSizeKb: 0, skipHosts: [], sendCookies: false },
+    });
     rerequire();
 
-    const resp = await new Promise((resolve) => state.msg("toggle", {}, resolve));
-    assert.deepEqual(resp, { enabled: false }, "enabled:true must flip to false");
+    await state.created({ id: 11, url: "https://example.com/files/private.bin", totalBytes: 4096 });
+
+    const add = calls.find((c) => c.url.endsWith("/add"));
+    assert.ok(add, "the download must still be handed over");
+    assert.equal(JSON.parse(add.body).cookie, "", "no login session may be sent");
+    assert.equal(cookieReads(), 0, "the cookies must not even be read");
+  });
+
+  it("reads and sends them by default, including for an older app", async () => {
+    const { state, calls, cookieReads } = stubIntercept({
+      policy: { enabled: true, minSizeKb: 0, skipHosts: [] },
+    });
+    rerequire();
+
+    await state.created({ id: 12, url: "https://example.com/files/private.bin", totalBytes: 4096 });
+
+    const add = calls.find((c) => c.url.endsWith("/add"));
+    assert.ok(add);
+    assert.equal(JSON.parse(add.body).cookie, "session=s3cret");
+    assert.equal(cookieReads(), 1);
+  });
+});
+
+describe("incognito handover policy", () => {
+  it("leaves a private download to the browser by default", async () => {
+    const { state, calls } = stubIntercept(); // the default policy has no incognito key
+    rerequire();
+
+    await state.created({ id: 13, incognito: true, url: "https://example.com/a.bin", totalBytes: 4096 });
+
+    assert.equal(
+      calls.filter((c) => c.url.endsWith("/add")).length,
+      0,
+      "a private download must not be handed over",
+    );
+  });
+
+  it("takes it over when the app allows incognito", async () => {
+    const { state, calls } = stubIntercept({
+      policy: { enabled: true, minSizeKb: 0, skipHosts: [], incognito: true },
+    });
+    rerequire();
+
+    await state.created({ id: 14, incognito: true, url: "https://example.com/a.bin", totalBytes: 4096 });
+
+    assert.equal(calls.filter((c) => c.url.endsWith("/add")).length, 1);
+  });
+
+  it("still takes normal windows, whatever the incognito switch says", async () => {
+    const { state, calls } = stubIntercept();
+    rerequire();
+
+    await state.created({ id: 15, url: "https://example.com/a.bin", totalBytes: 4096 });
+
+    assert.equal(calls.filter((c) => c.url.endsWith("/add")).length, 1);
+  });
+});
+
+describe("popup status", () => {
+  it("carries the app's minimum version and warns when this build is older", async () => {
+    const { state } = stubIntercept({ pingBody: { protocol: 1, minExtensionVersion: "9.9.9" } });
+    rerequire();
+
+    const resp = await new Promise((resolve) => state.msg("status", {}, resolve));
+    assert.equal(resp.running, true);
+    assert.equal(resp.enabled, true);
+    assert.equal(resp.extVersion, "1.0.3");
+    assert.equal(resp.minExtensionVersion, "9.9.9");
+    assert.equal(resp.versionMismatch, true);
+  });
+
+  it("does not warn when the extension meets the minimum", async () => {
+    const { state } = stubIntercept({ pingBody: { protocol: 1, minExtensionVersion: "1.0.3" } });
+    rerequire();
+
+    const resp = await new Promise((resolve) => state.msg("status", {}, resolve));
+    assert.equal(resp.minExtensionVersion, "1.0.3");
+    assert.equal(resp.versionMismatch, false);
+  });
+
+  it("has no toggle any more: the settings belong to the app", () => {
+    const { state } = stubIntercept();
+    rerequire();
+
+    let answered = false;
+    const handled = state.msg("toggle", {}, () => {
+      answered = true;
+    });
+    assert.equal(handled, false, "the toggle message must no longer be handled");
+    assert.equal(answered, false, "and must not answer");
+  });
+});
+
+describe("popup is read-only", () => {
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const root = path.join(__dirname, "..");
+
+  it("renders a status line, not a switch, and points at the app", () => {
+    const html = fs.readFileSync(path.join(root, "popup.html"), "utf8");
+    assert.ok(!/id="toggle"/.test(html), "the popup must not render a toggle control");
+    assert.ok(html.includes("设置 → 浏览器扩展"), "the popup must say where the switch lives");
+    assert.ok(/id="verwarn"/.test(html), "the version warning line must exist");
+  });
+
+  it("never writes the settings over the endpoint", () => {
+    const popup = fs.readFileSync(path.join(root, "popup.js"), "utf8");
+    assert.ok(!popup.includes('"toggle"'), "popup.js must not ask for a toggle");
+
+    const background = fs.readFileSync(path.join(root, "background.js"), "utf8");
+    assert.ok(!background.includes('message === "toggle"'), "background.js must not handle a toggle");
+    assert.ok(!background.includes('"POST", "/settings"'), "background.js must not POST the settings");
   });
 });
 
