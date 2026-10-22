@@ -33,9 +33,17 @@ type Draft = Config & { verifyPeerProcess?: boolean };
  */
 function normalizeConfig(config: Config | null): Draft | null {
   if (!config) return null;
-  return Object.assign(new main.Config(), config, {
+  const draft = Object.assign(new main.Config(), config, {
     organizeGroups: config.organizeGroups ?? [],
   });
+  // The percent trigger does nothing at 0: manager.go hands it straight to the
+  // engine, which reads 0 as "off". A stored switch-on/0 pair therefore showed
+  // an enabled control that could never fire, so the editor opens it at the
+  // smallest useful value instead of leaving the invalid pair in place.
+  if (draft.resumeFlushByPct && draft.resumeFlushPct < 1) {
+    draft.resumeFlushPct = 10;
+  }
+  return draft;
 }
 
 /** A labelled switch row. */
@@ -628,13 +636,13 @@ export function SettingsPage({
           <span className="setting__text">
             <span className="setting__title">按百分比</span>
             <span className="setting__hint">
-              每下完百分之几写一次。跟上面启用的项谁先到谁写。改完下个任务生效。
+              每下完百分之几写一次，开启后至少 1%；留 0 会按 10% 处理（不会关闭触发器）。跟上面启用的项谁先到谁写。改完下个任务生效。
             </span>
           </span>
           <span className="field__row" style={{ flex: "0 0 auto" }}>
             <input
               type="number"
-              min={0}
+              min={1}
               max={100}
               step={1}
               style={{ width: 110 }}
@@ -652,6 +660,12 @@ export function SettingsPage({
                 onChange={(e) => {
                   const v = e.target.checked;
                   if (!v && !draft.resumeFlushBySize && !draft.resumeFlushByTime) return;
+                  // Turning it on while the value is 0 would leave a switch
+                  // that saves nothing; move it to a default that works.
+                  if (v && draft.resumeFlushPct < 1) {
+                    patch({ resumeFlushByPct: true, resumeFlushPct: 10 });
+                    return;
+                  }
                   patch({ resumeFlushByPct: v });
                 }}
               />
@@ -1008,7 +1022,7 @@ export function SettingsPage({
           <span className="setting__text">
             <span className="setting__title">检测间隔</span>
             <span className="setting__hint">
-              越短响应越快，但会稍微多占用一点 CPU。默认 800 毫秒。需先打开上面的监控才会生效。
+              越短响应越快，但会稍微多占用一点 CPU。默认 800 毫秒，允许 200–10000，低于 200 按 200 处理，清空或 0 按默认 800。需先打开上面的监控才会生效。
             </span>
           </span>
           <input
@@ -1050,7 +1064,7 @@ export function SettingsPage({
           <span className="setting__text">
             <span className="setting__title">清除下载记录与日志</span>
             <span className="setting__hint">
-              删掉任务列表与日志（含旧版本留下的副本）。**已下载的文件、你的设置、配对密钥不会被删。**
+              删掉任务列表与日志（含旧版本留下的副本）。<strong>已下载的文件、你的设置、配对密钥不会被删。</strong>
             </span>
           </span>
           <span className="field__row" style={{ flex: "0 0 auto" }}>

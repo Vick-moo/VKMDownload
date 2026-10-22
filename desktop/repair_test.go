@@ -685,7 +685,7 @@ func TestPeerCheckFailsClosedOnLookupError(t *testing.T) {
 	app := newTestApp(t)
 	stubPeer(t, "", false, errPeerCheckUnsupported)
 	if ok, _ := app.checkPeerProcess(peerReq()); ok {
-		t.Fatal("infrastructure failure must fail open, not lock the user out")
+		t.Fatal("infrastructure failure must fail closed: an unidentifiable caller is untrusted")
 	}
 }
 

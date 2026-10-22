@@ -65,10 +65,16 @@ export function formatSize(bytes: number, status?: TaskStatus): string {
  * Formats the progress cell: percentage and downloaded bytes together.
  *
  * When the total is unknown the percentage becomes "未知" instead of a fake
- * 0%; the downloaded count is real either way and stays visible.
+ * 0%; the downloaded count is real either way and stays visible. A completed
+ * task always reads 100.0% — the same decimal format as an in-flight row, so
+ * the number does not visibly change shape at the moment the download ends.
  */
-export function formatProgress(done: number, total: number): string {
-  const pct = formatPercent(done, total);
+export function formatProgress(
+  done: number,
+  total: number,
+  status?: TaskStatus,
+): string {
+  const pct = status === "completed" ? "100.0%" : formatPercent(done, total);
   return `${pct === "—" ? "未知" : pct} · ${formatBytes(done)}`;
 }
 

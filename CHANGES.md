@@ -3,6 +3,15 @@
 > 每次改完代码都在这里记一笔：日期、改了什么、为什么改。
 > 发版 / push 前看这份文件写 release notes。
 
+### 58. 显示与文案修正：5 个小问题（UNRELEASED，2026-10-22）
+- 隐私页说明里的 `**` 以前会原样显示成星号（界面不认 markdown），改成真正的 `<strong>`。
+- 剪贴板检测间隔 <200 以前被静默改回默认 800（用户想更快反而慢 8 倍），现在钳到 200；输入框提示写清 200–10000，清空或 0 按默认 800。
+- 「按百分比保存」开勾选但填 0 时，引擎只在 `SavePercent>0` 才生效，等于静默关闭；现在 `normalize` 把 ByPct+0 规范成 10%，前端 `min=1`、打开开关自动补 10，hint 写明"留 0 按 10% 处理（不会关闭触发器）"。
+- 已完成且 0 字节的文件：大小列 `0 B`、进度列「未知 · 0 B」两处对不上；现在统一 `100.0% · 0 B`，空文件进度条也画满、`aria-valuenow=100`。
+- `peercheck.go` 顶部注释还写着"基础设施失败放行"，实际代码早就是 fail-closed；只改注释（行为未变），并同步 `repair_test.go` 里一句失败文案。
+- 验收：desktop `go vet` / `go test`（36.6s）、`GOOS=linux go vet`、前端 `tsc --noEmit` + vitest 46/46、`git diff --check` 干净。
+- 未 push、未发版；本批无真机验证（设置页交互与剪贴板轮询需用户实际点一下）。
+
 ### 57. 询问弹窗与进度显示：6 个修复（UNRELEASED，2026-10-21）
 - G2 连续多个下载时，第二个及以后的确认窗文件名为空：Chrome 在 `onCreated` 时常常还没填 `filename`，扩展只做一次 `downloads.search`，第二笔流程更快就输掉 race；应用 ask 分支也没有兜底。现在扩展最多重试 3 次（150ms 间隔）、拿到即停、仍空则用 URL 尾段；应用空名时从 URL 路径派生占位名（无扩展名 → `download`）。验收：`TestLocalAPIAddAskNamesAnUnnamedHandover`（5 例）、扩展 `intercept filename`（3 例，35/35）。
 - G3 "按类型自动整理" + "每次询问位置" 同时开时，弹窗默认目录不是分类目录：ask 确认创建的任务被标记 `manual`，而整理有 `!manual` 闸门，这条路径根本不整理；弹窗也只读 `downloadDir`。现在弹窗打开时按文件名预填分类目录（`DefaultDestFor`，Go 侧唯一真源），用户改过路径就不再覆盖，这类任务完成后仍不搬（语义明确），弹窗内加一行说明。验收：`TestDefaultDestFor`（6 例）。

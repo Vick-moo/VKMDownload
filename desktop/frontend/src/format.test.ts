@@ -116,6 +116,14 @@ describe("formatProgress", () => {
     expect(formatProgress(640 * 1024 * 1024, 0)).toBe("未知 · 640 MiB");
     expect(formatProgress(0, -1)).toBe("未知 · 0 B");
   });
+  it("renders a completed task as 100.0%, including an empty file", () => {
+    // Same decimal format as an in-flight row, so completion does not make the
+    // percentage change shape. A verified 0-byte file is finished even though
+    // formatPercent cannot divide by its zero total.
+    expect(formatProgress(0, 0, "completed")).toBe("100.0% · 0 B");
+    expect(formatProgress(10, -1, "completed")).toBe("100.0% · 10 B");
+    expect(formatProgress(10, 10, "completed")).toBe("100.0% · 10 B");
+  });
 });
 
 describe("formatWhen", () => {

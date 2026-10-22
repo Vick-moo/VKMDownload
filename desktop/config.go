@@ -109,7 +109,9 @@ type Config struct {
 	ClipboardAutoStart bool `json:"clipboardAutoStart"`
 	// ClipboardConfirm asks before acting on a captured URL.
 	ClipboardConfirm bool `json:"clipboardConfirm"`
-	// ClipboardIntervalMs is the polling period.
+	// ClipboardIntervalMs is the polling period, clamped by normalize to
+	// [200, 10000] ms. The floor is honoured rather than replaced by the
+	// default: a smaller number means "poll faster", not "reset".
 	ClipboardIntervalMs int `json:"clipboardIntervalMs"`
 
 	// RefreshRate controls how often progress numbers update: fast (250ms),
@@ -126,7 +128,9 @@ type Config struct {
 	// trade-off on the time axis.
 	ResumeFlushMs int `json:"resumeFlushMs"`
 	// ResumeFlushPct adds a size-relative trigger: flush at least every N% of
-	// the total (0 disables). Unknown total disables it too.
+	// the total. Unknown total disables it too. With ResumeFlushByPct on and
+	// no value (0, or an empty input box), normalize supplies the 10% default;
+	// 0 with the switch off stays off.
 	ResumeFlushPct int `json:"resumeFlushPct"`
 	// The three By* switches let the user run any subset of the triggers.
 	// At least one must stay on (enforced in normalize).
@@ -258,8 +262,11 @@ func (c *Config) normalize() {
 	if c.ExtensionMinSizeKB > 1024*1024 {
 		c.ExtensionMinSizeKB = 1024 * 1024
 	}
+	// Clamp to the floor rather than to the 800ms default: typing 100 to poll
+	// faster used to make the app eight times slower, with no explanation. The
+	// floor is the smallest period the poller is allowed to run at.
 	if c.ClipboardIntervalMs < 200 {
-		c.ClipboardIntervalMs = d.ClipboardIntervalMs
+		c.ClipboardIntervalMs = 200
 	}
 	if c.ClipboardIntervalMs > 10000 {
 		c.ClipboardIntervalMs = 10000
@@ -295,6 +302,13 @@ func (c *Config) normalize() {
 	}
 	if c.ResumeFlushPct > 100 {
 		c.ResumeFlushPct = 100
+	}
+	// The switch and the value have to agree: the engine reads 0 as "off", so
+	// ticking "按百分比保存" while the field was empty (or 0) left the trigger
+	// silently disabled. An enabled trigger with no value takes the 10% default;
+	// an explicit 0 with the box unticked still means off.
+	if c.ResumeFlushByPct && c.ResumeFlushPct <= 0 {
+		c.ResumeFlushPct = 10
 	}
 	// At least one save trigger must stay on: with everything off a crash
 	// would silently discard the whole transfer. Force the time trigger

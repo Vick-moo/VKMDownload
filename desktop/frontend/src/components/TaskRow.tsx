@@ -55,8 +55,12 @@ export const TaskRow = memo(function TaskRow({
   onError,
 }: Props): JSX.Element {
   const [confirmRemove, setConfirmRemove] = useState(false);
-  const pct =
-    task.size > 0 ? Math.min(100, (task.downloaded / task.size) * 100) : 0;
+  const completed = task.status === "completed";
+  const pct = completed
+    ? 100
+    : task.size > 0
+      ? Math.min(100, (task.downloaded / task.size) * 100)
+      : 0;
 
   const barClass = [
     "progress",
@@ -151,15 +155,22 @@ export const TaskRow = memo(function TaskRow({
               role="progressbar"
               aria-valuemin={0}
               aria-valuemax={100}
-              // An unknown total is indeterminate: leave valuenow off rather
-              // than announcing a 0% the transfer has not actually reached.
-              aria-valuenow={task.size > 0 ? Math.round(pct) : undefined}
+              // A completed row is full even when its verified size is 0; an
+              // unfinished row with an unknown total stays indeterminate
+              // rather than announcing a 0% it has not actually reached.
+              aria-valuenow={
+                completed || task.size > 0 ? Math.round(pct) : undefined
+              }
               aria-label={`${task.name} 进度`}
             >
               <div className="progress__segment" style={{ width: `${pct}%` }} />
             </div>
             <span className="num task__meta-primary">
-              {formatProgress(task.downloaded, task.size)}
+              {formatProgress(
+                task.downloaded,
+                task.size,
+                task.status as TaskStatus,
+              )}
             </span>
           </>
         ) : (

@@ -78,10 +78,15 @@ func (a *App) peerCheckRequired() bool {
 
 // checkPeerProcess confirms the loopback peer is a genuine signed browser.
 //
-// Infrastructure failures (unparseable address, vanished connection row,
-// exited process) fail OPEN with a log line: the connection is alive in the
-// handler, so these mean a transient lookup race rather than an attacker.
-// A known non-browser image or a bad signature fails CLOSED.
+// Every path that cannot establish who the caller is fails CLOSED: an
+// unparseable or non-loopback remote address, a socket whose owning process
+// cannot be found, an image that cannot be read, a name outside the browser
+// list, a path outside a browser install root, or a signature the cache cannot
+// vouch for. There is no fail-open exception for "infrastructure" trouble — a
+// lookup race and an attacker are indistinguishable from here, and the peer
+// check is a security control, not a convenience: an unidentifiable caller is
+// an untrusted caller. The refusal is a 403; the download simply stays in the
+// browser.
 func (a *App) checkPeerProcess(r *http.Request) (bool, string) {
 	host, portStr, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
