@@ -17,7 +17,7 @@ import (
 )
 
 // appVersion is what Version() reports and the browser extension displays.
-const appVersion = "0.2.8"
+const appVersion = "0.2.9"
 
 // maxDroppedRead bounds how much of a dropped file is read looking for a
 // link: shortcuts and notes are tiny, and the bridge should not carry

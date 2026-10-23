@@ -3,7 +3,23 @@
 > 每次改完代码都在这里记一笔：日期、改了什么、为什么改。
 > 发版 / push 前看这份文件写 release notes。
 
-### 62. 波 D/F：扩展开关、弹窗只读、版本提示、托盘菜单（UNRELEASED，2026-10-22）
+### 63. 0.2.9：连接修复与 1.0.4 扩展（2026-10-23）
+- 版本：应用 0.2.8 → **0.2.9**（`desktop/app.go`、`desktop/wails.json`），扩展 1.0.3 → **1.0.4**（`extension/manifest.json`、`extension/package.json`）；`minExtensionVersion` 改为 **1.0.4**——只提示、不拒绝，旧扩展仍能下载，弹窗与设置页会显示升级提示。
+- `c7314cd` 弹窗与列表兜底：确认框被浏览器压在后面、连续下载第二个起文件名为空、未知大小显示成 0 B、「开始选中」把"跳过"说成"继续失败"——分别用强制前台 + 1.2s topmost、扩展 3 次重试 + URL 尾段占位名、未知显示"未知"、按状态分拣汇总修复；验收：`TestRaiseWindowWithoutATarget`、`TestLocalAPIAddAskNamesAnUnnamedHandover`、`resumeTargets.test.ts`。
+- `692fca4` 设置与显示细节：剪贴板间隔 <200 被静默改回 800、按百分比保存填 0 等于静默关闭、已完成 0 字节文件两处口径不一致——分别钳到 200、把 0 规范成 10%、统一 `100.0% · 0 B`；验收：`format.test.ts`、`formatProgress` 空文件用例。
+- `a274954` 配置项与前端交互：新增历史保留期（0=永久）、日志开关、开机自启、关机延迟（0=立即）、完成后动作互斥；任务行右键菜单与排序/筛选/侧栏记忆；验收：`autostart_test.go`（注入 fake，不碰真实注册表）、`contextMenu.test.ts`。
+- `f9945d8` 更新器与清理：更新状态新增哈希/大小/校验字段与备份信息，确认成功后不再自动删 `.bak`（保留"还原旧版本"的还原点），`.failed-*`/`.new` 统一清理，清除记录前二次确认；验收：`TestUpdateStateCarriesVerificationAndBackup`、`update_artifacts_test.go`。
+- `32d2ccd` 安全面板：`PairingInfo`/`ResetPairing`、被拒诊断 ring（20 条，不落盘）、Origin 锁定（空=原行为）、`/ping` 协议与最低版本握手（只提示）、`ExtensionStatus`、`POST /settings` 改 405；`statusRecorder` 只包 `/add`、`/pair`，不再吞掉 `http.Flusher`；验收：`api_origin_test.go`、`api_extension_test.go`。
+- `1047896` 扩展与托盘：`extensionSendCookies`（默认开）/`extensionIncognito`（默认关），应用端在 `sendCookies=false` 时入队前丢弃 Cookie；弹窗改只读并显示扩展版本与最低版本；托盘显示窗口/暂停全部/继续全部/限速/退出；验收：扩展 `node --test`、`tray_test.go`。
+- `5df6b8b` Chrome 155 无 Origin：新版 Chrome 为扩展自己的 fetch 不再发 `Origin`，旧规则把 `/pair`、`/add` 全拒成 403——改为用 `Sec-Fetch-Dest`/`Sec-Fetch-Site` 识别扩展 fetch，网页 Origin 与 document/iframe/图片等导航仍拒；无 Origin 的 `/add` 仍必须过 HMAC、`/pair` 仍必须过 peer 检查；拒绝原因写调试日志（头值截到 64 字符）；验收：`TestGuardAcceptsChromeExtensionFetchWithoutOrigin`、`TestGuardRejectsNavigationAndSubresourcesWithoutOrigin`、`TestGuardStillRejectsAWebPage`、`TestGuardLockedAppRejectsRequestsWithoutOrigin`。
+- `f8d4605` 分批探测：11 个端口同时探测会被 Chrome 每主机 6 连接上限饿死，改成 18888 先探、其余每批 4 个；**已被 `eb6e142` 取代**，保留历史。
+- `eb6e142` 串行探测与诊断：分批在真机上仍会漏（应用自己的应答排在兄弟请求后面），改为 18888 → 18898 严格串行、ping 成功才 prove；`provePort` 失败时 `console.warn` 打出 status、有无 proof 头、challenge 前 8 字符、key 前 8 字符（**不打印完整 key/proof**）；验收：`pairing.test.js` 端口发现套件（含"失败后继续下一个端口"）。
+- `142a4c4` HMAC 对齐：`proofFor` 以前对 64 个 hex **字符**做 HMAC，扩展是对 hex **解码后的 32 字节**做，导致 `/ping` 的 proof 永远对不上、扩展认为应用没运行、所有签名 `/add` 被拒；现在先 `hex.DecodeString` 再做 HMAC，非法/空 key 返回空串，`requestAuthentic` 对空签名与旧 ASCII-key 签名都拒绝；验收：`TestProofForMatchesTheExtensionHMACVector`（固定向量）、`TestPingProofUsesTheDecodedKey`、`TestRequestAuthenticUsesTheExtensionProof`。
+- `b429780` 进度两行：进度列由 `45.2% · 640 MiB` 拆成上下两行，数字与单位都 `white-space: nowrap`（132px 下不再把 `194` 和 `MiB` 拆开）；未知大小第一行"未知"、第二行已下载量；`aria-valuenow` 在已知总量或已完成时给出，未知总量保持 indeterminate；验收：`progressParts` 3 例、vitest 76/76。
+- 本轮验收（独立检查）：根 `go vet` / `go test ./... -count=1`（72.3s）、engine `-race`（66.1s）、desktop `go vet` / `go test`（54.2s）、desktop `-race`（57.5s）、根与 desktop `GOOS=linux go vet`、前端 `tsc --noEmit` + vitest **76/76**、扩展 `node --test` **49/49**、`git diff --check` 干净。
+- 产物：`desktop/build/bin/VKMDownload.exe`、`VKMDownload-extension-1.0.4.zip`、`VKMDownload-source.zip` 同放 `desktop/build/bin/`；**未 push、未创建 GitHub release**。
+
+### 62. 波 D/F：扩展开关、弹窗只读、版本提示、托盘菜单（0.2.9，2026-10-22）
 - 新字段 `extensionSendCookies`（默认 **true**）与 `extensionIncognito`（默认 **false**）；`GET /settings` 的 policy 即使 false 也下发，扩展侧可区分"关掉了"和"旧应用没这个字段"。
 - 扩展：`sendCookies=false` 时**不读也不发** Cookie（不调用 `chrome.cookies`），交接照常；`incognito=true` 才接管无痕窗口，默认与旧行为一致。旧应用缺字段时按 true/false 回退。
 - popup 只读化：删除开关与 `toggle` 消息，改为"接管已开启/已暂停" + "在 VKMDownload → 设置 → 浏览器扩展 中修改"；不再 POST `/settings`（修掉 405 的误导文案）。popup 显示扩展版本与应用要求的最低版本，不匹配时黄字提示。
@@ -12,7 +28,7 @@
 - 验收：desktop `go vet` / `go test`（36.9s）、`GOOS=linux go vet`、扩展 `node --test` **45/45**、前端 `tsc --noEmit`；`git diff --check` 干净。
 - 已知边界：旧 popup（未重载扩展）点开关仍会收到 405；无痕接管还要求浏览器允许扩展在无痕模式运行；托盘只有纯函数测试，真机未点。
 
-### 61. 波 C + E：安全面板与设置页接线（UNRELEASED，2026-10-22）
+### 61. 波 C + E：安全面板与设置页接线（0.2.9，2026-10-22）
 - **S1 配对面板**：新增 `PairingInfo()`（`paired/fingerprint/port/keyPath`）与 `ResetPairing()`（幂等）；指纹是 `sha256(key)` 前 8 字节，**绝不返回 key**。key 是全局一份，不能只断开某一个浏览器。
 - **S3 被拒诊断**：`PeerDiagnostics()` 返回内存 ring（20 条，最新在前）：时间、exe basename、原因（`bad_addr/not_loopback/bad_port/no_owner/no_image/not_allowlisted/not_in_install_root/bad_signature/origin_locked`）。不落盘、不改变判定。
 - **S5 禁扩展改设置**：`POST /settings` 改为 405（"设置只能由应用自身修改"），GET 不变。
@@ -25,7 +41,7 @@
 - 验收：desktop `go vet` / `go test`（35.8s）、`GOOS=linux go vet`、前端 `tsc` + vitest **73/73**、扩展 35/35、`git diff --check` 干净。
 - 待办（下一波）：扩展 `popup.js` 的开关仍会 POST `/settings`，现在会收到 405 并显示误导性文案；波 D 要把它改成只读。
 
-### 60. 波 B：更新器可读性与备份策略 + P3 二次确认（UNRELEASED，2026-10-22）
+### 60. 波 B：更新器可读性与备份策略 + P3 二次确认（0.2.9，2026-10-22）
 - `UpdateStatus` / `updateState` 新增 6 个字段：`digestPresent`、`sizeMatched`、`verified`、`backupAvailable`、`backupVersion`、`backupSize`。JSON 带 `omitempty`（前端按 `?? false` 渲染）；`ApplyUpdate` 落盘，启动 `hydrateUpdateStatus` 读回。校验强度与阈值未改。
 - 新 binding：`DeleteUpdateBackup()`、`UpdateBackupInfo() UpdateBackup{available,version,size,path}`。
 - **语义变化**：确认成功的更新不再自动删除 `.bak` 与记录——它们就是"还原旧版本"的还原点，只有用户点删除才删。代价是备份长期占约 13MB/份。
@@ -34,7 +50,7 @@
 - 验收：desktop `go vet` / `go test`（37.4s）、`GOOS=linux go vet`、前端 `tsc` + vitest 67/67、`git diff --check` 干净。
 - 注意：校验结果只在 `ApplyUpdate` 时落盘（"下载完但没应用"不记录，避免被误判为"上次更新没开始"）；前端波 E 要接 `DeleteUpdateBackup`/`UpdateBackupInfo` 才有入口。
 
-### 59. 波 A：配置项与前端交互（UNRELEASED，2026-10-22）
+### 59. 波 A：配置项与前端交互（0.2.9，2026-10-22）
 - 新增 4 个设置字段：`historyRetentionDays`（默认 90，**0=永久**，负数回 90）、`loggingEnabled`（默认开）、`launchAtLogin`（默认**开**）、`shutdownDelaySeconds`（默认 60，**0=立即**，负数回 60）。
 - 开机自启：写 `HKCU\...\Run` 值 `VKMDownload`；值不变不写、关闭时立即删（不等下次启动）、读失败不盲写。测试用注入 fake + `TestMain`，整个套件不碰真实注册表；真后端只有一个只读映射测试。
 - 日志开关：`debugLog` 开头用原子量闸门（不用 `Config()`，避免 `loadConfig` 持锁时死锁）；关闭后不建目录、不建文件。**更新助手进程的日志不受此开关控制**（遗留，待下一批）。
@@ -44,18 +60,18 @@
 - 前端：右键任务行 = 按勾选框语义选中该行 + 菜单（开始/继续、暂停、打开目录、复制链接、删除；不可用项置灰，菜单贴边自动收）；排序、筛选、侧栏折叠存 localStorage，非法值回默认。
 - 验收：desktop `go vet` / `go test`（35.2s）、`GOOS=linux go vet`、前端 `tsc --noEmit` + vitest 67/67、`git diff --check` 干净。
 - 注意：`wailsjs/go/models.ts` 是生成物，波 E 改设置页前必须先 `wails generate module`，否则前端看不到新字段。
-- 未 push、未发版；本批无真机验证（注册表写入只验证了 fake，实际开机自启需真机试一次）。
+- 随 0.2.9 发布；本批无真机验证（注册表写入只验证了 fake，实际开机自启需真机试一次）。
 
-### 58. 显示与文案修正：5 个小问题（UNRELEASED，2026-10-22）
+### 58. 显示与文案修正：5 个小问题（0.2.9，2026-10-22）
 - 隐私页说明里的 `**` 以前会原样显示成星号（界面不认 markdown），改成真正的 `<strong>`。
 - 剪贴板检测间隔 <200 以前被静默改回默认 800（用户想更快反而慢 8 倍），现在钳到 200；输入框提示写清 200–10000，清空或 0 按默认 800。
 - 「按百分比保存」开勾选但填 0 时，引擎只在 `SavePercent>0` 才生效，等于静默关闭；现在 `normalize` 把 ByPct+0 规范成 10%，前端 `min=1`、打开开关自动补 10，hint 写明"留 0 按 10% 处理（不会关闭触发器）"。
 - 已完成且 0 字节的文件：大小列 `0 B`、进度列「未知 · 0 B」两处对不上；现在统一 `100.0% · 0 B`，空文件进度条也画满、`aria-valuenow=100`。
 - `peercheck.go` 顶部注释还写着"基础设施失败放行"，实际代码早就是 fail-closed；只改注释（行为未变），并同步 `repair_test.go` 里一句失败文案。
 - 验收：desktop `go vet` / `go test`（36.6s）、`GOOS=linux go vet`、前端 `tsc --noEmit` + vitest 46/46、`git diff --check` 干净。
-- 未 push、未发版；本批无真机验证（设置页交互与剪贴板轮询需用户实际点一下）。
+- 随 0.2.9 发布；本批无真机验证（设置页交互与剪贴板轮询需用户实际点一下）。
 
-### 57. 询问弹窗与进度显示：6 个修复（UNRELEASED，2026-10-21）
+### 57. 询问弹窗与进度显示：6 个修复（0.2.9，2026-10-21）
 - G2 连续多个下载时，第二个及以后的确认窗文件名为空：Chrome 在 `onCreated` 时常常还没填 `filename`，扩展只做一次 `downloads.search`，第二笔流程更快就输掉 race；应用 ask 分支也没有兜底。现在扩展最多重试 3 次（150ms 间隔）、拿到即停、仍空则用 URL 尾段；应用空名时从 URL 路径派生占位名（无扩展名 → `download`）。验收：`TestLocalAPIAddAskNamesAnUnnamedHandover`（5 例）、扩展 `intercept filename`（3 例，35/35）。
 - G3 "按类型自动整理" + "每次询问位置" 同时开时，弹窗默认目录不是分类目录：ask 确认创建的任务被标记 `manual`，而整理有 `!manual` 闸门，这条路径根本不整理；弹窗也只读 `downloadDir`。现在弹窗打开时按文件名预填分类目录（`DefaultDestFor`，Go 侧唯一真源），用户改过路径就不再覆盖，这类任务完成后仍不搬（语义明确），弹窗内加一行说明。验收：`TestDefaultDestFor`（6 例）。
 - G1 浏览器点下载时确认框停在浏览器后面：`BringToFront` 原来把 topmost 开一瞬间就关，且 Windows 前台锁拒绝 `SetForegroundWindow` 时没人管。现在用 `AttachThreadInput` + `AllowSetForegroundWindow` + `SetForegroundWindow`/`SetFocus` 强激活，失败则 `FlashWindowEx` 闪任务栏；同时保持 1.2 秒 topmost（原子 generation 防止旧定时器关掉新的）。验收：`TestRaiseWindowWithoutATarget`、`TestHoldTopmostReleasesAndRespectsANewerHold`（`-race`）。
@@ -65,7 +81,7 @@
 - 验收：根 `go vet` / `go test ./...`（47.6s）、engine `-race`（65.7s）、desktop `go vet` / `go test`（35.9s）、`GOOS=linux go vet`、前端 `tsc --noEmit` + vitest 45/45、扩展 35/35 全绿；合并审查确认三路交叉处无冲突。
 - 已知边界：completed 的 0 字节文件两列口径不一致（`0 B` / `未知 · 0 B`）；无扩展名 URL 的占位名风格不同（`123` vs `download`），功能无影响。
 - **扩展需要重新加载**（`background.js` 改了），不需要重新配对。
-- 未 push、未发版；本批未做真机验证（需用户点浏览器下载确认 G1/G2）。
+- 随 0.2.9 发布；本批未做真机验证（需用户点浏览器下载确认 G1/G2）。
 
 ### 50. 审计 A2 批：引擎杂项 + 命令行（UNRELEASED）
 - P2-3 拒 HEAD 的服务器不再傻等：HEAD 回 405/501/403 以前被当作"暂时性"，会再重试 3 次、每次间隔翻倍，共约 3.5 秒才去发第一个真正能用的 GET。现在 HEAD 被拒即放弃，直接走 GET 探测。验收：`TestProbeNoHeadMakesExactlyOneHead`（HEAD 恰好 1 次、探针 < 0.5 秒）、`TestHeadUnavailableIsNotRetryable`（整次下载也只发 1 个 HEAD）。

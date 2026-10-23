@@ -1,6 +1,6 @@
 {
   "name": "vkmdownload-extension",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "private": true,
   "description": "VKMDownload's browser extension: hands browser downloads to the desktop app.",
   "scripts": {

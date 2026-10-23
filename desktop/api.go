@@ -36,7 +36,7 @@ const (
 // download, because refusing would break users who cannot update instantly.
 const (
 	extensionProtocol   = 1
-	minExtensionVersion = "1.0.3"
+	minExtensionVersion = "1.0.4"
 	// extVersionHeader carries the extension's version on /add. A header rather
 	// than a query parameter: /add already posts a JSON body, and a query string
 	// would be one more thing the pairing proof has to cover.
