@@ -1338,6 +1338,31 @@ body.resizing {
   color: var(--text-primary);
 }
 
+/* The progress cell is always two lines: percentage above, downloaded bytes
+   below. nowrap keeps a unit from being split away from its number, which is
+   what produced "194" and "MiB" on separate lines at 132px. */
+.task__progress {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  line-height: 16px;
+  white-space: nowrap;
+}
+
+.task__pct {
+  color: var(--text-primary);
+}
+
+.task__bytes {
+  color: var(--text-secondary);
+}
+
+.task__pct,
+.task__bytes {
+  white-space: nowrap;
+}
+
 .task__error {
   grid-column: 1 / -1;
   font-size: 12px;

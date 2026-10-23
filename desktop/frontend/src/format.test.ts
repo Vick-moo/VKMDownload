@@ -8,6 +8,7 @@ import {
   formatSize,
   formatSpeed,
   formatWhen,
+  progressParts,
 } from "./format";
 
 describe("formatBytes", () => {
@@ -97,6 +98,33 @@ describe("formatSize", () => {
   it("formats a known size with binary units", () => {
     expect(formatSize(1536, "downloading")).toBe("1.5 KiB");
     expect(formatSize(1073741824, "completed")).toBe("1.0 GiB");
+  });
+});
+
+describe("progressParts", () => {
+  it("splits a known download into percentage and bytes", () => {
+    expect(
+      progressParts(194 * 1024 ** 2, 500 * 1024 ** 2),
+    ).toEqual({ pct: "38.8%", bytes: "194 MiB" });
+  });
+
+  it("uses 未知 for an unknown total", () => {
+    expect(progressParts(194 * 1024 ** 2, -1)).toEqual({
+      pct: "未知",
+      bytes: "194 MiB",
+    });
+    expect(progressParts(0, 0)).toEqual({ pct: "未知", bytes: "0 B" });
+  });
+
+  it("renders a completed task as 100.0%, including an empty file", () => {
+    expect(progressParts(0, 0, "completed")).toEqual({
+      pct: "100.0%",
+      bytes: "0 B",
+    });
+    expect(progressParts(10, -1, "completed")).toEqual({
+      pct: "100.0%",
+      bytes: "10 B",
+    });
   });
 });
 

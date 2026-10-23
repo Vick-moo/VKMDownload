@@ -11,13 +11,12 @@ import { ClipboardSetText } from "../../wailsjs/runtime/runtime";
 import { api } from "../api";
 import { clampMenuPosition, contextActions } from "../contextMenu";
 import {
-  formatBytes,
   formatEta,
-  formatProgress,
   formatSize,
   formatSpeed,
   formatWhen,
   ellipsizeMiddle,
+  progressParts,
 } from "../format";
 import { STATUS_LABEL, STATUS_TONE, displayURL, urlTail } from "../types";
 import type { TaskStatus, TaskView } from "../types";
@@ -230,6 +229,11 @@ export const TaskRow = memo(function TaskRow({
     : task.size > 0
       ? Math.min(100, (task.downloaded / task.size) * 100)
       : 0;
+  const progress = progressParts(
+    task.downloaded,
+    task.size,
+    task.status as TaskStatus,
+  );
 
   const barClass = [
     "progress",
@@ -364,33 +368,27 @@ export const TaskRow = memo(function TaskRow({
 
       <div className="task__cell task__cell--center task__meta">
         {PROGRESSED.includes(task.status as TaskStatus) ? (
-          <>
-            <div
-              className={barClass}
-              role="progressbar"
-              aria-valuemin={0}
-              aria-valuemax={100}
-              // A completed row is full even when its verified size is 0; an
-              // unfinished row with an unknown total stays indeterminate
-              // rather than announcing a 0% it has not actually reached.
-              aria-valuenow={
-                completed || task.size > 0 ? Math.round(pct) : undefined
-              }
-              aria-label={`${task.name} 进度`}
-            >
-              <div className="progress__segment" style={{ width: `${pct}%` }} />
-            </div>
-            <span className="num task__meta-primary">
-              {formatProgress(
-                task.downloaded,
-                task.size,
-                task.status as TaskStatus,
-              )}
-            </span>
-          </>
-        ) : (
-          <span className="num">{formatBytes(task.downloaded)}</span>
-        )}
+          <div
+            className={barClass}
+            role="progressbar"
+            aria-valuemin={0}
+            aria-valuemax={100}
+            // A completed row is full even when its verified size is 0; an
+            // unfinished row with an unknown total stays indeterminate
+            // rather than announcing a 0% it has not actually reached.
+            aria-valuenow={
+              completed || task.size > 0 ? Math.round(pct) : undefined
+            }
+            aria-valuetext={`${progress.pct}，${progress.bytes}`}
+            aria-label={`${task.name} 进度`}
+          >
+            <div className="progress__segment" style={{ width: `${pct}%` }} />
+          </div>
+        ) : null}
+        <span className="task__progress">
+          <span className="num task__pct">{progress.pct}</span>
+          <span className="num task__bytes">{progress.bytes}</span>
+        </span>
       </div>
 
       <div className="task__cell task__cell--center task__meta">

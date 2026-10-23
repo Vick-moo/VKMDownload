@@ -61,21 +61,45 @@ export function formatSize(bytes: number, status?: TaskStatus): string {
   return formatBytes(bytes);
 }
 
+/** The two lines of the task row's progress cell. */
+export interface ProgressParts {
+  /** First line: percentage, or "未知" when the total is unknown. */
+  pct: string;
+  /** Second line: bytes downloaded. */
+  bytes: string;
+}
+
 /**
- * Formats the progress cell: percentage and downloaded bytes together.
+ * Splits progress into the two lines the task row renders.
  *
- * When the total is unknown the percentage becomes "未知" instead of a fake
- * 0%; the downloaded count is real either way and stays visible. A completed
- * task always reads 100.0% — the same decimal format as an in-flight row, so
- * the number does not visibly change shape at the moment the download ends.
+ * A completed task always reads 100.0% — the same decimal format as an
+ * in-flight row, so the number does not visibly change shape at the moment the
+ * download ends. An unknown total becomes "未知" rather than a fake 0%.
+ */
+export function progressParts(
+  done: number,
+  total: number,
+  status?: TaskStatus,
+): ProgressParts {
+  const raw = status === "completed" ? "100.0%" : formatPercent(done, total);
+  return {
+    pct: raw === "—" ? "未知" : raw,
+    bytes: formatBytes(done),
+  };
+}
+
+/**
+ * Formats the progress cell as one string, retained for tests and any caller
+ * that still wants a single line. The task list itself uses progressParts so
+ * the number and its unit cannot wrap apart.
  */
 export function formatProgress(
   done: number,
   total: number,
   status?: TaskStatus,
 ): string {
-  const pct = status === "completed" ? "100.0%" : formatPercent(done, total);
-  return `${pct === "—" ? "未知" : pct} · ${formatBytes(done)}`;
+  const { pct, bytes } = progressParts(done, total, status);
+  return `${pct} · ${bytes}`;
 }
 
 /** Cached "today": the stamp is compared per rendered row, and rebuilding two
