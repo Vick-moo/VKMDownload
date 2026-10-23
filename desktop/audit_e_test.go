@@ -79,15 +79,22 @@ func TestCorruptPairKeyIsReplaced(t *testing.T) {
 
 // TestProofDependsOnKeyAndChallenge pins the primitive: same challenge and key
 // give the same answer, any change gives a different one.
+//
+// Keys are hex on the wire (the extension decodes them before signing), so the
+// primitive is exercised with hex keys, like every real one; the length is not
+// what this property is about.
 func TestProofDependsOnKeyAndChallenge(t *testing.T) {
-	a := proofFor("key-one", "challenge")
-	if a != proofFor("key-one", "challenge") {
+	const keyOne = "6b65792d6f6e65" // hex of "key-one"
+	const keyTwo = "6b65792d74776f" // hex of "key-two"
+
+	a := proofFor(keyOne, "challenge")
+	if a != proofFor(keyOne, "challenge") {
 		t.Error("the proof is not deterministic")
 	}
-	if a == proofFor("key-two", "challenge") {
+	if a == proofFor(keyTwo, "challenge") {
 		t.Error("a different key produced the same proof")
 	}
-	if a == proofFor("key-one", "challenge2") {
+	if a == proofFor(keyOne, "challenge2") {
 		t.Error("a different challenge produced the same proof")
 	}
 	if len(a) != 64 {

@@ -122,8 +122,21 @@ func validPairKey(k string) bool {
 }
 
 // proofFor computes the answer the extension must see for a challenge.
+//
+// The key is the 64-character hex form of 32 random bytes, and the HMAC key is
+// those decoded bytes — not the 64 ASCII characters. The extension decodes the
+// hex before signing (crypto.subtle with the bytes of `key.match(/../g)`), so
+// using the string bytes here produced a proof that never matched: /ping
+// answered 200 with the wrong proof, findApp gave up on a healthy app, and every
+// signed /add was refused, while the app's own tests still passed because the
+// test signer used the same wrong function. Do not "simplify" this back to
+// []byte(key).
 func proofFor(key, challenge string) string {
-	mac := hmac.New(sha256.New, []byte(key))
+	raw, err := hex.DecodeString(key)
+	if err != nil || len(raw) == 0 {
+		return ""
+	}
+	mac := hmac.New(sha256.New, raw)
 	mac.Write([]byte(challenge))
 	return hex.EncodeToString(mac.Sum(nil))
 }
